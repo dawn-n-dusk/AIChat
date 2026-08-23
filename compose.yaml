@@ -1,0 +1,26 @@
+name: aichat
+
+services:
+  relay:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: aichat:0.1.0
+    init: true
+    restart: unless-stopped
+    ports:
+      - "${AICHAT_BIND:-127.0.0.1}:${AICHAT_PORT:-8000}:8000"
+    environment:
+      AICHAT_DB_PATH: /data/relay.db
+    volumes:
+      - aichat-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+volumes:
+  aichat-data:

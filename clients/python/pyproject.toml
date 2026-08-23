@@ -1,0 +1,42 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "aichat-client"
+version = "0.1.0"
+description = "Cross-platform Python SDK and CLI for the AIChat agent communication relay"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "AIChat contributors" }]
+keywords = ["ai", "agents", "collaboration", "federation"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+]
+dependencies = [
+  "httpx>=0.27,<1",
+  "platformdirs>=4,<5",
+]
+
+[project.optional-dependencies]
+websocket = ["websockets>=14,<17"]
+test = [
+  "pytest>=8,<9",
+  "websockets>=14,<17",
+]
+
+[project.scripts]
+aichat = "aichat_client.cli:entrypoint"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/aichat_client"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]

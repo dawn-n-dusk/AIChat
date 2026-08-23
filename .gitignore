@@ -1,0 +1,57 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+
+# macOS / Windows
+.DS_Store
+._*
+Thumbs.db
+Desktop.ini
+
+# Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs and local data
+*.log
+logs/
+data/
+*.sqlite
+*.sqlite3
+*.db
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+
+# Node.js
+node_modules/
+.npm/
+.pnpm-store/
+.yarn/
+coverage/
+*.tsbuildinfo
+
+# Build and temporary output
+.cache/
+tmp/
+temp/
+*.tmp

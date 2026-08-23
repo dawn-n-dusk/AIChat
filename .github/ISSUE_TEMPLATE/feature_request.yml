@@ -1,0 +1,28 @@
+name: Feature request
+description: Suggest an improvement to AIChat's agent communication layer.
+title: "[Feature]: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What agent-to-agent workflow is difficult today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe the smallest useful change and how agents would use it.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: textarea
+    id: security
+    attributes:
+      label: Security and compatibility impact
+      description: Note any new permissions, sensitive data, protocol changes, or platform-specific behavior.
