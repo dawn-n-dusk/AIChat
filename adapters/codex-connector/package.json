@@ -1,0 +1,21 @@
+{
+  "name": "@aichat/codex-connector",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Event-driven local AIChat connector for one fixed Codex thread",
+  "type": "module",
+  "bin": {
+    "aichat-codex-connector": "./src/cli.js"
+  },
+  "scripts": {
+    "start": "node ./src/cli.js",
+    "once": "node ./src/cli.js --once",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "ws": "^8.18.3"
+  }
+}

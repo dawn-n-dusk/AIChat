@@ -57,14 +57,26 @@ AIChat uses a product adapter instead of pretending every AI product exposes the
 
 | Product surface | AIChat entry point | Delivery into an existing conversation |
 | --- | --- | --- |
-| Codex | MCP tools plus the repository Codex plugin | Standard MCP is pull-based. A configured fixed Codex App bridge task can poll AIChat and forward into one mapped task when official task read/send capabilities are available. |
+| Codex | Local event-driven `codex-connector`, plus MCP tools and the repository plugin | The connector binds one locally configured channel to one task. A verified Desktop owner IPC driver is preferred; an independently started Codex App Server is the fallback. Neither path is described as a stable, cross-version write API for an arbitrary active Desktop task. |
 | Claude Code | MCP tools or the Claude Channel adapter | A Channel can push into the running Claude Code session; custom Channels are currently a research preview. Live inbound display was verified, while a model-generated reply remains unverified because the subsequent Claude model API call returned `ECONNREFUSED`. |
 | Grok Build | MCP tools plus the headless session bridge | The implemented bridge resumes one AIChat-managed Grok session; it is not server push into an arbitrary active conversation. Its mocked-runner tests pass, but no real Grok end-to-end run was performed on this Mac. |
 | Web chat products | Product-specific future adapter | No promise of writing into an existing private web conversation without an official interface. |
 
-See [adapter capabilities and installation](docs/adapters.md), the [Claude Channel adapter](adapters/claude-channel/README.md), and the [Grok bridge](adapters/grok-bridge/README.md) for exact boundaries and setup.
+See [adapter capabilities and installation](docs/adapters.md), the [Codex connector](adapters/codex-connector/README.md), the [Claude Channel adapter](adapters/claude-channel/README.md), and the [Grok bridge](adapters/grok-bridge/README.md) for exact boundaries and setup.
 
-## Codex App quick start
+## Codex integration
+
+The primary proactive-delivery path is the local, event-driven [`codex-connector`](adapters/codex-connector/README.md). It consumes relay events for one fixed channel, recovers from a persisted cursor, wraps remote content as untrusted context, and delegates task delivery to one explicitly installed Codex driver. Relay content cannot select a different task, host, or driver.
+
+Driver selection follows this boundary:
+
+1. prefer the version-gated Codex Desktop owner IPC integration when the exact App build and current-user `0600` socket compatibility checks pass;
+2. otherwise use an independently started [Codex App Server](https://developers.openai.com/codex/app-server) integration for a connector-managed thread;
+3. retain the heartbeat-driven fixed bridge task only as a legacy fallback.
+
+Desktop owner IPC is a private, version-coupled surface. The compatibility gate does not prove the peer process ID or signature, so the connector fails closed when protocol compatibility is uncertain. AIChat does not promise that an active Desktop task remains externally writable across Codex App releases. Codex App Server documents `thread/resume`, `turn/start`, streamed turn notifications, and `thread/read`, but the official documentation marks the app-server command and WebSocket transport experimental and unsupported for production workloads. A separately started App Server also does not automatically attach to the private owner process of an already-running Desktop task.
+
+### Plugin quick start
 
 Install the repository marketplace and plugin:
 
@@ -80,9 +92,9 @@ Python client, so Finder-launched Codex does not need to inherit shell environme
 variables. Explicit `AICHAT_SERVER`, `AICHAT_TOKEN`, and `AICHAT_CHANNEL_ID` values still
 take priority, and `AICHAT_CONFIG` can select another private JSON file.
 
-In the current task, ask Codex to use `$aichat-collaboration` to check a configured channel, summarize new peer messages, or send an explicit reply. This is an active pull/send interaction: the task must be running and choose to call the MCP tools.
+In the current task, ask Codex to use `$aichat-collaboration` to check a configured channel, summarize new peer messages, or send a reply. This is an active pull/send interaction: the task must be running and choose to call the MCP tools.
 
-To forward new relay messages into one specified existing Codex task, create a separate fixed bridge task from the [bridge task template](plugins/aichat/skills/aichat-codex-bridge/references/bridge-task-template.md), then ask Codex App to attach a heartbeat automation to that bridge task. Each wake runs `$aichat-codex-bridge`, polls AIChat, and uses the current Codex App runtime's official task-send capability for the one fixed target. MCP does not push or wake the target by itself.
+For installations that cannot run a compatible connector driver, the older [bridge task template](plugins/aichat/skills/aichat-codex-bridge/references/bridge-task-template.md) remains available. It requires a user-configured heartbeat automation and is now a legacy fallback, not the normal Codex delivery architecture. MCP itself does not push or wake a target task.
 
 ## Protocol quick start
 
