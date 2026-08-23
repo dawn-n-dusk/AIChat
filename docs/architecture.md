@@ -62,11 +62,14 @@ The portable contract ends at relay read/write. Conversation delivery is a separ
 flowchart LR
     R["AIChat relay"] --> M["Universal MCP adapter\ntools and context"]
     R --> C["Claude Channel adapter\nserver notification"]
-    R --> B["Codex fixed bridge task\npoll and mapped task send"]
+    R --> X["Codex connector\nevent-driven relay recovery"]
+    R -.-> B["Legacy Codex bridge\nheartbeat wake"]
     R --> G["Grok headless bridge\nAIChat-managed session"]
     M --> E["Codex, Claude, or Grok invokes a tool"]
     C --> CS["Running Claude Code session"]
-    B --> CT["Configured Codex App task"]
+    X --> O["Desktop owner IPC\npreferred when compatible"]
+    X --> AS["Independent App Server\nexperimental fallback"]
+    B -.-> CT["Configured Codex App task"]
     G --> GS["Resumed Grok session"]
 ```
 
@@ -74,14 +77,17 @@ These paths are intentionally not described as equivalent:
 
 - **Universal MCP adapter:** exposes identity, channel, read, and send tools. MCP gives a model tools and context; it does not by itself push a relay event into an already open conversation.
 - **Claude Channel adapter:** uses Claude Code Channel notifications to inject incoming messages into the running session. Custom Channels are a research-preview capability and require explicit development-channel startup. A live test displayed `← aichat: UNTRUSTED REMOTE...` in Claude Code; the subsequent Claude model API request failed with `ECONNREFUSED`, so a live model-generated `reply` was not accepted in that test.
-- **Codex fixed bridge task:** a dedicated Codex App task is automatically woken by a user-configured heartbeat, polls one configured channel, and forwards a wrapped, untrusted message to one preconfigured target task using official task send capabilities when that runtime exposes them. The heartbeat provides wakeup; MCP only provides relay tools and context. Remote text cannot select the target task, and the bridge advances its checkpoint only after successful target delivery.
+- **Codex event-driven connector:** a local service owns one fixed channel-to-task mapping, relay cursor recovery, deduplication, delivery receipts, and model-declared structured reply routing. WebSocket is only a wake hint; ordered polling preserves correctness. Built-in drivers are local-only, and relay content never selects a task, host, driver, or permission policy.
+- **Codex Desktop owner IPC:** the preferred driver when the exact Codex App version/protocol and current-user `0600` socket checks pass. Those checks do not prove the peer process ID or signature. This is a private, version-coupled surface rather than a public cross-version contract. An unknown version or ambiguous acceptance must fail closed.
+- **Codex App Server fallback:** an independently started local App Server can use the documented `initialize`, `thread/resume`, `turn/start`, streamed notifications, and `thread/read` lifecycle for a connector-managed thread. The [official App Server documentation](https://developers.openai.com/codex/app-server) marks the app-server command and WebSocket transport experimental and unsupported for production workloads. A separate process does not automatically join the private owner process of an already-running Desktop task.
+- **Legacy Codex bridge task:** a dedicated Codex App task is woken by a user-configured heartbeat, polls one configured channel, and forwards a wrapped message to one preconfigured target when the runtime exposes task-send capabilities. It remains a compatibility fallback, not the primary architecture.
 - **Codex CLI resume fallback:** a separately managed process can use `codex resume <SESSION_ID> <PROMPT>` for a recorded session. It must not target a simultaneously active interactive session and is not treated as a stable conversation-write API.
 - **Grok session bridge:** `adapters/grok-bridge` polls a fixed channel, creates or resumes one AIChat-managed Grok Build headless session, and posts its bounded response back with `reply_to`. It does not inject into an arbitrary existing Grok conversation. Mock-runner tests cover session creation, resume, reply recovery, and loop controls; this Mac did not perform a real authenticated Grok end-to-end run.
 - **Web products:** AIChat does not automate a consumer webpage or claim access to private conversations without a documented product interface.
 
 The adapter capability matrix and setup examples live in [adapters.md](adapters.md).
 
-The repository implements the Codex boundary as two plugin skills: `$aichat-collaboration` for active pull/send in the current task, and `$aichat-codex-bridge` for one bounded poll-and-forward cycle inside a fixed, heartbeat-driven bridge task. No repository component claims a general Codex conversation-write API.
+The repository's primary proactive Codex boundary is the local `codex-connector` plus a separately verified driver. The plugin still provides `$aichat-collaboration` for active pull/send in the current task, while `$aichat-codex-bridge` is retained for the legacy heartbeat path. No repository component claims a general or cross-version Codex conversation-write API.
 
 ## Data flow
 

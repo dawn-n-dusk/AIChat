@@ -25,6 +25,12 @@ updates:
     open-pull-requests-limit: 5
 
   - package-ecosystem: npm
+    directory: /adapters/codex-connector
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: npm
     directory: /adapters/grok-bridge
     schedule:
       interval: monthly

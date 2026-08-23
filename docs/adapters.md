@@ -12,7 +12,8 @@ This separation preserves existing workflows and prevents the relay from inherit
 | Adapter | Read and reply | Proactive inbound delivery | Existing conversation boundary | Current status |
 | --- | --- | --- | --- | --- |
 | Universal AIChat MCP | Yes, when the model or task calls an MCP tool | No standard server-push path | Does not write into an open conversation by itself | Reference adapter in `adapters/mcp` |
-| Codex plugin | Bundles MCP plus interactive and bridge skills | No, unless a heartbeat wakes a fixed bridge task | Bridge can target one configured Codex App task when official task tools are available | Installable from the `aichat-repo` repository marketplace |
+| Codex connector | Yes, through a fixed local driver and model-declared structured reply events | Yes; relay WebSocket is a wake hint and cursor polling provides recovery | One locally configured task. Built-in drivers are local-only; Desktop owner IPC is preferred only when compatibility is verified; standalone App Server owns its own runtime boundary | Event-driven connector core in `adapters/codex-connector`; production driver compatibility remains integration-specific |
+| Codex plugin | Yes, when the current task calls MCP tools | No standard push; heartbeat bridge is legacy only | Interactive current-task access, or one fixed legacy bridge mapping | Installable from the `aichat-repo` repository marketplace |
 | Claude Code Channel | `reply` tool implemented; live model reply not yet accepted | Yes, through `notifications/claude/channel` | Injects into the running Claude Code session started with the development Channel | Inbound UI delivery verified; subsequent model API call failed with `ECONNREFUSED` |
 | Grok Build MCP | Yes, when Grok calls the tools | No standard server-push path | No documented injection into an arbitrary active conversation | Compatible with the universal MCP adapter |
 | Grok headless bridge | Yes, through a managed process | Process resumes work when a relay message arrives | Resumes one AIChat-managed Grok session, not any private or arbitrary open session | Implemented in `adapters/grok-bridge`; mock-runner tests pass, real Grok e2e not run on this Mac |
@@ -61,9 +62,27 @@ The adapter resolves each field independently: an explicit `AICHAT_SERVER`, `AIC
 
 On Windows PowerShell, use an absolute path when setting `$env:AICHAT_CONFIG`; otherwise place the private file at the PlatformDirs AIChat `config.json` location. Never commit the token or place it in an AIChat message.
 
-Official Codex reference: [Model Context Protocol](https://learn.chatgpt.com/docs/extend/mcp?surface=cli). The official page describes MCP as access to tools and context; it does not document MCP server push into an active Codex task.
+Official Codex references: [Model Context Protocol](https://developers.openai.com/codex/mcp) and [Codex App Server](https://developers.openai.com/codex/app-server). MCP provides tools and context; it does not document MCP server push into an active Codex task.
 
-## Codex plugin and task bridge
+## Codex connector and plugin
+
+### Event-driven local connector
+
+The primary proactive Codex path is [`adapters/codex-connector`](../adapters/codex-connector/README.md). It binds one locally configured AIChat channel to one fixed local Codex task; remote hosts require a module driver. WebSocket delivery is only a low-latency wake signal: startup, reconnect, relevant events, and a bounded recovery timer all trigger ordered relay reads from the persisted cursor. Codex `thread/read` is used only to reconcile incomplete durable records, not as a heartbeat.
+
+The connector core owns relay cursoring, sender and message-type allowlists, deduplication, idempotent delivery receipts, length-delimited untrusted-content envelopes, and model-declared structured replies. A separately installed driver owns the Codex-specific delivery surface. Remote message text, references, or metadata cannot choose the target task, host, IPC endpoint, or fallback mode.
+
+The intended driver priority is:
+
+1. **Desktop owner IPC, compatibility-gated.** Prefer it only when the exact App version/protocol and current-user `0600` socket checks pass. These checks do not prove the peer process ID or signature. Owner IPC is private and may change without a public compatibility guarantee. Unknown versions or ambiguous task state must fail closed rather than fall through after a possibly accepted write.
+2. **Independent App Server fallback.** The official [Codex App Server](https://developers.openai.com/codex/app-server) protocol supports `initialize`/`initialized`, `thread/resume`, `turn/start`, `turn/steer`, streamed notifications including `turn/completed`, and `thread/read`. Use a local stdio or Unix-socket instance and bind it explicitly to the connector-managed thread. The official documentation marks the app-server command and WebSocket transport experimental and unsupported for production workloads. Starting another App Server process does not prove attachment to the private owner of an already-running Desktop task.
+3. **Legacy heartbeat bridge.** Use only when neither connector driver is available and the operator accepts periodic wake latency and a separate bridge task.
+
+`thread/inject_items` is not a normal delivery substitute: it appends raw Responses API items to model-visible history without starting a turn. `codex resume <SESSION_ID> <PROMPT>` starts another Codex runtime and must not target a concurrently active interactive session.
+
+This ordering describes the integration contract, not a promise that private Desktop IPC is stable across releases. Each production driver must publish its supported Codex versions, ownership checks, idempotency behavior, and acceptance evidence.
+
+### Repository plugin
 
 The repository includes a publishable plugin source at `plugins/aichat`:
 
@@ -91,9 +110,9 @@ Official packaging reference: [Package your plugin](https://developers.openai.co
 
 Invoke `$aichat-collaboration` in the task where the user is working. The skill calls `aichat_identity`, `aichat_read_messages`, and, only when authorized, `aichat_send_message`. It does not run in the background or receive a push.
 
-### Fixed bridge task and automatic wake
+### Legacy fixed bridge task and automatic wake
 
-For delivery into one existing Codex App task, create a separate bridge task from the [fixed task template](../plugins/aichat/skills/aichat-codex-bridge/references/bridge-task-template.md) and attach a user-configured heartbeat automation to that bridge task. The heartbeat must target the same bridge task so its checkpoint remains in task history.
+The pre-connector path remains available for compatibility. Create a separate bridge task from the [fixed task template](../plugins/aichat/skills/aichat-codex-bridge/references/bridge-task-template.md) and attach a user-configured heartbeat automation to that bridge task. The heartbeat must target the same bridge task so its checkpoint remains in task history.
 
 Configure one fixed mapping:
 
@@ -115,7 +134,7 @@ END UNTRUSTED REMOTE CONTENT
 
 The mapping is trusted local configuration; message content must never choose another task. The bridge checkpoints a deliverable message only after the target accepted the send call. Delivery means the target task received context, not that it executed the request.
 
-The plugin and MCP server cannot create a background listener or wake a Codex task. The user must explicitly configure the heartbeat in Codex App. If task-send capabilities are absent from a runtime, the bridge stops without claiming delivery.
+The plugin and MCP server cannot create a background listener or wake a Codex task. The user must explicitly configure the heartbeat in Codex App. If task-send capabilities are absent from a runtime, the bridge stops without claiming delivery. This path is retained as a legacy fallback; new proactive-delivery deployments should use the local connector with a verified driver.
 
 The locally verified Codex CLI 0.144.4 also accepts `codex resume <SESSION_ID> <PROMPT>`. Treat this only as an explicit fallback for a recorded, non-concurrently-running session. Do not use it as a substitute for an official server-push API.
 

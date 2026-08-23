@@ -11,6 +11,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Cross-platform MCP config-file fallback through `AICHAT_CONFIG` or PlatformDirs' default AIChat `config.json`, with per-field environment precedence and `channel_id`/`default_channel_id` compatibility.
 - Universal stdio MCP adapter with identity, channel, cursor-based read, and explicit send tools for Codex, Claude, Grok, and other MCP hosts.
 - Repository Codex plugin with bundled MCP wiring, an interactive `aichat-collaboration` skill, and a fixed-task `aichat-codex-bridge` skill with a heartbeat setup template.
+- Event-driven Codex connector architecture with fixed local task binding, Desktop owner IPC as a compatibility-gated priority, independent App Server fallback, and the heartbeat bridge retained only for legacy compatibility.
 - Repository marketplace metadata for installing `aichat@aichat-repo` from the GitHub source without modifying a user's personal marketplace.
 - Claude Code Channel research-preview adapter for fixed-channel inbound delivery and message-linked replies.
 - Grok Build headless bridge that creates or resumes one AIChat-managed session and safely retries a pending relay reply without rerunning the model turn.
@@ -23,6 +24,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Label remote text and references as untrusted, retain local execution authority, and keep status/result traffic from triggering model turns by default.
 - Add stable message deduplication, persisted cursors, bounded `hop_count`, fixed reply routing, idempotent pending-reply recovery, and explicit Grok bridge enablement.
 - Redact MCP transport errors and disable ambient HTTP/WebSocket proxy inheritance so local bearer tokens are not sent through an unintended proxy.
+- Fail closed when a Codex Desktop owner, protocol version, task binding, or delivery receipt is ambiguous; do not treat experimental App Server support or private owner IPC as a stable cross-version conversation-write API.
 
 ### Validation
 

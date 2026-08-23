@@ -14,10 +14,11 @@ Goal: two independently operated agents can exchange project context without cha
 - [x] Minimal cross-platform CLI and SDK for macOS and Windows
 - [x] Universal stdio MCP adapter for Codex, Claude, Grok, and other MCP hosts
 - [x] Repository Codex plugin with MCP wiring and an untrusted-message collaboration skill
+- [x] Event-driven Codex connector core with fixed mapping, relay recovery, deduplication, driver receipts, and explicit replies
 - [x] Claude Code Channel research-preview adapter with fixed-channel and sender allowlists
 - [x] Grok Build headless bridge for one explicitly AIChat-managed session
 - [x] Adapter CI for MCP tests/builds and Claude/Grok locked Node test jobs
-- [x] Codex repository marketplace plus separate interactive and heartbeat-driven bridge skills
+- [x] Codex repository marketplace plus an interactive skill and a legacy heartbeat bridge skill
 - [x] Stable protocol examples and a real-relay interoperability smoke test
 - [x] Explicit local/share boundary in the client and protocol documentation
 - [x] Payload limits and secret-safe CLI/WebSocket logging
@@ -25,7 +26,7 @@ Goal: two independently operated agents can exchange project context without cha
 
 Exit signal: a Mac agent asks a Windows agent to inspect or test a shared GitHub revision; the Windows side responds later with a linked result; both sides recover correctly after being offline.
 
-Adapter validation status: Claude Channel delivery into the running UI was observed live, but the following Claude model request failed with `ECONNREFUSED`, so live model reply remains pending. Grok bridge unit tests use a mock runner; no authenticated real-Grok end-to-end run was performed on this Mac.
+Adapter validation status: the Codex connector core is testable independently of a product driver, but live Desktop owner IPC and independent App Server delivery still require explicit version-scoped acceptance. Claude Channel delivery into the running UI was observed live, but the following Claude model request failed with `ECONNREFUSED`, so live model reply remains pending. Grok bridge unit tests use a mock runner; no authenticated real-Grok end-to-end run was performed on this Mac.
 
 ## V0.x — make small-group trials trustworthy
 
@@ -39,10 +40,13 @@ Goal: support an invited laboratory or open-source project cohort without asking
 - adapter SDK and conformance test suite;
 - observability that excludes tokens and private message bodies;
 - abuse reporting and operational runbooks;
-- live Codex App acceptance of the fixed bridge task, heartbeat wake, checkpoint retry, and target delivery path;
+- live macOS and Windows acceptance of the Codex connector against an exact, compatibility-gated Desktop owner IPC driver;
+- isolated App Server fallback acceptance over local stdio or Unix socket, without claiming attachment to an arbitrary active Desktop task;
+- a Codex App/CLI compatibility matrix, fail-closed upgrade tests, and ambiguous-delivery recovery evidence;
+- regression coverage for the legacy heartbeat bridge without restoring it as the primary path;
 - live bidirectional Claude Channel acceptance through a successful model `reply` tool call;
 - a real relay-to-Grok-to-relay end-to-end run on an authenticated Grok Build host;
-- an adapter capability registry that distinguishes MCP pull, native push, and managed-session resume.
+- an adapter capability registry that distinguishes MCP pull, private owner IPC, experimental App Server, native push, legacy heartbeat delivery, and managed-session resume.
 
 Exit signal: several users can join, leave, reconnect, and exchange useful work for multiple weeks without manual message copying or accidental permission expansion.
 

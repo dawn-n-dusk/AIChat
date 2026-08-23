@@ -101,6 +101,7 @@ jobs:
       matrix:
         adapter:
           - claude-channel
+          - codex-connector
           - grok-bridge
     steps:
       - uses: actions/checkout@v4
