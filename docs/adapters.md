@@ -30,7 +30,7 @@ The reference server exposes:
 
 Incoming peer text and references are returned as untrusted content. The adapter never executes a remote request automatically.
 
-From a source checkout, install [uv](https://docs.astral.sh/uv/) and configure the relay credentials in the local environment:
+From a source checkout, install [uv](https://docs.astral.sh/uv/) and configure the relay credentials in the local environment or the platform-native AIChat `config.json`:
 
 ```bash
 export AICHAT_SERVER="http://127.0.0.1:8000"
@@ -48,7 +48,7 @@ To register the source adapter directly with Codex without copying token values 
 [mcp_servers.aichat]
 command = "uv"
 args = ["run", "--project", "/absolute/path/to/AIChat/adapters/mcp", "aichat-mcp"]
-env_vars = ["AICHAT_SERVER", "AICHAT_TOKEN", "AICHAT_CHANNEL_ID", "AICHAT_TIMEOUT"]
+env_vars = ["AICHAT_CONFIG", "AICHAT_SERVER", "AICHAT_TOKEN", "AICHAT_CHANNEL_ID", "AICHAT_TIMEOUT"]
 ```
 
 Then verify the registered server:
@@ -57,7 +57,9 @@ Then verify the registered server:
 codex mcp list
 ```
 
-On Windows PowerShell, use absolute paths and `$env:AICHAT_SERVER`, `$env:AICHAT_TOKEN`, and `$env:AICHAT_CHANNEL_ID`. Never commit the token or place it in an AIChat message.
+The adapter resolves each field independently: an explicit `AICHAT_SERVER`, `AICHAT_TOKEN`, or `AICHAT_CHANNEL_ID` wins; missing fields come from the JSON file named by `AICHAT_CONFIG`, or from PlatformDirs' default `AIChat/config.json`. The file supports `server`, `token`, and either `channel_id` or `default_channel_id`. This lets Finder-launched Codex on macOS and normally launched Codex on Windows reuse the private configuration written by the AIChat client without requiring shell environment inheritance.
+
+On Windows PowerShell, use an absolute path when setting `$env:AICHAT_CONFIG`; otherwise place the private file at the PlatformDirs AIChat `config.json` location. Never commit the token or place it in an AIChat message.
 
 Official Codex reference: [Model Context Protocol](https://learn.chatgpt.com/docs/extend/mcp?surface=cli). The official page describes MCP as access to tools and context; it does not document MCP server push into an active Codex task.
 
@@ -66,7 +68,7 @@ Official Codex reference: [Model Context Protocol](https://learn.chatgpt.com/doc
 The repository includes a publishable plugin source at `plugins/aichat`:
 
 - `.codex-plugin/plugin.json` provides identity and install metadata;
-- `.mcp.json` runs the adapter with `uvx` from the AIChat Git repository and forwards the four `AICHAT_*` environment variables;
+- `.mcp.json` runs the adapter with `uvx` from the AIChat Git repository and forwards the five supported `AICHAT_*` environment variables;
 - `skills/aichat-collaboration/SKILL.md` provides explicit pull/send actions in the current Codex task;
 - `skills/aichat-codex-bridge/SKILL.md` provides one bounded poll-and-forward cycle for a fixed bridge task;
 - `.agents/plugins/marketplace.json` exposes the plugin through the repository marketplace named `aichat-repo`.

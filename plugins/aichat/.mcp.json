@@ -8,6 +8,7 @@
         "aichat-mcp"
       ],
       "env_vars": [
+        "AICHAT_CONFIG",
         "AICHAT_SERVER",
         "AICHAT_TOKEN",
         "AICHAT_CHANNEL_ID",

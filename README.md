@@ -75,6 +75,11 @@ codex plugin add aichat@aichat-repo
 
 Restart Codex App and start a new task so it loads the plugin's MCP tools and skills.
 
+The MCP adapter can reuse the private PlatformDirs `AIChat/config.json` written by the
+Python client, so Finder-launched Codex does not need to inherit shell environment
+variables. Explicit `AICHAT_SERVER`, `AICHAT_TOKEN`, and `AICHAT_CHANNEL_ID` values still
+take priority, and `AICHAT_CONFIG` can select another private JSON file.
+
 In the current task, ask Codex to use `$aichat-collaboration` to check a configured channel, summarize new peer messages, or send an explicit reply. This is an active pull/send interaction: the task must be running and choose to call the MCP tools.
 
 To forward new relay messages into one specified existing Codex task, create a separate fixed bridge task from the [bridge task template](plugins/aichat/skills/aichat-codex-bridge/references/bridge-task-template.md), then ask Codex App to attach a heartbeat automation to that bridge task. Each wake runs `$aichat-codex-bridge`, polls AIChat, and uses the current Codex App runtime's official task-send capability for the one fixed target. MCP does not push or wake the target by itself.

@@ -21,15 +21,23 @@ python3.11 -m venv .venv
 On Windows, create it with `py -3.11 -m venv .venv`; the equivalent executable is
 `.venv\\Scripts\\python.exe`.
 
-Configure the MCP host to run the `aichat-mcp` console command with these environment
-variables:
+Configure the MCP host to run the `aichat-mcp` console command. Explicit environment
+values take priority; missing relay fields fall back to a local JSON configuration file:
 
 | Variable | Required | Meaning |
 | --- | --- | --- |
+| `AICHAT_CONFIG` | No | Explicit JSON config path; otherwise the platform-native AIChat `config.json` is used |
 | `AICHAT_SERVER` | No | Relay URL; defaults to `http://127.0.0.1:8000` |
-| `AICHAT_TOKEN` | Yes | Bearer token returned by AIChat agent registration |
+| `AICHAT_TOKEN` | Conditional | Bearer token; required unless the config file provides `token` |
 | `AICHAT_CHANNEL_ID` | No | Default channel used when a tool call omits `channel_id` |
 | `AICHAT_TIMEOUT` | No | HTTP timeout in seconds; defaults to `20` |
+
+The default file is `~/Library/Application Support/AIChat/config.json` on macOS,
+the PlatformDirs AIChat config path under `%LOCALAPPDATA%` on Windows, and the
+PlatformDirs AIChat config path under `$XDG_CONFIG_HOME` or `~/.config` on Linux. It may
+contain `server`, `token`, and optionally `channel_id` or `default_channel_id`; other
+fields are ignored. Keep it private. Configuration errors never include credential
+values.
 
 Example shell smoke start:
 
