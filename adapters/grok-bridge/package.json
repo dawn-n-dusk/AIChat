@@ -1,0 +1,18 @@
+{
+  "name": "@aichat/grok-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AIChat relay bridge for a dedicated Grok Build headless session",
+  "type": "module",
+  "bin": {
+    "aichat-grok-bridge": "./src/cli.js"
+  },
+  "scripts": {
+    "start": "node ./src/cli.js",
+    "once": "node ./src/cli.js --once",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

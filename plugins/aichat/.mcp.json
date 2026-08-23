@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "aichat": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/dawn-n-dusk/AIChat.git@main#subdirectory=adapters/mcp",
+        "aichat-mcp"
+      ],
+      "env_vars": [
+        "AICHAT_SERVER",
+        "AICHAT_TOKEN",
+        "AICHAT_CHANNEL_ID",
+        "AICHAT_TIMEOUT"
+      ],
+      "tool_timeout_sec": 30
+    }
+  }
+}

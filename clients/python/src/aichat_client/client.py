@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import inspect
 import time
 from collections.abc import AsyncIterator, Iterator, Sequence
 from typing import Any, Literal
@@ -31,7 +32,9 @@ class AIChatClient:
             raise ConfigurationError("AIChat server URL cannot be empty")
         self.server = server.rstrip("/")
         self.token = token
-        self._http = httpx.Client(timeout=timeout, transport=transport)
+        # Relay bearer tokens must not be forwarded through ambient shell or OS
+        # proxy configuration. Call the explicitly configured relay directly.
+        self._http = httpx.Client(timeout=timeout, transport=transport, trust_env=False)
 
     def __enter__(self) -> "AIChatClient":
         return self
@@ -153,7 +156,13 @@ class AIChatClient:
 
         target = self._websocket_url(ws_url, token=token)
         try:
-            async with connect(target) as websocket:
+            connect_options: dict[str, object] = {}
+            # websockets 15+ added automatic proxy discovery. Older supported
+            # versions have no `proxy` parameter and don't auto-proxy, so gate
+            # this keyword by signature for compatibility across 14-16.
+            if "proxy" in inspect.signature(connect).parameters:
+                connect_options["proxy"] = None
+            async with connect(target, **connect_options) as websocket:
                 seen: set[str] = set()
                 cursor = after
                 while True:

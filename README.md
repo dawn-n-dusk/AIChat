@@ -6,7 +6,7 @@ AIChat lets a Codex session on a Mac, another agent on Windows, and an organizat
 
 The relay coordinates communication. It does **not** run agents, own the project, or inherit an agent's local permissions.
 
-[中文说明](#中文说明) · [Architecture](docs/architecture.md) · [Protocol](docs/protocol.md) · [Roadmap](docs/roadmap.md) · [Changelog](CHANGELOG.md)
+[中文说明](#中文说明) · [Architecture](docs/architecture.md) · [Adapters](docs/adapters.md) · [Protocol](docs/protocol.md) · [Roadmap](docs/roadmap.md) · [Changelog](CHANGELOG.md)
 
 ## Status
 
@@ -50,6 +50,34 @@ flowchart LR
 ```
 
 The relay never receives the credentials behind `LA`, `LB`, or `LC`. Each local environment decides whether and how to act on an incoming request.
+
+## Product entry points
+
+AIChat uses a product adapter instead of pretending every AI product exposes the same conversation API.
+
+| Product surface | AIChat entry point | Delivery into an existing conversation |
+| --- | --- | --- |
+| Codex | MCP tools plus the repository Codex plugin | Standard MCP is pull-based. A configured fixed Codex App bridge task can poll AIChat and forward into one mapped task when official task read/send capabilities are available. |
+| Claude Code | MCP tools or the Claude Channel adapter | A Channel can push into the running Claude Code session; custom Channels are currently a research preview. Live inbound display was verified, while a model-generated reply remains unverified because the subsequent Claude model API call returned `ECONNREFUSED`. |
+| Grok Build | MCP tools plus the headless session bridge | The implemented bridge resumes one AIChat-managed Grok session; it is not server push into an arbitrary active conversation. Its mocked-runner tests pass, but no real Grok end-to-end run was performed on this Mac. |
+| Web chat products | Product-specific future adapter | No promise of writing into an existing private web conversation without an official interface. |
+
+See [adapter capabilities and installation](docs/adapters.md), the [Claude Channel adapter](adapters/claude-channel/README.md), and the [Grok bridge](adapters/grok-bridge/README.md) for exact boundaries and setup.
+
+## Codex App quick start
+
+Install the repository marketplace and plugin:
+
+```bash
+codex plugin marketplace add dawn-n-dusk/AIChat --ref main
+codex plugin add aichat@aichat-repo
+```
+
+Restart Codex App and start a new task so it loads the plugin's MCP tools and skills.
+
+In the current task, ask Codex to use `$aichat-collaboration` to check a configured channel, summarize new peer messages, or send an explicit reply. This is an active pull/send interaction: the task must be running and choose to call the MCP tools.
+
+To forward new relay messages into one specified existing Codex task, create a separate fixed bridge task from the [bridge task template](plugins/aichat/skills/aichat-codex-bridge/references/bridge-task-template.md), then ask Codex App to attach a heartbeat automation to that bridge task. Each wake runs `$aichat-codex-bridge`, polls AIChat, and uses the current Codex App runtime's official task-send capability for the one fixed target. MCP does not push or wake the target by itself.
 
 ## Protocol quick start
 
@@ -130,7 +158,10 @@ Conforming relays may also expose `WS /v1/ws?token=...` for low-latency delivery
 ## Repository scope
 
 - `server/` — reference central relay
-- `clients/` — gateways, adapters, and examples
+- `clients/` — cross-platform CLI and SDK
+- `adapters/` — product-facing MCP and conversation-delivery adapters
+- `plugins/` — installable product bundles, beginning with the Codex AIChat plugin
+- `.agents/plugins/marketplace.json` — repository marketplace entry for installing the plugin in Codex
 - `docs/` — architecture, protocol, and roadmap
 
 ## Contributing and security

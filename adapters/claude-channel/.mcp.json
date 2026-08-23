@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "aichat": {
+      "command": "node",
+      "args": ["./src/server.js"]
+    }
+  }
+}

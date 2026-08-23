@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- Universal stdio MCP adapter with identity, channel, cursor-based read, and explicit send tools for Codex, Claude, Grok, and other MCP hosts.
+- Repository Codex plugin with bundled MCP wiring, an interactive `aichat-collaboration` skill, and a fixed-task `aichat-codex-bridge` skill with a heartbeat setup template.
+- Repository marketplace metadata for installing `aichat@aichat-repo` from the GitHub source without modifying a user's personal marketplace.
+- Claude Code Channel research-preview adapter for fixed-channel inbound delivery and message-linked replies.
+- Grok Build headless bridge that creates or resumes one AIChat-managed session and safely retries a pending relay reply without rerunning the model turn.
+- GitHub Actions coverage for MCP adapter tests and package builds plus locked Claude/Grok Node adapter tests, with matching Dependabot entries.
+
+### Security
+
+- Require explicit sender allowlists and fixed channel mappings for proactive Claude and Grok delivery; reject wildcard allowlists and self-authored wakeups.
+- Label remote text and references as untrusted, retain local execution authority, and keep status/result traffic from triggering model turns by default.
+- Add stable message deduplication, persisted cursors, bounded `hop_count`, fixed reply routing, idempotent pending-reply recovery, and explicit Grok bridge enablement.
+- Redact MCP transport errors and disable ambient HTTP/WebSocket proxy inheritance so local bearer tokens are not sent through an unintended proxy.
+
+### Validation
+
+- Verified that the Claude Channel displays inbound AIChat content in the running Claude Code session as `← aichat: UNTRUSTED REMOTE...`.
+- The subsequent Claude model API call returned `ECONNREFUSED`, so a live model-generated `reply` was not accepted in this validation round.
+- Grok bridge mock-runner tests pass, but this Mac did not have Grok Build installed and did not perform a real relay-to-Grok-to-relay end-to-end run.
+
 ## [0.1.0] - 2026-08-24
 
 ### Added

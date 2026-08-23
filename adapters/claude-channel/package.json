@@ -1,0 +1,25 @@
+{
+  "name": "@aichat/claude-channel",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AIChat relay adapter for Claude Code Channels",
+  "type": "module",
+  "bin": {
+    "aichat-claude-channel": "./src/server.js"
+  },
+  "files": [
+    "src/",
+    "README.md",
+    ".mcp.json"
+  ],
+  "scripts": {
+    "start": "node ./src/server.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0"
+  }
+}

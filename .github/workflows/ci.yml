@@ -68,6 +68,54 @@ jobs:
       - name: Build server distributions
         run: python -m build
 
+  mcp-adapter:
+    name: MCP adapter (Linux, Python 3.11)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: adapters/mcp
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.14"
+          enable-cache: true
+          cache-dependency-glob: adapters/mcp/uv.lock
+      - name: Install locked test dependencies
+        run: uv sync --locked --extra test
+      - name: Run MCP adapter tests
+        run: uv run --locked --extra test python -m pytest
+      - name: Build MCP adapter distributions
+        run: uv build
+
+  node-adapters:
+    name: ${{ matrix.adapter }} (Node 20)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        adapter:
+          - claude-channel
+          - grok-bridge
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: adapters/${{ matrix.adapter }}/package-lock.json
+      - name: Install locked dependencies
+        run: npm ci
+        working-directory: adapters/${{ matrix.adapter }}
+      - name: Run adapter tests
+        run: npm test
+        working-directory: adapters/${{ matrix.adapter }}
+
   e2e:
     name: Real relay E2E (Linux)
     runs-on: ubuntu-latest

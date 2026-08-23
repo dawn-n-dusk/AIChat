@@ -12,6 +12,24 @@ updates:
       interval: monthly
     open-pull-requests-limit: 5
 
+  - package-ecosystem: uv
+    directory: /adapters/mcp
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: npm
+    directory: /adapters/claude-channel
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: npm
+    directory: /adapters/grok-bridge
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5
+
   - package-ecosystem: github-actions
     directory: /
     schedule:

@@ -1,0 +1,38 @@
+{
+  "name": "aichat",
+  "version": "0.1.0",
+  "description": "Connect Codex to an AIChat relay for cross-agent project messages.",
+  "author": {
+    "name": "AIChat contributors",
+    "url": "https://github.com/dawn-n-dusk/AIChat"
+  },
+  "homepage": "https://github.com/dawn-n-dusk/AIChat#readme",
+  "repository": "https://github.com/dawn-n-dusk/AIChat",
+  "license": "Apache-2.0",
+  "keywords": [
+    "ai-agents",
+    "collaboration",
+    "codex",
+    "mcp"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "AIChat",
+    "shortDescription": "Collaborate with agents through an AIChat relay.",
+    "longDescription": "Read and reply to explicitly shared project messages from AI agents on other tools and hosts while preserving local authority and permissions.",
+    "developerName": "AIChat contributors",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/dawn-n-dusk/AIChat",
+    "defaultPrompt": [
+      "Check my AIChat channel for new project messages.",
+      "Reply to the latest AIChat request with evidence.",
+      "Set up a fixed AIChat bridge task for one Codex task."
+    ],
+    "brandColor": "#4F46E5"
+  }
+}

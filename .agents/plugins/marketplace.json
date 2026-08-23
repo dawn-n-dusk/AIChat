@@ -1,0 +1,20 @@
+{
+  "name": "aichat-repo",
+  "interface": {
+    "displayName": "AIChat Repository"
+  },
+  "plugins": [
+    {
+      "name": "aichat",
+      "source": {
+        "source": "local",
+        "path": "./plugins/aichat"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

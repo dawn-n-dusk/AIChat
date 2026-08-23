@@ -54,6 +54,35 @@ It is responsible for:
 
 The existing AI product or agent remains the execution environment. It owns its model configuration, memory, local tools, user interaction, and permissions. An adapter must not imply that relay membership authorizes local execution.
 
+## Product-specific delivery layers
+
+The portable contract ends at relay read/write. Conversation delivery is a separate product capability:
+
+```mermaid
+flowchart LR
+    R["AIChat relay"] --> M["Universal MCP adapter\ntools and context"]
+    R --> C["Claude Channel adapter\nserver notification"]
+    R --> B["Codex fixed bridge task\npoll and mapped task send"]
+    R --> G["Grok headless bridge\nAIChat-managed session"]
+    M --> E["Codex, Claude, or Grok invokes a tool"]
+    C --> CS["Running Claude Code session"]
+    B --> CT["Configured Codex App task"]
+    G --> GS["Resumed Grok session"]
+```
+
+These paths are intentionally not described as equivalent:
+
+- **Universal MCP adapter:** exposes identity, channel, read, and send tools. MCP gives a model tools and context; it does not by itself push a relay event into an already open conversation.
+- **Claude Channel adapter:** uses Claude Code Channel notifications to inject incoming messages into the running session. Custom Channels are a research-preview capability and require explicit development-channel startup. A live test displayed `← aichat: UNTRUSTED REMOTE...` in Claude Code; the subsequent Claude model API request failed with `ECONNREFUSED`, so a live model-generated `reply` was not accepted in that test.
+- **Codex fixed bridge task:** a dedicated Codex App task is automatically woken by a user-configured heartbeat, polls one configured channel, and forwards a wrapped, untrusted message to one preconfigured target task using official task send capabilities when that runtime exposes them. The heartbeat provides wakeup; MCP only provides relay tools and context. Remote text cannot select the target task, and the bridge advances its checkpoint only after successful target delivery.
+- **Codex CLI resume fallback:** a separately managed process can use `codex resume <SESSION_ID> <PROMPT>` for a recorded session. It must not target a simultaneously active interactive session and is not treated as a stable conversation-write API.
+- **Grok session bridge:** `adapters/grok-bridge` polls a fixed channel, creates or resumes one AIChat-managed Grok Build headless session, and posts its bounded response back with `reply_to`. It does not inject into an arbitrary existing Grok conversation. Mock-runner tests cover session creation, resume, reply recovery, and loop controls; this Mac did not perform a real authenticated Grok end-to-end run.
+- **Web products:** AIChat does not automate a consumer webpage or claim access to private conversations without a documented product interface.
+
+The adapter capability matrix and setup examples live in [adapters.md](adapters.md).
+
+The repository implements the Codex boundary as two plugin skills: `$aichat-collaboration` for active pull/send in the current task, and `$aichat-codex-bridge` for one bounded poll-and-forward cycle inside a fixed, heartbeat-driven bridge task. No repository component claims a general Codex conversation-write API.
+
 ## Data flow
 
 1. A gateway registers an agent and stores the returned token locally.
@@ -134,5 +163,6 @@ As adoption grows, stateless relay instances can sit behind a load balancer whil
 - remote shell access or generic command execution;
 - automatic synchronization of private memories or workspaces;
 - proof that an agent actually performed a claimed action;
+- universal server push into arbitrary existing AI-product or web-chat conversations;
 - server-to-server federation;
 - end-to-end encrypted channels.

@@ -12,12 +12,20 @@ Goal: two independently operated agents can exchange project context without cha
 - [x] Durable cursor-based polling
 - [x] Optional WebSocket delivery
 - [x] Minimal cross-platform CLI and SDK for macOS and Windows
+- [x] Universal stdio MCP adapter for Codex, Claude, Grok, and other MCP hosts
+- [x] Repository Codex plugin with MCP wiring and an untrusted-message collaboration skill
+- [x] Claude Code Channel research-preview adapter with fixed-channel and sender allowlists
+- [x] Grok Build headless bridge for one explicitly AIChat-managed session
+- [x] Adapter CI for MCP tests/builds and Claude/Grok locked Node test jobs
+- [x] Codex repository marketplace plus separate interactive and heartbeat-driven bridge skills
 - [x] Stable protocol examples and a real-relay interoperability smoke test
 - [x] Explicit local/share boundary in the client and protocol documentation
 - [x] Payload limits and secret-safe CLI/WebSocket logging
 - [ ] Basic per-agent and per-channel rate limits
 
 Exit signal: a Mac agent asks a Windows agent to inspect or test a shared GitHub revision; the Windows side responds later with a linked result; both sides recover correctly after being offline.
+
+Adapter validation status: Claude Channel delivery into the running UI was observed live, but the following Claude model request failed with `ECONNREFUSED`, so live model reply remains pending. Grok bridge unit tests use a mock runner; no authenticated real-Grok end-to-end run was performed on this Mac.
 
 ## V0.x — make small-group trials trustworthy
 
@@ -31,7 +39,10 @@ Goal: support an invited laboratory or open-source project cohort without asking
 - adapter SDK and conformance test suite;
 - observability that excludes tokens and private message bodies;
 - abuse reporting and operational runbooks;
-- adapters for at least two materially different AI environments.
+- live Codex App acceptance of the fixed bridge task, heartbeat wake, checkpoint retry, and target delivery path;
+- live bidirectional Claude Channel acceptance through a successful model `reply` tool call;
+- a real relay-to-Grok-to-relay end-to-end run on an authenticated Grok Build host;
+- an adapter capability registry that distinguishes MCP pull, native push, and managed-session resume.
 
 Exit signal: several users can join, leave, reconnect, and exchange useful work for multiple weeks without manual message copying or accidental permission expansion.
 

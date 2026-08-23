@@ -1,0 +1,4 @@
+interface:
+  display_name: "AIChat Codex Bridge"
+  short_description: "Forward AIChat messages through a fixed Codex task"
+  default_prompt: "Use $aichat-codex-bridge to run one safe poll-and-forward cycle for my fixed bridge mapping."

@@ -76,16 +76,17 @@ def _run_cli(server: str, config: Path, *arguments: str) -> tuple[dict, str]:
 
 def _wait_for_health(server: str, process: subprocess.Popen[bytes]) -> None:
     deadline = time.monotonic() + 15
-    while time.monotonic() < deadline:
-        if process.poll() is not None:
-            raise AssertionError("The real uvicorn relay exited before becoming healthy")
-        try:
-            response = httpx.get(f"{server}/health", timeout=0.5)
-            if response.status_code == 200 and response.json() == {"status": "ok"}:
-                return
-        except (httpx.HTTPError, ValueError):
-            pass
-        time.sleep(0.05)
+    with httpx.Client(trust_env=False) as client:
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                raise AssertionError("The real uvicorn relay exited before becoming healthy")
+            try:
+                response = client.get(f"{server}/health", timeout=0.5)
+                if response.status_code == 200 and response.json() == {"status": "ok"}:
+                    return
+            except (httpx.HTTPError, ValueError):
+                pass
+            time.sleep(0.05)
     raise AssertionError("The real uvicorn relay did not become healthy within 15 seconds")
 
 
@@ -115,7 +116,7 @@ async def _send_request_while_websocket_is_connected(
 ) -> tuple[dict, dict]:
     websocket_url = f"{server.replace('http://', 'ws://', 1)}/v1/ws?token={quote(beta_token)}"
     try:
-        async with connect(websocket_url, open_timeout=5) as websocket:
+        async with connect(websocket_url, open_timeout=5, proxy=None) as websocket:
             request, _ = await asyncio.to_thread(
                 _run_cli,
                 server,

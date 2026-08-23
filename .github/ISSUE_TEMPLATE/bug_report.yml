@@ -30,6 +30,7 @@ body:
       options:
         - Relay server
         - Python client or CLI
+        - Adapter or plugin
         - Protocol or documentation
         - Container deployment
         - Other
