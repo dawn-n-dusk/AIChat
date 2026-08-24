@@ -71,7 +71,7 @@ only for this single-worker invited deployment.
 - `templates/caddy-route.caddy`: path-prefix route and default registration deny.
 - `templates/caddy-global-options.caddy`: scoped AIChat error-logger query redaction.
 - `scripts/install.sh`: staged release, local health, atomic Caddy patch, validation,
-  public health, and automatic failure rollback.
+  public health, initial-backup acceptance, and transactional failure rollback.
 - `scripts/check.sh`: service, bind, HTTPS, registration deny, DB, backup, Caddy,
   optional WSS, and RustDesk non-interference checks.
 - `scripts/rollback.sh`: atomic code rollback with optional explicit Caddy backup.
@@ -131,6 +131,17 @@ Run the local package validator first:
 deploy/raspberry-pi/scripts/validate-package.sh
 ```
 
+Maintainers can also run the disposable Docker failure-injection suite. It
+executes first-install and upgrade success plus local-health, daemon-reload,
+Caddy reload, public-health, initial-backup, previous-link, and incomplete
+rollback scenarios inside throwaway containers; it never targets the host's
+`/opt` or `/etc`:
+
+```bash
+AICHAT_RUN_DOCKER_INSTALL_TESTS=true \
+  deploy/raspberry-pi/scripts/validate-package.sh
+```
+
 Then explicitly install:
 
 ```bash
@@ -140,20 +151,39 @@ sudo deploy/raspberry-pi/scripts/install.sh \
 
 The installer performs these state changes only when it is run:
 
-1. creates `aichat-relay` and the four scoped directory trees;
-2. creates a release-specific Python virtual environment under
-   `/opt/aichat-relay/releases/<release-id>`;
-3. installs loopback Relay and backup units;
-4. starts and accepts local `/health`;
-5. first validates a full candidate that excludes only the AIChat prefix from
+1. rejects malformed `current`/`previous` links and an existing release path
+   before changing package state;
+2. creates `aichat-relay` and the four scoped directory trees;
+3. creates a release-specific Python virtual environment under
+   `/opt/aichat-relay/releases/<release-id>`, normalizes it to root-owned
+   read/traverse permissions, and proves the service account can execute Uvicorn
+   and import the application before switching `current`;
+4. snapshots package-owned runtime files and systemd units, installs the
+   loopback Relay and backup units, then atomically switches `current`;
+5. starts and accepts local `/health`;
+6. first validates a full candidate that excludes only the AIChat prefix from
    access logs and scopes its handler errors to a query-redacting named logger,
    then backs up and atomically patches the existing Caddyfile before the
    configured fallback, reloads Caddy, and accepts public `/aichat/health`;
-6. creates an initial consistent SQLite backup and enables the daily timer.
+7. creates an initial consistent SQLite backup, enables the daily timer, and
+   only then records the formerly current release as `previous`.
 
-If Relay start, Caddy validation/reload, or public health fails, the installer
-restores the previous release link and Caddyfile. It prints the exact Caddy
-backup path on success; retain it for explicit rollback.
+If staging, Relay start, Caddy validation/reload, public health, or initial
+backup acceptance fails, the installer restores the exact prior `current` and
+`previous` link states, package-owned runtime files and three systemd units,
+then reloads systemd and restores the Relay service and backup timer's prior
+enabled/active states. Caddy is restored atomically when it had changed. A
+rollback failure is reported as incomplete rather than being described as a
+success, and the transaction snapshot path is retained and printed for manual
+recovery.
+
+The installer intentionally retains a newly seeded database and a staged
+release directory after a failed attempt for recovery and audit. It removes the
+failed attempt's `current` link on a first install and never creates a
+self-referential link. Inspect retained artifacts, correct the cause, and use a
+new immutable release ID for the retry; the installer refuses to overwrite an
+existing file, directory, symlink, or dangling symlink at the release path. It
+prints the exact Caddy backup path on success; retain it for explicit rollback.
 
 ## Migrating the existing identity database before first start
 
