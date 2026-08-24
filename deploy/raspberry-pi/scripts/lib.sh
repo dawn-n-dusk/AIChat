@@ -123,8 +123,196 @@ atomic_symlink() {
   local target="$1"
   local link_path="$2"
   local temporary="${link_path}.new.$$"
-  ln -s "$target" "$temporary"
-  mv -Tf "$temporary" "$link_path"
+
+  if [[ -e "$temporary" || -L "$temporary" ]]; then
+    printf 'ERROR: refusing to reuse stale atomic-symlink temporary: %s\n' "$temporary" >&2
+    return 1
+  fi
+  if ! ln -s "$target" "$temporary"; then
+    printf 'ERROR: failed to create atomic-symlink temporary: %s\n' "$temporary" >&2
+    return 1
+  fi
+  if ! mv -Tf "$temporary" "$link_path"; then
+    printf 'ERROR: failed to install atomic symlink: %s\n' "$link_path" >&2
+    if ! rm -f -- "$temporary"; then
+      printf 'ERROR: failed to remove atomic-symlink temporary: %s\n' "$temporary" >&2
+    fi
+    return 1
+  fi
+  return 0
+}
+
+resolve_release_link() {
+  local name="$1"
+  local link_path="$2"
+  local releases_dir="$3"
+  local python_bin="${AICHAT_PYTHON:-python3}"
+  local resolved resolved_releases
+
+  if [[ ! -L "$link_path" ]]; then
+    if [[ -e "$link_path" ]]; then
+      printf 'ERROR: %s must be a symlink: %s\n' "$name" "$link_path" >&2
+      return 2
+    fi
+    return 1
+  fi
+
+  resolved="$($python_bin - "$link_path" <<'PY'
+import pathlib
+import sys
+
+try:
+    print(pathlib.Path(sys.argv[1]).resolve(strict=True))
+except (OSError, RuntimeError):
+    raise SystemExit(1)
+PY
+  )" || {
+    printf 'ERROR: %s does not resolve to an existing release: %s\n' "$name" "$link_path" >&2
+    return 2
+  }
+  resolved_releases="$($python_bin - "$releases_dir" <<'PY'
+import pathlib
+import sys
+
+try:
+    print(pathlib.Path(sys.argv[1]).resolve(strict=True))
+except (OSError, RuntimeError):
+    raise SystemExit(1)
+PY
+)" || {
+    printf 'ERROR: release directory does not resolve: %s\n' "$releases_dir" >&2
+    return 2
+  }
+  if [[ "$(dirname "$resolved")" != "$resolved_releases" || ! -d "$resolved" ]]; then
+    printf 'ERROR: %s escaped the release directory: %s\n' "$name" "$resolved" >&2
+    return 2
+  fi
+  printf '%s\n' "$resolved"
+}
+
+snapshot_path_state() {
+  local backup_root="$1"
+  local slot="$2"
+  local path="$3"
+  local slot_root="${backup_root}/${slot}"
+
+  install -d -m 0700 "$slot_root"
+  printf '%s\n' "$path" >"${slot_root}/path"
+  if [[ -e "$path" || -L "$path" ]]; then
+    if [[ -d "$path" && ! -L "$path" ]]; then
+      printf 'ERROR: refusing to snapshot unexpected directory: %s\n' "$path" >&2
+      return 1
+    fi
+    printf 'present\n' >"${slot_root}/state"
+    cp -a -- "$path" "${slot_root}/value"
+  else
+    printf 'absent\n' >"${slot_root}/state"
+  fi
+}
+
+restore_path_state() {
+  local backup_root="$1"
+  local slot="$2"
+  local slot_root="${backup_root}/${slot}"
+  local path expected_path state
+
+  [[ -f "${slot_root}/path" && -f "${slot_root}/state" ]] || {
+    printf 'ERROR: path snapshot is incomplete: %s\n' "$slot_root" >&2
+    return 1
+  }
+  path="$(<"${slot_root}/path")"
+  expected_path="$3"
+  state="$(<"${slot_root}/state")"
+  if [[ "$path" != "$expected_path" ]]; then
+    printf 'ERROR: path snapshot target mismatch: expected %s, found %s\n' \
+      "$expected_path" "$path" >&2
+    return 1
+  fi
+  if [[ -d "$path" && ! -L "$path" ]]; then
+    printf 'ERROR: refusing to replace unexpected directory during restore: %s\n' "$path" >&2
+    return 1
+  fi
+
+  case "$state" in
+    present)
+      [[ -e "${slot_root}/value" || -L "${slot_root}/value" ]] || {
+        printf 'ERROR: path snapshot value is missing: %s\n' "$slot_root" >&2
+        return 1
+      }
+      if [[ ! -d "$(dirname "$path")" ]]; then
+        if ! install -d -m 0755 "$(dirname "$path")"; then
+          printf 'ERROR: failed to recreate parent directory for restore: %s\n' "$path" >&2
+          return 1
+        fi
+      fi
+      if ! rm -f -- "$path"; then
+        printf 'ERROR: failed to remove current path before restore: %s\n' "$path" >&2
+        return 1
+      fi
+      if ! cp -a -- "${slot_root}/value" "$path"; then
+        printf 'ERROR: failed to restore path snapshot: %s\n' "$path" >&2
+        return 1
+      fi
+      ;;
+    absent)
+      if [[ -e "$path" || -L "$path" ]]; then
+        if ! rm -f -- "$path"; then
+          printf 'ERROR: failed to restore absent path state: %s\n' "$path" >&2
+          return 1
+        fi
+      fi
+      ;;
+    *)
+      printf 'ERROR: unknown path snapshot state %s for %s\n' "$state" "$path" >&2
+      return 1
+      ;;
+  esac
+  return 0
+}
+
+restore_release_link_state() {
+  local name="$1"
+  local link_path="$2"
+  local target="$3"
+  local releases_dir="$4"
+  local python_bin="${AICHAT_PYTHON:-python3}"
+  local resolved_releases
+
+  if [[ -n "$target" ]]; then
+    resolved_releases="$($python_bin - "$releases_dir" <<'PY'
+import pathlib
+import sys
+
+try:
+    print(pathlib.Path(sys.argv[1]).resolve(strict=True))
+except (OSError, RuntimeError):
+    raise SystemExit(1)
+PY
+)" || {
+      printf 'ERROR: release directory does not resolve during %s restore: %s\n' \
+        "$name" "$releases_dir" >&2
+      return 1
+    }
+    if [[ "$(dirname "$target")" != "$resolved_releases" || ! -d "$target" ]]; then
+      printf 'ERROR: refusing to restore invalid %s target: %s\n' "$name" "$target" >&2
+      return 1
+    fi
+    if ! atomic_symlink "$target" "$link_path"; then
+      printf 'ERROR: failed to restore %s link: %s\n' "$name" "$link_path" >&2
+      return 1
+    fi
+    return 0
+  fi
+  if [[ -L "$link_path" ]]; then
+    if ! rm -f -- "$link_path"; then
+      printf 'ERROR: failed to restore absent %s link state: %s\n' "$name" "$link_path" >&2
+      return 1
+    fi
+  elif [[ -e "$link_path" ]]; then
+    printf 'ERROR: refusing to remove non-symlink %s path: %s\n' "$name" "$link_path" >&2
+    return 1
+  fi
+  return 0
 }
 
 render_caddy_route() {
@@ -151,10 +339,11 @@ render_caddy_global_options() {
 
 wait_for_local_health() {
   local attempts="${1:-30}"
+  local port="${2:-$AICHAT_RELAY_PORT}"
   local index
   for ((index = 1; index <= attempts; index += 1)); do
     if curl --fail --silent --show-error --max-time 2 \
-      "http://127.0.0.1:${AICHAT_RELAY_PORT}/health" >/dev/null; then
+      "http://127.0.0.1:${port}/health" >/dev/null; then
       return 0
     fi
     sleep 1

@@ -21,6 +21,15 @@ def run(*arguments: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(arguments, check=True, text=True, capture_output=True)
 
 
+def run_shell(script: str, *arguments: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["bash", "-c", script, "test-shell", *arguments],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+
 def valid_adapted_document() -> dict[str, object]:
     return {
         "logging": {
@@ -115,10 +124,309 @@ def valid_adapted_document() -> dict[str, object]:
 
 class DeploymentPackageTests(unittest.TestCase):
     def test_shell_and_python_sources_parse(self) -> None:
-        for script in SCRIPTS.glob("*.sh"):
+        for script in (*SCRIPTS.glob("*.sh"), *(ROOT / "tests").glob("*.sh")):
             run("bash", "-n", str(script))
         for script in SCRIPTS.glob("*.py"):
             run("python3", "-m", "py_compile", str(script))
+
+    def test_release_link_validation_is_fail_closed(self) -> None:
+        script = r'''
+set -Eeuo pipefail
+source "$1"
+status=0
+resolved="$(resolve_release_link TEST_LINK "$2" "$3")" || status=$?
+printf '%s\n%s\n' "$status" "$resolved"
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            releases = root / "releases"
+            releases.mkdir()
+            valid_release = releases / "release-a"
+            valid_release.mkdir()
+            outside_release = root / "outside"
+            outside_release.mkdir()
+            link = root / "current"
+
+            result = run_shell(script, str(SCRIPTS / "lib.sh"), str(link), str(releases))
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(result.stdout.splitlines()[0], "1")
+
+            link.symlink_to(valid_release)
+            result = run_shell(script, str(SCRIPTS / "lib.sh"), str(link), str(releases))
+            self.assertEqual(result.stdout.splitlines(), ["0", str(valid_release.resolve())])
+
+            link.unlink()
+            link.symlink_to(root / "missing")
+            result = run_shell(script, str(SCRIPTS / "lib.sh"), str(link), str(releases))
+            self.assertEqual(result.stdout.splitlines()[0], "2")
+            self.assertIn("does not resolve", result.stderr)
+
+            link.unlink()
+            link.symlink_to(link)
+            result = run_shell(script, str(SCRIPTS / "lib.sh"), str(link), str(releases))
+            self.assertEqual(result.stdout.splitlines()[0], "2")
+
+            link.unlink()
+            link.symlink_to(outside_release)
+            result = run_shell(script, str(SCRIPTS / "lib.sh"), str(link), str(releases))
+            self.assertEqual(result.stdout.splitlines()[0], "2")
+            self.assertIn("escaped the release directory", result.stderr)
+
+            link.unlink()
+            nested = valid_release / "server"
+            nested.mkdir()
+            link.symlink_to(nested)
+            result = run_shell(script, str(SCRIPTS / "lib.sh"), str(link), str(releases))
+            self.assertEqual(result.stdout.splitlines()[0], "2")
+
+            link.unlink()
+            link.write_text("not a symlink")
+            result = run_shell(script, str(SCRIPTS / "lib.sh"), str(link), str(releases))
+            self.assertEqual(result.stdout.splitlines()[0], "2")
+            self.assertIn("must be a symlink", result.stderr)
+
+    def test_atomic_symlink_short_circuits_and_never_reuses_stale_temporary(self) -> None:
+        script = r'''
+set -Eeuo pipefail
+source "$1"
+mode="$2"
+link="$3"
+command ln -s old "$link"
+case "$mode" in
+  stale)
+    command ln -s stale "${link}.new.$$"
+    ;;
+  ln-fail)
+    ln() { return 1; }
+    ;;
+  mv-fail)
+    mv() { return 1; }
+    ;;
+  success)
+    mv() {
+      command rm -f -- "$3"
+      command mv -f -- "$2" "$3"
+    }
+    ;;
+esac
+status=0
+atomic_symlink expected "$link" || status=$?
+printf 'status=%s\n' "$status"
+printf 'target=%s\n' "$(command readlink "$link")"
+if [[ -e "${link}.new.$$" || -L "${link}.new.$$" ]]; then
+  printf 'temporary=%s\n' "$(command readlink "${link}.new.$$")"
+else
+  printf 'temporary=absent\n'
+fi
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            link = Path(directory) / "current"
+            stale = run_shell(script, str(SCRIPTS / "lib.sh"), "stale", str(link))
+            self.assertEqual(stale.returncode, 0, stale.stderr)
+            self.assertIn("status=1", stale.stdout)
+            self.assertIn("target=old", stale.stdout)
+            self.assertIn("temporary=stale", stale.stdout)
+            self.assertIn("refusing to reuse stale", stale.stderr)
+
+        with tempfile.TemporaryDirectory() as directory:
+            link = Path(directory) / "current"
+            ln_fail = run_shell(script, str(SCRIPTS / "lib.sh"), "ln-fail", str(link))
+            self.assertEqual(ln_fail.returncode, 0, ln_fail.stderr)
+            self.assertIn("status=1", ln_fail.stdout)
+            self.assertIn("target=old", ln_fail.stdout)
+            self.assertIn("temporary=absent", ln_fail.stdout)
+
+        with tempfile.TemporaryDirectory() as directory:
+            link = Path(directory) / "current"
+            mv_fail = run_shell(script, str(SCRIPTS / "lib.sh"), "mv-fail", str(link))
+            self.assertEqual(mv_fail.returncode, 0, mv_fail.stderr)
+            self.assertIn("status=1", mv_fail.stdout)
+            self.assertIn("target=old", mv_fail.stdout)
+            self.assertIn("temporary=absent", mv_fail.stdout)
+
+        with tempfile.TemporaryDirectory() as directory:
+            link = Path(directory) / "current"
+            success = run_shell(script, str(SCRIPTS / "lib.sh"), "success", str(link))
+            self.assertEqual(success.returncode, 0, success.stderr)
+            self.assertIn("status=0", success.stdout)
+            self.assertIn("target=expected", success.stdout)
+            self.assertIn("temporary=absent", success.stdout)
+
+    def test_release_link_restore_propagates_atomic_install_failure(self) -> None:
+        script = r'''
+set -Eeuo pipefail
+source "$1"
+release="$2"
+link="$3"
+atomic_symlink() { return 1; }
+status=0
+restore_release_link_state TEST_LINK "$link" "$release" "$(dirname "$release")" || status=$?
+printf 'status=%s\n' "$status"
+if [[ -e "$link" || -L "$link" ]]; then
+  printf 'link=present\n'
+else
+  printf 'link=absent\n'
+fi
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            releases = Path(directory) / "releases"
+            release = releases / "old-current"
+            link = Path(directory) / "current"
+            release.mkdir(parents=True)
+            result = run_shell(
+                script,
+                str(SCRIPTS / "lib.sh"),
+                str(release.resolve()),
+                str(link.resolve()),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("status=1", result.stdout)
+            self.assertIn("link=absent", result.stdout)
+            self.assertIn("failed to restore TEST_LINK link", result.stderr)
+
+    def test_path_snapshot_restores_present_and_absent_states(self) -> None:
+        script = r'''
+set -Eeuo pipefail
+source "$1"
+backup_root="$2"
+present="$3"
+absent="$4"
+snapshot_path_state "$backup_root" present "$present"
+snapshot_path_state "$backup_root" absent "$absent"
+printf 'changed\n' >"$present"
+chmod 0600 "$present"
+printf 'created\n' >"$absent"
+restore_path_state "$backup_root" present "$present"
+restore_path_state "$backup_root" absent "$absent"
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            backup_root = root / "snapshot"
+            present = root / "relay.env"
+            absent = root / "unit.service"
+            present.write_text("original\n")
+            present.chmod(0o640)
+            result = run_shell(
+                script,
+                str(SCRIPTS / "lib.sh"),
+                str(backup_root),
+                str(present),
+                str(absent),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(present.read_text(), "original\n")
+            self.assertEqual(present.stat().st_mode & 0o777, 0o640)
+            self.assertFalse(absent.exists())
+
+    def test_path_restore_propagates_copy_and_remove_failures(self) -> None:
+        copy_failure_script = r'''
+set -Eeuo pipefail
+source "$1"
+backup_root="$2"
+path="$3"
+printf 'original\n' >"$path"
+snapshot_path_state "$backup_root" value "$path"
+rm -f "$path"
+cp() { return 1; }
+status=0
+restore_path_state "$backup_root" value "$path" || status=$?
+printf 'status=%s\n' "$status"
+'''
+        remove_failure_script = r'''
+set -Eeuo pipefail
+source "$1"
+backup_root="$2"
+path="$3"
+snapshot_path_state "$backup_root" absent "$path"
+printf 'created\n' >"$path"
+rm() { return 1; }
+status=0
+restore_path_state "$backup_root" absent "$path" || status=$?
+printf 'status=%s\n' "$status"
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            result = run_shell(
+                copy_failure_script,
+                str(SCRIPTS / "lib.sh"),
+                str(root / "snapshot"),
+                str(root / "relay.env"),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("status=1", result.stdout)
+            self.assertIn("failed to restore path snapshot", result.stderr)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            result = run_shell(
+                remove_failure_script,
+                str(SCRIPTS / "lib.sh"),
+                str(root / "snapshot"),
+                str(root / "unit.service"),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("status=1", result.stdout)
+            self.assertIn("failed to restore absent path state", result.stderr)
+
+    def test_release_permissions_survive_umask_027_without_marking_plain_files_executable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            release = Path(directory) / "release"
+            server = release / "server"
+            executable = release / "venv" / "bin" / "uvicorn"
+            server.mkdir(parents=True, mode=0o700)
+            executable.parent.mkdir(parents=True, mode=0o700)
+            plain = server / "app.py"
+            plain.write_text("value = 1\n")
+            plain.chmod(0o600)
+            executable.write_text("#!/bin/sh\n")
+            executable.chmod(0o700)
+            run("chmod", "-R", "u=rwX,go=rX", str(release))
+            self.assertEqual(release.stat().st_mode & 0o777, 0o755)
+            self.assertEqual(server.stat().st_mode & 0o777, 0o755)
+            self.assertEqual(plain.stat().st_mode & 0o777, 0o644)
+            self.assertEqual(executable.stat().st_mode & 0o777, 0o755)
+
+    def test_installer_captures_and_restores_transaction_state(self) -> None:
+        installer = (SCRIPTS / "install.sh").read_text()
+        link_validation = installer.index("old_current=\"$(resolve_release_link")
+        first_mutation = installer.index('note "creating the dedicated aichat-relay account')
+        self.assertLess(link_validation, first_mutation)
+        self.assertIn('[[ ! -e "$RELEASE_DIR" && ! -L "$RELEASE_DIR" ]]', installer)
+        self.assertIn('chown -R root:root "$RELEASE_DIR"', installer)
+        self.assertIn('chmod -R u=rwX,go=rX "$RELEASE_DIR"', installer)
+        self.assertIn('runuser -u aichat-relay -- test -x', installer)
+        self.assertIn('PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$RELEASE_DIR/server"', installer)
+        for path in (
+            '"$ETC_DIR/relay.env"',
+            "/etc/systemd/system/aichat-relay.service",
+            "/etc/systemd/system/aichat-relay-backup.service",
+            "/etc/systemd/system/aichat-relay-backup.timer",
+        ):
+            self.assertIn(path, installer)
+        for failure in (
+            "Relay failed local health acceptance",
+            "Caddy validation/adapted-route acceptance failed",
+            "Caddy reload failed",
+            "public HTTPS health check failed",
+            "initial backup or backup timer acceptance failed",
+        ):
+            self.assertIn(f'fail_transaction "{failure}"', installer)
+        self.assertIn("restore_installed_files || failures=", installer)
+        self.assertIn("systemctl daemon-reload", installer)
+        self.assertIn("service_was_enabled", installer)
+        self.assertIn("timer_was_enabled", installer)
+        self.assertIn("timer_was_active", installer)
+        self.assertIn("unexpected installer failure rollback was incomplete", installer)
+        self.assertIn("preserving transaction snapshot for manual recovery", installer)
+        self.assertNotIn("rollback_release", installer)
+        self.assertNotIn("relay.env.previous", installer)
+        mutation_segment = installer.split("transaction_active=true", 1)[1].split(
+            "transaction_active=false", 1
+        )[0]
+        self.assertNotRegex(mutation_segment, r"(?m)^\s*(die|exit)\b")
+        final_backup = installer.index("initial backup or backup timer acceptance failed")
+        previous_update = installer.index('atomic_symlink "$old_current" "$PREVIOUS_LINK"')
+        self.assertLess(final_backup, previous_update)
 
     def test_service_is_loopback_only_and_uses_dedicated_account(self) -> None:
         unit = (TEMPLATES / "aichat-relay.service").read_text()
