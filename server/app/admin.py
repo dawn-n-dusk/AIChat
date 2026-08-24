@@ -151,7 +151,12 @@ def write_bootstrap_exclusive(path: Path, artifact: dict[str, object]) -> None:
         if descriptor is not None:
             os.close(descriptor)
         if os.path.lexists(temporary):
-            os.unlink(temporary)
+            try:
+                os.unlink(temporary)
+            except OSError as cleanup_error:
+                raise AdminError(
+                    f"temporary bootstrap artifact may remain at {temporary}; database activation did not complete, so remove the inactive artifact manually"
+                ) from cleanup_error
 
 
 def _commit_connection(connection: sqlite3.Connection) -> None:

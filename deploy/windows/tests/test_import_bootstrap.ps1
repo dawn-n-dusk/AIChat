@@ -16,6 +16,9 @@ $bootstrapDirectory = Join-Path $protectedRoot "bootstrap\ci-$testId"
 $configDirectory = Join-Path $protectedRoot "ci-$testId"
 $artifactPath = Join-Path $bootstrapDirectory "windows-agent.bootstrap.json"
 $configPath = Join-Path $configDirectory "config.json"
+$freshConfigDirectory = Join-Path $protectedRoot "ci-fresh-$testId"
+$freshArtifactPath = Join-Path $bootstrapDirectory "windows-agent-fresh.bootstrap.json"
+$freshConfigPath = Join-Path $freshConfigDirectory "config.json"
 
 New-Item -ItemType Directory -Path $bootstrapDirectory -Force | Out-Null
 New-Item -ItemType Directory -Path $configDirectory -Force | Out-Null
@@ -100,12 +103,56 @@ try {
         throw "Imported config ACL is not restricted to the current SID"
     }
 
+    $freshTokenBytes = New-Object byte[] 48
+    $freshRandom = [Security.Cryptography.RandomNumberGenerator]::Create()
+    $freshRandom.GetBytes($freshTokenBytes)
+    $freshRandom.Dispose()
+    $freshToken = [Convert]::ToBase64String($freshTokenBytes).TrimEnd("=").Replace("+", "-").Replace("/", "_")
+    $freshBootstrap = [ordered]@{
+        schema_version = 1
+        kind = "aichat-agent-bootstrap"
+        server = "https://relay.example.test/aichat"
+        agent_id = "ci-fresh-agent-$testId"
+        agent_name = "Windows Fresh CI Agent"
+        token = $freshToken
+        created_at = "2026-08-24T00:00:00.000Z"
+    }
+    [IO.File]::WriteAllText(
+        $freshArtifactPath,
+        (($freshBootstrap | ConvertTo-Json -Depth 8) + [Environment]::NewLine),
+        $utf8NoBom
+    )
+    if (Test-Path -LiteralPath $freshConfigDirectory) {
+        throw "Fresh config parent unexpectedly exists before import"
+    }
+    $freshCaptured = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $importer `
+        -BootstrapPath $freshArtifactPath `
+        -ConfigPath $freshConfigPath 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) {
+        throw "Fresh bootstrap importer failed; captured output was suppressed"
+    }
+    if ($freshCaptured.Contains($freshToken)) {
+        throw "Fresh bootstrap importer exposed a credential in process output"
+    }
+    if (-not (Test-Path -LiteralPath $freshConfigPath -PathType Leaf)) {
+        throw "Fresh bootstrap importer did not create the default-style config parent"
+    }
+    $freshImported = Get-Content -LiteralPath $freshConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ($freshImported.agent_id -ne "ci-fresh-agent-$testId" -or
+        $freshImported.token -ne $freshToken) {
+        throw "Fresh bootstrap import did not write the expected identity"
+    }
+
     Write-Host "Windows bootstrap functional test passed"
 } finally {
     $captured = $null
     $imported = $null
     $token = $null
     $oldToken = $null
+    $freshCaptured = $null
+    $freshImported = $null
+    $freshToken = $null
     Remove-Item -LiteralPath $configDirectory -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $freshConfigDirectory -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $bootstrapDirectory -Recurse -Force -ErrorAction SilentlyContinue
 }

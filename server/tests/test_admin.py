@@ -272,3 +272,44 @@ def test_published_artifact_cleanup_failure_is_explicit(
     assert output.exists()
     assert agent_state(database, agent_id) == before
     output.unlink()
+
+
+def test_temporary_artifact_cleanup_failure_is_explicit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = create_database(tmp_path, monkeypatch)
+    agent_id, _, _ = seed_agent(database)
+    before = agent_state(database, agent_id)
+    output = tmp_path / "temporary-cleanup-failure.json"
+    real_unlink = admin.os.unlink
+
+    def reject_publish(
+        source: str | os.PathLike[str],
+        target: str | os.PathLike[str],
+        *,
+        follow_symlinks: bool = True,
+    ) -> None:
+        del source, target, follow_symlinks
+        raise PermissionError("synthetic publish denial")
+
+    def reject_temporary_cleanup(path: str | os.PathLike[str]) -> None:
+        if Path(path).name.startswith(f".{output.name}.tmp-"):
+            raise PermissionError("synthetic temporary cleanup denial")
+        real_unlink(path)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(admin.os, "link", reject_publish)
+        patch.setattr(admin.os, "unlink", reject_temporary_cleanup)
+        with pytest.raises(admin.AdminError, match="temporary bootstrap artifact may remain"):
+            admin.provision_bootstrap(
+                database=database,
+                agent_id=agent_id,
+                output=output,
+                server="https://relay.example.test/aichat",
+                confirm_relay_stopped=True,
+            )
+
+    residue = list(tmp_path.glob(f".{output.name}.tmp-*"))
+    assert len(residue) == 1
+    assert agent_state(database, agent_id) == before
+    residue[0].unlink()

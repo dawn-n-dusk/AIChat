@@ -60,7 +60,7 @@ if ($artifactItem.PSIsContainer -or ($artifactItem.Attributes -band [IO.FileAttr
 }
 
 # Restrict the trusted staging directory and transported artifact before parsing
-# it. A same-SID process or administrator remains outside this local boundary.
+# it. A same-SID process or administrator remains inside this local trust boundary.
 Protect-SecretFile -Path $artifactPath
 
 $artifactStream = $null
@@ -120,14 +120,15 @@ if ($token.Length -lt 43 -or $token.Length -gt 512 -or $token -notmatch '^[A-Za-
 }
 
 $paths = Get-AIChatWindowsPaths -StateRoot $StateRoot -ConfigPath $ConfigPath
-$paths.ConfigPath = Assert-AIChatPathWithinProtectedRoot `
-    -Path $paths.ConfigPath `
+$candidateConfigPath = [IO.Path]::GetFullPath($paths.ConfigPath)
+$configParent = Split-Path -Parent $candidateConfigPath
+[void](Assert-AIChatPathWithinProtectedRoot `
+    -Path $configParent `
     -ProtectedRoot $protectedRoot `
-    -LeafMayBeMissing
-$configParent = Split-Path -Parent $paths.ConfigPath
+    -MissingTailMayBeCreated)
 $configParentItem = Get-Item -LiteralPath $configParent -Force -ErrorAction SilentlyContinue
 if ($null -eq $configParentItem) {
-    New-Item -ItemType Directory -Path $configParent | Out-Null
+    New-Item -ItemType Directory -Path $configParent -Force | Out-Null
     $configParentItem = Get-Item -LiteralPath $configParent -Force
 }
 if (-not $configParentItem.PSIsContainer -or
@@ -136,6 +137,10 @@ if (-not $configParentItem.PSIsContainer -or
 }
 Protect-SecretFile -Path $configParent
 [void](Assert-AIChatPathWithinProtectedRoot -Path $configParent -ProtectedRoot $protectedRoot)
+$paths.ConfigPath = Assert-AIChatPathWithinProtectedRoot `
+    -Path $candidateConfigPath `
+    -ProtectedRoot $protectedRoot `
+    -LeafMayBeMissing
 try {
     $config = Read-JsonObject -Path $paths.ConfigPath
 } catch {

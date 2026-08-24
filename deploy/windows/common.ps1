@@ -85,7 +85,8 @@ function Assert-AIChatPathWithinProtectedRoot {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
         [Parameter(Mandatory = $true)][string]$ProtectedRoot,
-        [switch]$LeafMayBeMissing
+        [switch]$LeafMayBeMissing,
+        [switch]$MissingTailMayBeCreated
     )
 
     $root = [IO.Path]::GetFullPath($ProtectedRoot).TrimEnd(
@@ -111,14 +112,22 @@ function Assert-AIChatPathWithinProtectedRoot {
     )
     $segments = if ($relative) { $relative -split '[\\/]' } else { @() }
     $current = $root
+    $missingTail = $false
     for ($index = 0; $index -lt $segments.Count; $index++) {
         $current = Join-Path $current $segments[$index]
         $item = Get-Item -LiteralPath $current -Force -ErrorAction SilentlyContinue
         if ($null -eq $item) {
+            if ($MissingTailMayBeCreated) {
+                $missingTail = $true
+                continue
+            }
             if ($LeafMayBeMissing -and $index -eq $segments.Count - 1) {
                 continue
             }
             throw "Protected secret path component does not exist: $current"
+        }
+        if ($missingTail) {
+            throw "Protected secret path contains an unexpected object below a missing parent"
         }
         if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
             throw "Protected secret paths must not contain reparse points"
