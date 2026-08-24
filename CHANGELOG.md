@@ -10,7 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Make Raspberry Pi Relay first install and upgrades fail closed on malformed or dangling release links, normalize staged virtual-environment permissions for the dedicated service account under `umask 027`, and transactionally restore release links, runtime files, systemd units, Caddy, and prior service/timer state after failed acceptance.
 - Add disposable mocked installer failure injection for first install, upgrade, Caddy, health, backup, link-update, and incomplete-rollback paths.
-- Preserve Raspberry Pi Caddy provisioning-deny order with an explicit route block, and reject adapted candidates unless all three exact POST-only denies share one route context ahead of the Relay proxy.
+- Preserve Raspberry Pi Caddy provisioning-deny order with an explicit route block, and bind adapted validation to the unique exact Relay route object, its direct provisioning-deny context, and its real ancestor ordering before the unique fallback; recursive or cross-context decoy proxies cannot satisfy the check.
 
 ### Added
 

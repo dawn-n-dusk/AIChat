@@ -715,13 +715,13 @@ printf 'status=%s\n' "$status"
         ][0]["routes"]
         registration_deny = reordered_context.pop(1)
         reordered_context.append(registration_deny)
-        invalid_documents.append(("precede the Relay proxy", reordered))
+        invalid_documents.append(("precede it", reordered))
 
         split = valid_adapted_document()
         split_outer = split["apps"]["http"]["servers"]["srv0"]["routes"]
         split_context = split_outer[1]["handle"][0]["routes"]
         split_outer.insert(1, split_context.pop(1))
-        invalid_documents.append(("share one route context", split))
+        invalid_documents.append(("direct members", split))
 
         get_only = valid_adapted_document()
         get_context = get_only["apps"]["http"]["servers"]["srv0"]["routes"][1][
@@ -766,7 +766,18 @@ printf 'status=%s\n' "$status"
         )
 
         documents = [(None, public_adapted_document())]
-        documents.append(("exact managed POST deny remains", valid_adapted_document()))
+        unrelated_deny = public_adapted_document()
+        unrelated_deny["apps"]["http"]["servers"]["srv0"]["routes"][1]["handle"][0][
+            "routes"
+        ].insert(
+            0,
+            {
+                "match": [{"method": ["POST"], "path": ["/unrelated/*"]}],
+                "handle": [{"handler": "static_response", "status_code": 403}],
+            },
+        )
+        documents.append((None, unrelated_deny))
+        documents.append(("overlapping managed POST deny remains", valid_adapted_document()))
 
         marker_only = public_adapted_document()
         marker_source = valid_adapted_document()["apps"]["http"]["servers"]["srv0"][
@@ -792,6 +803,188 @@ printf 'status=%s\n' "$status"
                 else:
                     self.assertNotEqual(result.returncode, 0)
                     self.assertIn(expected, result.stderr)
+
+    def test_adapted_caddy_validator_rejects_cross_context_decoy_relay(self) -> None:
+        document = valid_adapted_document()
+        wrapper = document["apps"]["http"]["servers"]["srv0"]["routes"][1]
+        managed_routes = wrapper["handle"][0]["routes"]
+        exact_relay_route = managed_routes.pop()
+        managed_routes.append(
+            {
+                "match": [{"path": ["/decoy"]}],
+                "handle": [
+                    {
+                        "handler": "reverse_proxy",
+                        "upstreams": [{"dial": "127.0.0.1:8787"}],
+                    }
+                ],
+            }
+        )
+        wrapper["handle"].insert(
+            1,
+            {"handler": "subroute", "routes": [exact_relay_route]},
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            adapted = Path(directory) / "adapted.json"
+            adapted.write_text(json.dumps(document))
+            result = subprocess.run(
+                [
+                    "python3",
+                    str(SCRIPTS / "validate-caddy-route.py"),
+                    "--adapted-json",
+                    str(adapted),
+                    "--path-prefix",
+                    "/aichat",
+                    "--relay-dial",
+                    "127.0.0.1:8787",
+                    "--fallback-dial",
+                    "127.0.0.1:17300",
+                    "--public-provisioning",
+                    "false",
+                ],
+                text=True,
+                capture_output=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("direct members of the exact Relay route context", result.stderr)
+
+    def test_adapted_caddy_validator_rejects_unrelated_handler_order_decoy(self) -> None:
+        document = valid_adapted_document()
+        wrapper = document["apps"]["http"]["servers"]["srv0"]["routes"][1]
+        managed_handler, fallback = wrapper["handle"]
+        fallback_before_exact_with_decoy = {
+            "handler": "subroute",
+            "routes": [
+                {
+                    "handle": [
+                        {
+                            "handler": "reverse_proxy",
+                            "upstreams": [{"dial": "127.0.0.1:8787"}],
+                        }
+                    ]
+                },
+                {"handle": [fallback]},
+            ],
+        }
+        wrapper["handle"] = [fallback_before_exact_with_decoy, managed_handler]
+
+        with tempfile.TemporaryDirectory() as directory:
+            adapted = Path(directory) / "adapted.json"
+            adapted.write_text(json.dumps(document))
+            result = subprocess.run(
+                [
+                    "python3",
+                    str(SCRIPTS / "validate-caddy-route.py"),
+                    "--adapted-json",
+                    str(adapted),
+                    "--path-prefix",
+                    "/aichat",
+                    "--relay-dial",
+                    "127.0.0.1:8787",
+                    "--fallback-dial",
+                    "127.0.0.1:17300",
+                    "--public-provisioning",
+                    "false",
+                ],
+                text=True,
+                capture_output=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("real ancestor context", result.stderr)
+
+    def test_adapted_caddy_validator_rejects_cross_server_deny_decoy(self) -> None:
+        document = valid_adapted_document()
+        managed_routes = document["apps"]["http"]["servers"]["srv0"]["routes"][1][
+            "handle"
+        ][0]["routes"]
+        moved_policy_routes = managed_routes[:4]
+        del managed_routes[:4]
+        document["apps"]["http"]["servers"]["other"] = {
+            "routes": [
+                *moved_policy_routes,
+                {
+                    "match": [{"path": ["/cross-server-decoy"]}],
+                    "handle": [
+                        {
+                            "handler": "reverse_proxy",
+                            "upstreams": [{"dial": "127.0.0.1:8787"}],
+                        }
+                    ],
+                },
+            ]
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            adapted = Path(directory) / "adapted.json"
+            adapted.write_text(json.dumps(document))
+            result = subprocess.run(
+                [
+                    "python3",
+                    str(SCRIPTS / "validate-caddy-route.py"),
+                    "--adapted-json",
+                    str(adapted),
+                    "--path-prefix",
+                    "/aichat",
+                    "--relay-dial",
+                    "127.0.0.1:8787",
+                    "--fallback-dial",
+                    "127.0.0.1:17300",
+                    "--public-provisioning",
+                    "false",
+                ],
+                text=True,
+                capture_output=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("direct members of the exact Relay route context", result.stderr)
+
+    def test_public_provisioning_rejects_combined_and_legacy_wildcard_denies(self) -> None:
+        managed_paths = [
+            "/aichat/v1/agents/register",
+            "/aichat/v1/channels",
+            "/aichat/v1/channels/*/join",
+        ]
+        deny_matchers = (
+            {"method": ["POST"], "path": managed_paths},
+            {"method": ["POST"], "path": ["/aichat/v1/agents/register*"]},
+            {"method": ["POST"], "path": ["/aichat/v1/channels/*/join*"]},
+        )
+        for matcher in deny_matchers:
+            document = public_adapted_document()
+            managed_routes = document["apps"]["http"]["servers"]["srv0"]["routes"][1][
+                "handle"
+            ][0]["routes"]
+            managed_routes.insert(
+                0,
+                {
+                    "match": [matcher],
+                    "handle": [{"handler": "static_response", "status_code": 403}],
+                },
+            )
+            with self.subTest(matcher=matcher), tempfile.TemporaryDirectory() as directory:
+                adapted = Path(directory) / "adapted.json"
+                adapted.write_text(json.dumps(document))
+                result = subprocess.run(
+                    [
+                        "python3",
+                        str(SCRIPTS / "validate-caddy-route.py"),
+                        "--adapted-json",
+                        str(adapted),
+                        "--path-prefix",
+                        "/aichat",
+                        "--relay-dial",
+                        "127.0.0.1:8787",
+                        "--fallback-dial",
+                        "127.0.0.1:17300",
+                        "--public-provisioning",
+                        "true",
+                    ],
+                    text=True,
+                    capture_output=True,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("overlapping managed POST deny remains", result.stderr)
 
     def test_adapted_caddy_validator_rejects_missing_or_overbroad_log_skip(self) -> None:
         invalid_matchers = (

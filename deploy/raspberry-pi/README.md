@@ -310,10 +310,11 @@ Expected acceptance includes:
   marker-bearing edge 403 for missing/invalid and optional valid tokens even
   with query strings, while GET is not rejected by the POST-only edge matcher;
 - Caddy validates and contains the managed route/global logger block; adapted
-  JSON proves the three exact provisioning denies share one route context ahead
-  of the Relay proxy, plus the exact AIChat-only `log_name`/`log_skip`, named
-  error logger query redaction, and default-logger exclusion, while existing
-  root/AeroLink logs remain and debug logging is rejected;
+  JSON binds the three exact provisioning denies to the direct parent of the
+  unique exact Relay route and proves that route precedes the unique fallback in
+  their real ancestor context, plus the exact AIChat-only `log_name`/`log_skip`,
+  named error logger query redaction, and default-logger exclusion, while
+  existing root/AeroLink logs remain and debug logging is rejected;
 - SQLite and latest-backup integrity pass;
 - RustDesk listeners remain visible and no AIChat unit references their ports.
 
