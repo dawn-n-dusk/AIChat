@@ -109,6 +109,7 @@ def test_secret_paths_are_limited_to_non_reparse_localappdata_root() -> None:
     assert "function Assert-AIChatPathWithinProtectedRoot" in common
     assert "Secret path must remain below" in common
     assert "Protected secret paths must not contain reparse points" in common
+    assert "$segments = @(if ($relative)" in common
     assert "same-SID process or administrator remains inside" in importer
 
 

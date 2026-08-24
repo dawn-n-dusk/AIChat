@@ -110,7 +110,7 @@ function Assert-AIChatPathWithinProtectedRoot {
         [IO.Path]::DirectorySeparatorChar,
         [IO.Path]::AltDirectorySeparatorChar
     )
-    $segments = if ($relative) { $relative -split '[\\/]' } else { @() }
+    $segments = @(if ($relative) { $relative -split '[\\/]' })
     $current = $root
     $missingTail = $false
     for ($index = 0; $index -lt $segments.Count; $index++) {
