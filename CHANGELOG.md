@@ -10,6 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Make Raspberry Pi Relay first install and upgrades fail closed on malformed or dangling release links, normalize staged virtual-environment permissions for the dedicated service account under `umask 027`, and transactionally restore release links, runtime files, systemd units, Caddy, and prior service/timer state after failed acceptance.
 - Add disposable mocked installer failure injection for first install, upgrade, Caddy, health, backup, link-update, and incomplete-rollback paths.
+- Preserve Raspberry Pi Caddy provisioning-deny order with an explicit route block, and reject adapted candidates unless all three exact POST-only denies share one route context ahead of the Relay proxy.
 
 ### Added
 
@@ -34,6 +35,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Fail closed when a Codex Desktop owner, protocol version, task binding, or delivery receipt is ambiguous; do not treat experimental App Server support or private owner IPC as a stable cross-version conversation-write API.
 - Add an opt-in production-lockdown profile that disables docs and provisioning endpoints, applies process-local HTTP/WebSocket limits, caps concurrent WebSockets, and trusts forwarded client addresses only from configured proxy CIDRs.
 - Default the Raspberry Pi public deployment to the lockdown profile, deny public provisioning at Caddy, exclude only the AIChat prefix from existing access logs, redact query credentials from inherited Caddy handler-error logs with structurally validated filters, reject debug logging, and keep the Relay bound to loopback behind HTTPS/WSS.
+- Keep public provisioning behind Caddy and application-level gates, mark edge 403 responses for provenance checks, and use only invalid bodies or nonexistent channel IDs in missing-, invalid-, and valid-token acceptance probes so verification cannot create identities or channels.
 
 ### Validation
 

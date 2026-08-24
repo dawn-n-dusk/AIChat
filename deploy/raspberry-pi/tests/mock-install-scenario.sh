@@ -262,19 +262,6 @@ module = importlib.util.module_from_spec(spec)
 assert spec.loader is not None
 spec.loader.exec_module(module)
 document = module.valid_adapted_document()
-routes = document["apps"]["http"]["servers"]["srv0"]["routes"]
-for denied in (
-    "/aichat/v1/agents/register*",
-    "/aichat/v1/channels",
-    "/aichat/v1/channels/*/join*",
-):
-    routes.insert(
-        1,
-        {
-            "match": [{"path": [denied]}],
-            "handle": [{"handler": "static_response", "status_code": 403}],
-        },
-    )
 pathlib.Path(sys.argv[2]).write_text(json.dumps(document))
 PY
 
