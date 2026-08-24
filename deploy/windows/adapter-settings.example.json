@@ -1,0 +1,7 @@
+{
+  "allowed_sender_ids": "REPLACE_WITH_EXACT_AGENT_IDS_COMMA_SEPARATED",
+  "codex_thread_id": "00000000-0000-0000-0000-000000000000",
+  "codex_driver": "auto",
+  "grok_workdir": "C:\\path\\to\\project",
+  "grok_command": "grok"
+}

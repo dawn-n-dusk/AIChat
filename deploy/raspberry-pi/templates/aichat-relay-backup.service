@@ -1,0 +1,38 @@
+[Unit]
+Description=Create a consistent AIChat Relay SQLite backup
+ConditionPathExists=/var/lib/aichat-relay/relay.db
+After=aichat-relay.service
+
+[Service]
+Type=oneshot
+User=aichat-relay
+Group=aichat-relay
+EnvironmentFile=/etc/aichat-relay/relay.env
+ExecStart=/usr/local/libexec/aichat-relay/backup.sh /etc/aichat-relay/relay.env
+UMask=0077
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHome=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectProc=invisible
+ProtectSystem=strict
+ProcSubset=pid
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+ReadWritePaths=/var/lib/aichat-relay /var/backups/aichat-relay
+IPAddressDeny=any
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=aichat-relay-backup

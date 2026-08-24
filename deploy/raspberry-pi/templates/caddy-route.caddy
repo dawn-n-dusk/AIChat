@@ -1,0 +1,44 @@
+# BEGIN AICHAT RELAY (managed by AIChat deploy package)
+# Insert this block inside the existing dawnndusk-rustdesk.duckdns.org site,
+# immediately before its fallback reverse_proxy. handle_path strips the public
+# prefix, so /aichat/v1/ws reaches the Relay as /v1/ws and WSS upgrades pass
+# through Caddy's reverse_proxy automatically.
+# BEGIN AICHAT PUBLIC PROVISIONING DENY
+@aichat_public_registration {
+    method POST
+    path __AICHAT_PATH_PREFIX__/v1/agents/register*
+}
+respond @aichat_public_registration 403
+
+@aichat_public_channel_create {
+    method POST
+    path __AICHAT_PATH_PREFIX__/v1/channels
+}
+respond @aichat_public_channel_create 403
+
+@aichat_public_channel_join {
+    method POST
+    path __AICHAT_PATH_PREFIX__/v1/channels/*/join*
+}
+respond @aichat_public_channel_join 403
+# END AICHAT PUBLIC PROVISIONING DENY
+
+handle __AICHAT_PATH_PREFIX__ {
+    redir __AICHAT_PATH_PREFIX__/ 308
+}
+
+handle_path __AICHAT_PATH_PREFIX__/* {
+    request_body {
+        max_size 4MB
+    }
+    reverse_proxy 127.0.0.1:__AICHAT_RELAY_PORT__ {
+        health_uri /health
+        health_interval 30s
+        health_timeout 3s
+        transport http {
+            dial_timeout 3s
+            response_header_timeout 15s
+        }
+    }
+}
+# END AICHAT RELAY (managed by AIChat deploy package)
