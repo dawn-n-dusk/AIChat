@@ -1,0 +1,239 @@
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
+
+function Resolve-AIChatRepositoryRoot {
+    param([string]$RequestedPath)
+
+    $candidate = if ($RequestedPath) {
+        $RequestedPath
+    } else {
+        Join-Path $PSScriptRoot "..\.."
+    }
+    $resolved = (Resolve-Path -LiteralPath $candidate).Path
+    $required = @(
+        "adapters\mcp\pyproject.toml",
+        "adapters\codex-connector\package.json",
+        "plugins\aichat\.codex-plugin\plugin.json"
+    )
+    foreach ($relative in $required) {
+        if (-not (Test-Path -LiteralPath (Join-Path $resolved $relative) -PathType Leaf)) {
+            throw "RepositoryRoot is not an AIChat checkout: missing $relative"
+        }
+    }
+    return $resolved
+}
+
+function Get-AIChatWindowsPaths {
+    param(
+        [string]$StateRoot,
+        [string]$ConfigPath
+    )
+
+    $localAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
+    if (-not $localAppData) {
+        $localAppData = $env:LOCALAPPDATA
+    }
+    if (-not $localAppData) {
+        throw "Cannot resolve the current user's LocalApplicationData directory"
+    }
+    $roamingAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::ApplicationData)
+    if (-not $roamingAppData) {
+        $roamingAppData = $env:APPDATA
+    }
+
+    $resolvedState = if ($StateRoot) {
+        [IO.Path]::GetFullPath($StateRoot)
+    } else {
+        Join-Path $localAppData "AIChat\deploy\windows"
+    }
+    # This exactly matches platformdirs.user_config_dir("AIChat", "AIChat") on Windows.
+    $resolvedConfig = if ($ConfigPath) {
+        [IO.Path]::GetFullPath($ConfigPath)
+    } else {
+        Join-Path $localAppData "AIChat\AIChat\config.json"
+    }
+
+    return [pscustomobject]@{
+        StateRoot          = $resolvedState
+        ConfigPath         = $resolvedConfig
+        SettingsPath       = Join-Path $resolvedState "adapter-settings.json"
+        OwnershipPath      = Join-Path $resolvedState "ownership.json"
+        ManifestDirectory  = Join-Path $resolvedState "manifests"
+        BackupDirectory    = Join-Path $resolvedState "backups"
+        RuntimeDirectory   = Join-Path $resolvedState "runtime"
+        RunnerPath         = Join-Path $resolvedState "run-adapter.ps1"
+        ClaudeDesktopPath  = if ($roamingAppData) {
+            Join-Path $roamingAppData "Claude\claude_desktop_config.json"
+        } else {
+            $null
+        }
+    }
+}
+
+function Test-ExternalCommand {
+    param([Parameter(Mandatory = $true)][string]$Name)
+    return $null -ne (Get-Command $Name -ErrorAction SilentlyContinue)
+}
+
+function Invoke-NativeCapture {
+    param(
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [string[]]$Arguments = @()
+    )
+
+    $output = & $FilePath @Arguments 2>&1 | Out-String
+    return [pscustomobject]@{
+        ExitCode = $LASTEXITCODE
+        Output   = $output.Trim()
+    }
+}
+
+function Read-JsonObject {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return [pscustomobject]@{}
+    }
+    $raw = Get-Content -LiteralPath $Path -Raw -Encoding UTF8
+    if (-not $raw.Trim()) {
+        return [pscustomobject]@{}
+    }
+    $value = $raw | ConvertFrom-Json
+    if ($null -eq $value -or $value -isnot [psobject]) {
+        throw "JSON file must contain an object: $Path"
+    }
+    return $value
+}
+
+function Set-ObjectProperty {
+    param(
+        [Parameter(Mandatory = $true)][psobject]$Object,
+        [Parameter(Mandatory = $true)][string]$Name,
+        $Value
+    )
+
+    if ($Object.PSObject.Properties[$Name]) {
+        $Object.$Name = $Value
+    } else {
+        $Object | Add-Member -MemberType NoteProperty -Name $Name -Value $Value
+    }
+}
+
+function Write-JsonAtomic {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)]$Value,
+        [int]$Depth = 12
+    )
+
+    $parent = Split-Path -Parent $Path
+    New-Item -ItemType Directory -Path $parent -Force | Out-Null
+    $temporary = "$Path.tmp-$([Guid]::NewGuid().ToString('N'))"
+    $json = ($Value | ConvertTo-Json -Depth $Depth) + [Environment]::NewLine
+    [IO.File]::WriteAllText($temporary, $json, [Text.UTF8Encoding]::new($false))
+    Move-Item -LiteralPath $temporary -Destination $Path -Force
+}
+
+function Protect-SecretFile {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    if ($env:OS -ne "Windows_NT") {
+        return
+    }
+    $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    & icacls.exe $Path "/inheritance:r" "/grant:r" "*$($sid):(F)" | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to restrict ACLs on $Path"
+    }
+}
+
+function Backup-FileForRun {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$RunBackupDirectory
+    )
+
+    New-Item -ItemType Directory -Path $RunBackupDirectory -Force | Out-Null
+    $exists = Test-Path -LiteralPath $Path -PathType Leaf
+    $backupPath = $null
+    if ($exists) {
+        $safeName = ([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Path))).TrimEnd("=").Replace("/", "_").Replace("+", "-")
+        $backupPath = Join-Path $RunBackupDirectory "$safeName.json.bak"
+        Copy-Item -LiteralPath $Path -Destination $backupPath -Force
+    }
+    return [pscustomobject]@{
+        Path       = $Path
+        Existed    = $exists
+        BackupPath = $backupPath
+    }
+}
+
+function Get-DefaultOwnership {
+    return [pscustomobject]@{
+        CodexMarketplaceAdded = $false
+        CodexPluginAdded      = $false
+        CodexMcpAdded         = $false
+        ClaudeCodeMcpAdded    = $false
+        ClaudeChannelMcpAdded = $false
+        ClaudeDesktopManaged  = $false
+    }
+}
+
+function Read-Ownership {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $defaults = Get-DefaultOwnership
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return $defaults
+    }
+    $saved = Read-JsonObject -Path $Path
+    foreach ($property in $defaults.PSObject.Properties) {
+        if ($saved.PSObject.Properties[$property.Name]) {
+            $defaults.($property.Name) = [bool]$saved.($property.Name)
+        }
+    }
+    return $defaults
+}
+
+function Test-OutputContainsName {
+    param(
+        [string]$Output,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+    if (-not $Output) {
+        return $false
+    }
+    return $Output -match [regex]::Escape($Name)
+}
+
+function Assert-Node20 {
+    if (-not (Test-ExternalCommand "node")) {
+        throw "Node.js 20 or newer is required for the selected adapter"
+    }
+    $version = (& node --version).Trim()
+    if ($version -notmatch '^v(?<major>\d+)\.') {
+        throw "Cannot parse Node.js version: $version"
+    }
+    if ([int]$Matches.major -lt 20) {
+        throw "Node.js 20 or newer is required; found $version"
+    }
+    if (-not (Test-ExternalCommand "npm")) {
+        throw "npm is required for the selected adapter"
+    }
+}
+
+function Resolve-Python311Command {
+    if (Test-ExternalCommand "py") {
+        $probe = Invoke-NativeCapture -FilePath "py" -Arguments @("-3.11", "-c", "import sys; raise SystemExit(sys.version_info < (3, 11))")
+        if ($probe.ExitCode -eq 0) {
+            return [pscustomobject]@{ FilePath = "py"; Prefix = @("-3.11") }
+        }
+    }
+    if (Test-ExternalCommand "python") {
+        $probe = Invoke-NativeCapture -FilePath "python" -Arguments @("-c", "import sys; raise SystemExit(sys.version_info < (3, 11))")
+        if ($probe.ExitCode -eq 0) {
+            return [pscustomobject]@{ FilePath = "python"; Prefix = @() }
+        }
+    }
+    throw "Python 3.11 or newer is required for the AIChat MCP adapter"
+}

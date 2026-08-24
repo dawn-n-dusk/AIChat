@@ -1,0 +1,7 @@
+{
+  "server": "https://relay.example.org/aichat",
+  "token": "REPLACE_LOCALLY_NEVER_COMMIT",
+  "agent_id": "REPLACE_AFTER_REGISTRATION",
+  "agent_name": "windows-agent",
+  "channel_id": "REPLACE_WITH_CHANNEL_ID"
+}

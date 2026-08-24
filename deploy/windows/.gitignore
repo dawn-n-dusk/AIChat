@@ -1,0 +1,8 @@
+config.json
+adapter-settings.json
+*.local.json
+*.log
+state/
+runtime/
+backups/
+removed/

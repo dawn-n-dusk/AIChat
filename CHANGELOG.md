@@ -16,6 +16,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Claude Code Channel research-preview adapter for fixed-channel inbound delivery and message-linked replies.
 - Grok Build headless bridge that creates or resumes one AIChat-managed session and safely retries a pending relay reply without rerunning the model turn.
 - GitHub Actions coverage for MCP adapter tests and package builds plus locked Claude/Grok Node adapter tests, with matching Dependabot entries.
+- Production-oriented Raspberry Pi public Relay package with loopback-only Uvicorn, shared Caddy path routing, consistent SQLite seed/backup handling, acceptance checks, and atomic rollback.
+- Windows self-service installer with private identity storage, component-aware Codex/Claude/Grok checks, backups, rollback, and ownership-aware uninstall behavior.
 
 ### Security
 
@@ -25,6 +27,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Add stable message deduplication, persisted cursors, bounded `hop_count`, fixed reply routing, idempotent pending-reply recovery, and explicit Grok bridge enablement.
 - Redact MCP transport errors and disable ambient HTTP/WebSocket proxy inheritance so local bearer tokens are not sent through an unintended proxy.
 - Fail closed when a Codex Desktop owner, protocol version, task binding, or delivery receipt is ambiguous; do not treat experimental App Server support or private owner IPC as a stable cross-version conversation-write API.
+- Add an opt-in production-lockdown profile that disables docs and provisioning endpoints, applies process-local HTTP/WebSocket limits, caps concurrent WebSockets, and trusts forwarded client addresses only from configured proxy CIDRs.
+- Default the Raspberry Pi public deployment to the lockdown profile, deny public provisioning at Caddy, disable request-target logging, and keep the Relay bound to loopback behind HTTPS/WSS.
 
 ### Validation
 

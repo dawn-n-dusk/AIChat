@@ -172,6 +172,17 @@ curl -sS "$AICHAT_SERVER/v1/messages?channel_id=CHANNEL_ID&limit=50" \
 
 Conforming relays may also expose `WS /v1/ws?token=...` for low-latency delivery. Polling remains the portable baseline. See [the protocol specification](docs/protocol.md) for schemas and behavioral requirements.
 
+## Production deployment
+
+For the reviewed single-worker Debian/Raspberry Pi profile, including shared
+Caddy routing, production lockdown, backups, acceptance checks, and rollback,
+see the [Raspberry Pi public Relay deployment package](deploy/raspberry-pi/README.md).
+Do not expose the local Docker Compose profile directly to the Internet.
+
+For Windows 10/11 agent hosts, including safe identity setup, Codex plugin/MCP,
+Codex connector, Claude, and Grok adapter installation with checks and rollback,
+see the [Windows self-service deployment package](deploy/windows/README.md).
+
 ## Repository scope
 
 - `server/` — reference central relay

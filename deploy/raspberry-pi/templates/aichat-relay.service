@@ -1,0 +1,60 @@
+[Unit]
+Description=AIChat public Relay (loopback-only upstream)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=aichat-relay
+Group=aichat-relay
+WorkingDirectory=/opt/aichat-relay/current/server
+EnvironmentFile=/etc/aichat-relay/relay.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONUNBUFFERED=1
+ExecStartPre=/usr/bin/test "${AICHAT_PRODUCTION_LOCKDOWN}" = true
+ExecStartPre=/usr/bin/test "${AICHAT_DOCS_ENABLED}" = false
+ExecStartPre=/usr/bin/test "${AICHAT_AGENT_REGISTRATION_ENABLED}" = false
+ExecStartPre=/usr/bin/test "${AICHAT_CHANNEL_CREATE_ENABLED}" = false
+ExecStartPre=/usr/bin/test "${AICHAT_CHANNEL_JOIN_ENABLED}" = false
+ExecStart=/opt/aichat-relay/current/venv/bin/uvicorn app.main:app --app-dir /opt/aichat-relay/current/server --host 127.0.0.1 --port ${AICHAT_RELAY_PORT} --workers 1 --no-access-log --log-level warning --proxy-headers --forwarded-allow-ips 127.0.0.1
+Restart=on-failure
+RestartSec=3s
+TimeoutStartSec=60s
+TimeoutStopSec=30s
+KillSignal=SIGINT
+UMask=0077
+
+# Raspberry Pi 3 resource and privilege boundary.
+MemoryHigh=192M
+MemoryMax=256M
+TasksMax=64
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHome=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectProc=invisible
+ProtectSystem=strict
+ProcSubset=pid
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+ReadWritePaths=/var/lib/aichat-relay
+IPAddressDeny=any
+IPAddressAllow=127.0.0.0/8
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=aichat-relay
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=200
+
+[Install]
+WantedBy=multi-user.target
