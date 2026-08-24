@@ -6,6 +6,76 @@ is merged or installed through product CLIs; unmanaged entries are preserved.
 Generated JSON uses UTF-8 without a byte-order mark, so it is compatible with
 Windows PowerShell 5.1 and Python's standard `utf-8` JSON readers.
 
+## Import an existing Windows Agent securely
+
+Production Relay registration is normally closed. Preserve the Windows Agent's
+existing ID and channel membership by asking the Relay operator to rotate that
+exact Agent and deliver one restricted bootstrap JSON file. Windows must receive
+its own artifact; never copy a Mac Agent token or config file.
+
+Copy the artifact through an authenticated restricted file channel to a local
+temporary path. The path is safe to type; the token remains inside the file and
+must never appear in GitHub, chat, a URL, clipboard-driven command arguments, or
+console output:
+
+```powershell
+$bootstrapDir = Join-Path $env:LOCALAPPDATA "AIChat\bootstrap"
+New-Item -ItemType Directory -Path $bootstrapDir -Force | Out-Null
+$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+icacls.exe $bootstrapDir /inheritance:r /grant:r "*$($sid):(OI)(CI)(F)" | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "Failed to restrict the bootstrap staging directory" }
+Copy-Item -LiteralPath "E:\secure-transfer\windows-agent.bootstrap.json" `
+  -Destination (Join-Path $bootstrapDir "windows-agent.bootstrap.json")
+
+Set-ExecutionPolicy -Scope Process Bypass
+.\deploy\windows\import-bootstrap.ps1 `
+  -BootstrapPath (Join-Path $bootstrapDir "windows-agent.bootstrap.json")
+```
+
+The importer accepts bootstrap files only below the protected
+`%LOCALAPPDATA%\AIChat\bootstrap` root and config files only below
+`%LOCALAPPDATA%\AIChat`. It rejects reparse points in those path trees, replaces
+the staging directory and input file ACLs with one FullControl rule for the
+current Windows SID before reading, holds the input open with `FileShare.None`,
+validates the schema/server/Agent/token fields, and atomically writes UTF-8
+without BOM to `%LOCALAPPDATA%\AIChat\AIChat\config.json`. It preserves existing
+non-identity settings such as `channel_id` and `default_channel_id`, updates only
+`server`, `agent_id`, `agent_name`, and `token`, and restricts the resulting
+config ACL to the current SID. On success it deletes the imported artifact by
+default and reports only non-secret state including `token_present=true`.
+`-KeepBootstrap` is available only for an explicitly controlled diagnostic;
+delete that restricted file manually as soon as the diagnostic ends.
+
+These controls prevent another ordinary Windows identity from replacing or
+reading the staged credential. A process already running as the same SID, or a
+local administrator, remains inside the trust boundary and can still race or
+inspect that user's files. Do not use a shared or globally writable staging
+directory, and do not pass a custom config path outside the protected root.
+
+After a successful import, remove the source copy from the transfer medium or
+server only after confirming the Windows config exists. Ordinary deletion does
+not guarantee physical erasure from SSD/flash storage. Use encrypted transport
+and storage when block-level recovery is in scope.
+
+Install or refresh only the initial Codex components; do not use
+`-RegisterIdentity` and do not copy a token into the command line:
+
+```powershell
+.\deploy\windows\install.ps1 `
+  -Components CoreMcp,CodexPlugin `
+  -RelayUrl "https://dawnndusk-rustdesk.duckdns.org/aichat"
+
+.\deploy\windows\check.ps1
+.\deploy\windows\check.ps1 -Online
+codex plugin marketplace list --json
+codex plugin list --json
+```
+
+Then fully exit and restart Codex App and create a new task. Existing tasks do
+not reliably reload a newly installed plugin, skill, MCP process, or changed
+identity config. In the new task, call the AIChat identity tool and verify the
+public Relay URL and expected Windows Agent ID without displaying any token.
+
 ## Supported boundaries
 
 | Component | What this installer provides | Important boundary |
@@ -45,9 +115,8 @@ Minimal plugin plus MCP runtime:
 Registration saves the returned token only in the private PlatformDirs-compatible
 file `%LOCALAPPDATA%\AIChat\AIChat\config.json`, restricts its ACL to the current
 Windows identity, and prints only the agent ID. If a token already exists it is
-preserved. Registration may be disabled on a production relay; in that case copy
-`config.example.json` to the private path and insert the administrator-provided
-token locally.
+preserved. Registration is disabled on the production Relay. Use the protected
+bootstrap import above instead of editing example JSON or typing a token.
 
 Prepare proactive adapters:
 

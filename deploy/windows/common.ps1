@@ -70,6 +70,72 @@ function Get-AIChatWindowsPaths {
     }
 }
 
+function Get-AIChatProtectedRoot {
+    $localAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
+    if (-not $localAppData) {
+        $localAppData = $env:LOCALAPPDATA
+    }
+    if (-not $localAppData) {
+        throw "Cannot resolve the current user's LocalApplicationData directory"
+    }
+    return [IO.Path]::GetFullPath((Join-Path $localAppData "AIChat"))
+}
+
+function Assert-AIChatPathWithinProtectedRoot {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$ProtectedRoot,
+        [switch]$LeafMayBeMissing,
+        [switch]$MissingTailMayBeCreated
+    )
+
+    $root = [IO.Path]::GetFullPath($ProtectedRoot).TrimEnd(
+        [IO.Path]::DirectorySeparatorChar,
+        [IO.Path]::AltDirectorySeparatorChar
+    )
+    $resolved = [IO.Path]::GetFullPath($Path)
+    $prefix = $root + [IO.Path]::DirectorySeparatorChar
+    if (-not $resolved.Equals($root, [StringComparison]::OrdinalIgnoreCase) -and
+        -not $resolved.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Secret path must remain below the protected AIChat LocalAppData root"
+    }
+
+    $rootItem = Get-Item -LiteralPath $root -Force -ErrorAction SilentlyContinue
+    if ($null -eq $rootItem -or -not $rootItem.PSIsContainer -or
+        ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw "Protected AIChat root must be an existing regular directory"
+    }
+
+    $relative = $resolved.Substring($root.Length).TrimStart(
+        [IO.Path]::DirectorySeparatorChar,
+        [IO.Path]::AltDirectorySeparatorChar
+    )
+    $segments = @(if ($relative) { $relative -split '[\\/]' })
+    $current = $root
+    $missingTail = $false
+    for ($index = 0; $index -lt $segments.Count; $index++) {
+        $current = Join-Path $current $segments[$index]
+        $item = Get-Item -LiteralPath $current -Force -ErrorAction SilentlyContinue
+        if ($null -eq $item) {
+            if ($MissingTailMayBeCreated) {
+                $missingTail = $true
+                continue
+            }
+            if ($LeafMayBeMissing -and $index -eq $segments.Count - 1) {
+                continue
+            }
+            throw "Protected secret path component does not exist: $current"
+        }
+        if ($missingTail) {
+            throw "Protected secret path contains an unexpected object below a missing parent"
+        }
+        if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            throw "Protected secret paths must not contain reparse points"
+        }
+    }
+    return $resolved
+}
+
 function Test-ExternalCommand {
     param([Parameter(Mandatory = $true)][string]$Name)
     return $null -ne (Get-Command $Name -ErrorAction SilentlyContinue)
@@ -140,10 +206,136 @@ function Protect-SecretFile {
     if ($env:OS -ne "Windows_NT") {
         return
     }
-    $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-    & icacls.exe $Path "/inheritance:r" "/grant:r" "*$($sid):(F)" | Out-Null
-    if ($LASTEXITCODE -ne 0) {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $item = Get-Item -LiteralPath $Path -Force
+    $security = if ($item.PSIsContainer) {
+        [Security.AccessControl.DirectorySecurity]::new()
+    } else {
+        [Security.AccessControl.FileSecurity]::new()
+    }
+    $security.SetOwner($identity.User)
+    $security.SetAccessRuleProtection($true, $false)
+    $rule = if ($item.PSIsContainer) {
+        $inheritance = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+            [Security.AccessControl.InheritanceFlags]::ObjectInherit
+        [Security.AccessControl.FileSystemAccessRule]::new(
+            $identity.User,
+            [Security.AccessControl.FileSystemRights]::FullControl,
+            $inheritance,
+            [Security.AccessControl.PropagationFlags]::None,
+            [Security.AccessControl.AccessControlType]::Allow
+        )
+    } else {
+        [Security.AccessControl.FileSystemAccessRule]::new(
+            $identity.User,
+            [Security.AccessControl.FileSystemRights]::FullControl,
+            [Security.AccessControl.AccessControlType]::Allow
+        )
+    }
+    [void]$security.AddAccessRule($rule)
+    Set-Acl -LiteralPath $Path -AclObject $security
+
+    $applied = Get-Acl -LiteralPath $Path
+    $rules = @($applied.Access)
+    if ($rules.Count -ne 1) {
         throw "Failed to restrict ACLs on $Path"
+    }
+    $ruleSid = $rules[0].IdentityReference.Translate(
+        [Security.Principal.SecurityIdentifier]
+    ).Value
+    if ($ruleSid -ne $identity.User.Value -or
+        $rules[0].AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or
+        $rules[0].FileSystemRights -ne [Security.AccessControl.FileSystemRights]::FullControl -or
+        $rules[0].IsInherited) {
+        throw "Failed to restrict ACLs on $Path"
+    }
+}
+
+function Write-SecretJsonAtomic {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)]$Value,
+        [Parameter(Mandatory = $true)][string]$ProtectedRoot,
+        [int]$Depth = 12
+    )
+
+    $Path = Assert-AIChatPathWithinProtectedRoot -Path $Path -ProtectedRoot $ProtectedRoot -LeafMayBeMissing
+    $parent = Split-Path -Parent $Path
+    if (-not (Test-Path -LiteralPath $parent -PathType Container)) {
+        throw "Protected config parent must exist before writing secret JSON"
+    }
+    Protect-SecretFile -Path $parent
+    [void](Assert-AIChatPathWithinProtectedRoot -Path $parent -ProtectedRoot $ProtectedRoot)
+    $existing = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    if ($null -ne $existing -and
+        ($existing.PSIsContainer -or ($existing.Attributes -band [IO.FileAttributes]::ReparsePoint))) {
+        throw "Secret JSON destination must be a regular file: $Path"
+    }
+    if ($null -ne $existing) {
+        Protect-SecretFile -Path $Path
+    }
+    $temporary = "$Path.tmp-$([Guid]::NewGuid().ToString('N'))"
+    $replacementBackup = "$Path.bak-$([Guid]::NewGuid().ToString('N'))"
+    $stream = $null
+    $writer = $null
+    try {
+        $stream = [IO.FileStream]::new(
+            $temporary,
+            [IO.FileMode]::CreateNew,
+            [IO.FileAccess]::Write,
+            [IO.FileShare]::None
+        )
+        $stream.Dispose()
+        $stream = $null
+        Protect-SecretFile -Path $temporary
+
+        $json = ($Value | ConvertTo-Json -Depth $Depth) + [Environment]::NewLine
+        $stream = [IO.FileStream]::new(
+            $temporary,
+            [IO.FileMode]::Open,
+            [IO.FileAccess]::Write,
+            [IO.FileShare]::None
+        )
+        $writer = [IO.StreamWriter]::new($stream, [Text.UTF8Encoding]::new($false))
+        $writer.Write($json)
+        $writer.Flush()
+        $stream.Flush($true)
+        $writer.Dispose()
+        $writer = $null
+        $stream = $null
+
+        if ($null -ne $existing) {
+            [void](Assert-AIChatPathWithinProtectedRoot -Path $Path -ProtectedRoot $ProtectedRoot)
+            [void](Assert-AIChatPathWithinProtectedRoot `
+                -Path $replacementBackup `
+                -ProtectedRoot $ProtectedRoot `
+                -LeafMayBeMissing)
+            [IO.File]::Replace($temporary, $Path, $replacementBackup)
+            if (Test-Path -LiteralPath $replacementBackup) {
+                Protect-SecretFile -Path $replacementBackup
+                Remove-Item -LiteralPath $replacementBackup -Force
+            }
+        } else {
+            [IO.File]::Move($temporary, $Path)
+        }
+        [void](Assert-AIChatPathWithinProtectedRoot -Path $Path -ProtectedRoot $ProtectedRoot)
+        Protect-SecretFile -Path $Path
+    } finally {
+        if ($null -ne $writer) { $writer.Dispose() }
+        if ($null -ne $stream) { $stream.Dispose() }
+        foreach ($residue in @($temporary, $replacementBackup)) {
+            if (Test-Path -LiteralPath $residue) {
+                try {
+                    Protect-SecretFile -Path $residue
+                    Remove-Item -LiteralPath $residue -Force
+                    if (Test-Path -LiteralPath $residue) {
+                        throw "Secret residue still exists after cleanup"
+                    }
+                } catch {
+                    throw "Restricted secret residue may remain at $residue; remove it manually"
+                }
+            }
+        }
     }
 }
 
