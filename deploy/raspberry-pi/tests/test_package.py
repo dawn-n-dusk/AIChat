@@ -21,6 +21,98 @@ def run(*arguments: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(arguments, check=True, text=True, capture_output=True)
 
 
+def valid_adapted_document() -> dict[str, object]:
+    return {
+        "logging": {
+            "logs": {
+                "aichat_relay_errors": {
+                    "include": ["http.log.error.aichat_relay"],
+                    "encoder": {
+                        "format": "filter",
+                        "fields": {
+                            "request>uri": {
+                                "filter": "query",
+                                "actions": [
+                                    {
+                                        "type": "replace",
+                                        "parameter": "token",
+                                        "value": "REDACTED",
+                                    }
+                                ],
+                            }
+                        },
+                    },
+                },
+                "default": {"exclude": ["http.log.error.aichat_relay"]},
+            }
+        },
+        "apps": {
+            "http": {
+                "servers": {
+                    "srv0": {
+                        "routes": [
+                            {
+                                "match": [{"path": ["/aichat", "/aichat/*"]}],
+                                "handle": [
+                                    {"handler": "vars", "log_skip": True},
+                                    {
+                                        "handler": "vars",
+                                        "access_logger_names": ["aichat_relay"],
+                                    },
+                                ],
+                            },
+                            {
+                                "match": [{"path": ["/aichat"]}],
+                                "handle": [
+                                    {
+                                        "handler": "subroute",
+                                        "routes": [
+                                            {
+                                                "handle": [
+                                                    {
+                                                        "handler": "static_response",
+                                                        "headers": {"Location": ["/aichat/"]},
+                                                        "status_code": 308,
+                                                    }
+                                                ]
+                                            }
+                                        ],
+                                    }
+                                ],
+                            },
+                            {
+                                "match": [{"path": ["/aichat/*"]}],
+                                "handle": [
+                                    {"handler": "request_body", "max_size": 4_000_000},
+                                    {
+                                        "handler": "reverse_proxy",
+                                        "upstreams": [{"dial": "127.0.0.1:8787"}],
+                                    },
+                                ],
+                            },
+                            {
+                                "handler": "subroute",
+                                "routes": [
+                                    {
+                                        "handle": [
+                                            {
+                                                "handler": "reverse_proxy",
+                                                "upstreams": [
+                                                    {"dial": "127.0.0.1:17300"}
+                                                ],
+                                            }
+                                        ]
+                                    }
+                                ],
+                            },
+                        ]
+                    }
+                }
+            }
+        }
+    }
+
+
 class DeploymentPackageTests(unittest.TestCase):
     def test_shell_and_python_sources_parse(self) -> None:
         for script in SCRIPTS.glob("*.sh"):
@@ -81,7 +173,32 @@ class DeploymentPackageTests(unittest.TestCase):
         self.assertIn("/v1/channels", route)
         self.assertIn("/v1/channels/*/join*", route)
         self.assertGreaterEqual(route.count("respond @aichat_public_"), 3)
+        self.assertIn(
+            "@aichat_access_log_skip path __AICHAT_PATH_PREFIX__ __AICHAT_PATH_PREFIX__/*",
+            route,
+        )
+        self.assertIn("log_name @aichat_access_log_skip aichat_relay", route)
+        self.assertIn("log_skip @aichat_access_log_skip", route)
+        self.assertIn("redir * __AICHAT_PATH_PREFIX__/ 308", route)
         self.assertNotRegex(route, r"(?m)^\s*log\s*\{")
+
+        global_options = (TEMPLATES / "caddy-global-options.caddy").read_text()
+        self.assertIn("log aichat_relay_errors", global_options)
+        self.assertIn("include http.log.error.aichat_relay", global_options)
+        self.assertIn("request>uri query", global_options)
+        self.assertIn("replace token REDACTED", global_options)
+
+        installer = (SCRIPTS / "install.sh").read_text()
+        self.assertIn("candidate Caddyfile failed AIChat route/log-safety preflight", installer)
+        self.assertNotIn("Caddy access logging is enabled", installer)
+        self.assertLess(
+            installer.index('if ! "$AICHAT_CADDY_BINARY" adapt'),
+            installer.index('! "$AICHAT_PYTHON" "$SCRIPT_DIR/validate-caddy-route.py"'),
+        )
+        self.assertLess(
+            installer.index('! "$AICHAT_PYTHON" "$SCRIPT_DIR/validate-caddy-route.py"'),
+            installer.index('! "$AICHAT_CADDY_BINARY" validate'),
+        )
 
     def test_caddy_patcher_places_managed_route_before_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -89,6 +206,9 @@ class DeploymentPackageTests(unittest.TestCase):
             config = root / "Caddyfile"
             config.write_text(
                 "example.test {\n"
+                "    log {\n"
+                "        output file /tmp/example-access.log\n"
+                "    }\n"
                 "    reverse_proxy /existing/* 127.0.0.1:17080\n"
                 "    reverse_proxy 127.0.0.1:17300\n"
                 "}\n"
@@ -100,6 +220,8 @@ class DeploymentPackageTests(unittest.TestCase):
                 .replace("__AICHAT_PATH_PREFIX__", "/aichat")
                 .replace("__AICHAT_RELAY_PORT__", "8787")
             )
+            global_options = root / "global-options.caddy"
+            global_options.write_text((TEMPLATES / "caddy-global-options.caddy").read_text())
             run(
                 "python3",
                 str(SCRIPTS / "patch-caddy.py"),
@@ -109,57 +231,44 @@ class DeploymentPackageTests(unittest.TestCase):
                 "install",
                 "--route",
                 str(route),
+                "--global-options",
+                str(global_options),
+                "--fallback",
+                "reverse_proxy 127.0.0.1:17300",
+            )
+            run(
+                "python3",
+                str(SCRIPTS / "patch-caddy.py"),
+                "--config",
+                str(config),
+                "--mode",
+                "install",
+                "--route",
+                str(route),
+                "--global-options",
+                str(global_options),
                 "--fallback",
                 "reverse_proxy 127.0.0.1:17300",
             )
             patched = config.read_text()
             self.assertLess(patched.index("handle_path /aichat/*"), patched.index("127.0.0.1:17300"))
             self.assertEqual(patched.count("# BEGIN AICHAT RELAY"), 1)
+            self.assertEqual(patched.count("# BEGIN AICHAT ERROR LOGGER REDACTION"), 1)
+            self.assertIn("replace token REDACTED", patched)
+            self.assertIn("output file /tmp/example-access.log", patched)
 
     def test_adapted_caddy_validator_compares_reverse_proxy_handler_order(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             adapted = Path(directory) / "adapted.json"
-            adapted.write_text(
-                json.dumps(
-                    {
-                        "apps": {
-                            "http": {
-                                "servers": {
-                                    "srv0": {
-                                        "routes": [
-                                            {
-                                                "match": [{"path": ["/aichat/*"]}],
-                                                "handle": [
-                                                    {"handler": "request_body", "max_size": 4_000_000},
-                                                    {
-                                                        "handler": "reverse_proxy",
-                                                        "upstreams": [{"dial": "127.0.0.1:8787"}],
-                                                    },
-                                                ],
-                                            },
-                                            {
-                                                "handler": "subroute",
-                                                "routes": [
-                                                    {
-                                                        "handle": [
-                                                            {
-                                                                "handler": "reverse_proxy",
-                                                                "upstreams": [
-                                                                    {"dial": "127.0.0.1:17300"}
-                                                                ],
-                                                            }
-                                                        ]
-                                                    }
-                                                ],
-                                            },
-                                        ]
-                                    }
-                                }
-                            }
-                        }
-                    }
-                )
+            document = valid_adapted_document()
+            document["apps"]["http"]["servers"]["srv0"]["routes"].insert(
+                0,
+                {
+                    "match": [{"path": ["/metrics"]}],
+                    "handle": [{"handler": "vars", "log_skip": True}],
+                },
             )
+            adapted.write_text(json.dumps(document))
             result = run(
                 "python3",
                 str(SCRIPTS / "validate-caddy-route.py"),
@@ -175,6 +284,188 @@ class DeploymentPackageTests(unittest.TestCase):
                 "true",
             )
             self.assertIn("route invariants passed", result.stdout)
+
+    def test_adapted_caddy_validator_rejects_missing_or_overbroad_log_skip(self) -> None:
+        invalid_matchers = (
+            None,
+            {"path": ["/*"]},
+            {"path": ["/aichat/*"]},
+            {
+                "path": ["/aichat", "/aichat/*"],
+                "host": ["dawnndusk-rustdesk.duckdns.org"],
+            },
+        )
+        for matcher in invalid_matchers:
+            document = valid_adapted_document()
+            document["apps"]["http"]["servers"]["srv0"]["routes"].pop(0)
+            if matcher is not None:
+                document["apps"]["http"]["servers"]["srv0"]["routes"].insert(
+                    0,
+                    {
+                        "match": [matcher],
+                        "handle": [{"handler": "vars", "log_skip": True}],
+                    },
+                )
+            with self.subTest(matcher=matcher), tempfile.TemporaryDirectory() as directory:
+                adapted = Path(directory) / "adapted.json"
+                adapted.write_text(json.dumps(document))
+                result = subprocess.run(
+                    [
+                        "python3",
+                        str(SCRIPTS / "validate-caddy-route.py"),
+                        "--adapted-json",
+                        str(adapted),
+                        "--path-prefix",
+                        "/aichat",
+                        "--relay-dial",
+                        "127.0.0.1:8787",
+                        "--fallback-dial",
+                        "127.0.0.1:17300",
+                        "--public-provisioning",
+                        "true",
+                    ],
+                    text=True,
+                    capture_output=True,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("AIChat log_name/log_skip route", result.stderr)
+
+    def test_adapted_caddy_validator_rejects_cross_server_log_skip(self) -> None:
+        document = valid_adapted_document()
+        misplaced = document["apps"]["http"]["servers"]["srv0"]["routes"].pop(0)
+        document["apps"]["http"]["servers"]["other"] = {"routes": [misplaced]}
+        with tempfile.TemporaryDirectory() as directory:
+            adapted = Path(directory) / "adapted.json"
+            adapted.write_text(json.dumps(document))
+            result = subprocess.run(
+                [
+                    "python3",
+                    str(SCRIPTS / "validate-caddy-route.py"),
+                    "--adapted-json",
+                    str(adapted),
+                    "--path-prefix",
+                    "/aichat",
+                    "--relay-dial",
+                    "127.0.0.1:8787",
+                    "--fallback-dial",
+                    "127.0.0.1:17300",
+                    "--public-provisioning",
+                    "true",
+                ],
+                text=True,
+                capture_output=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("AIChat log_name/log_skip route", result.stderr)
+
+    def test_adapted_caddy_validator_rejects_broken_bare_prefix_redirect(self) -> None:
+        for location, status in (("308", 302), ("/aichat/", 302), ("/wrong/", 308)):
+            document = valid_adapted_document()
+            response = document["apps"]["http"]["servers"]["srv0"]["routes"][1][
+                "handle"
+            ][0]["routes"][0]["handle"][0]
+            response["headers"]["Location"] = [location]
+            response["status_code"] = status
+            with self.subTest(location=location, status=status), tempfile.TemporaryDirectory() as directory:
+                adapted = Path(directory) / "adapted.json"
+                adapted.write_text(json.dumps(document))
+                result = subprocess.run(
+                    [
+                        "python3",
+                        str(SCRIPTS / "validate-caddy-route.py"),
+                        "--adapted-json",
+                        str(adapted),
+                        "--path-prefix",
+                        "/aichat",
+                        "--relay-dial",
+                        "127.0.0.1:8787",
+                        "--fallback-dial",
+                        "127.0.0.1:17300",
+                        "--public-provisioning",
+                        "true",
+                    ],
+                    text=True,
+                    capture_output=True,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("slash form with 308", result.stderr)
+
+    def test_adapted_caddy_validator_rejects_debug_logging(self) -> None:
+        document = valid_adapted_document()
+        document["logging"] = {"logs": {"default": {"level": "DEBUG"}}}
+        with tempfile.TemporaryDirectory() as directory:
+            adapted = Path(directory) / "adapted.json"
+            adapted.write_text(json.dumps(document))
+            result = subprocess.run(
+                [
+                    "python3",
+                    str(SCRIPTS / "validate-caddy-route.py"),
+                    "--adapted-json",
+                    str(adapted),
+                    "--path-prefix",
+                    "/aichat",
+                    "--relay-dial",
+                    "127.0.0.1:8787",
+                    "--fallback-dial",
+                    "127.0.0.1:17300",
+                    "--public-provisioning",
+                    "true",
+                ],
+                text=True,
+                capture_output=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("enables debug logging", result.stderr)
+
+    def test_adapted_caddy_validator_requires_default_error_log_redaction(self) -> None:
+        document = valid_adapted_document()
+        document["logging"]["logs"]["aichat_relay_errors"]["encoder"]["fields"][
+            "request>uri"
+        ]["actions"][0]["parameter"] = "other"
+        with tempfile.TemporaryDirectory() as directory:
+            adapted = Path(directory) / "adapted.json"
+            adapted.write_text(json.dumps(document))
+            result = subprocess.run(
+                [
+                    "python3",
+                    str(SCRIPTS / "validate-caddy-route.py"),
+                    "--adapted-json",
+                    str(adapted),
+                    "--path-prefix",
+                    "/aichat",
+                    "--relay-dial",
+                    "127.0.0.1:8787",
+                    "--fallback-dial",
+                    "127.0.0.1:17300",
+                    "--public-provisioning",
+                    "true",
+                ],
+                text=True,
+                capture_output=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("AIChat error logger", result.stderr)
+
+    def test_caddy_restore_is_atomic_and_preserves_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "Caddyfile"
+            source = root / "Caddyfile.backup"
+            config.write_text("changed\n")
+            config.chmod(0o640)
+            source.write_text("original\n")
+            run(
+                "python3",
+                str(SCRIPTS / "patch-caddy.py"),
+                "--config",
+                str(config),
+                "--mode",
+                "restore",
+                "--source",
+                str(source),
+            )
+            self.assertEqual(config.read_text(), "original\n")
+            self.assertEqual(config.stat().st_mode & 0o777, 0o640)
 
     def test_backup_is_consistent_reproducible_gzip_and_checksummed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

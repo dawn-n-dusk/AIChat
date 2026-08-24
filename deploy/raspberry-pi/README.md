@@ -36,10 +36,24 @@ changed. Running validation locally does not connect to or deploy the host.
    Agent registration, channel creation, and channel join. The Relay endpoints
    remain available on loopback for controlled provisioning through an SSH
    tunnel over Tailscale. A path prefix is routing, not access control.
-6. Uvicorn access logs are disabled. The installer refuses a Caddyfile with an
-   access-log directive or global debug enabled, because protocol V0 places the
-   bearer token in the WebSocket query string. Operational warning/error logs
-   continue in journald without routine request targets.
+6. Uvicorn access logs are disabled. Existing Caddy access logs remain enabled
+   for the root/AeroLink site, while a top-level `log_skip` matcher excludes only
+   `/aichat` and `/aichat/*` before redirects, provisioning denies, HTTP APIs,
+   and WebSocket proxying. Caddy handler errors are not access logs and can still
+   contain the failed request URI, so the route also assigns the private logger
+   namespace `aichat_relay`. A managed global named logger retains only
+   `http.log.error.aichat_relay` while replacing its query parameter named
+   `token` with `REDACTED`; Caddy excludes that namespace from the default logger
+   to prevent an unredacted duplicate. Other site access and error logs remain
+   unchanged. This matters because protocol V0 places the bearer token in the
+   WebSocket query string. The installer first patches a full candidate
+   Caddyfile beside the live file, adapts it, structurally proves both controls,
+   and only then runs Caddy validation before any package-owned
+   service/data/release or live-Caddyfile change. Caddy validation may provision
+   configured modules, so it is deliberately after the pure adapt/structural
+   safety gate rather than described as side-effect-free. A Caddy build without
+   the required log modules fails closed at this candidate step; adapted debug
+   logging is also rejected.
 7. SQLite backups use the SQLite backup API, run `PRAGMA quick_check`, compress
    atomically, write SHA-256 sidecars, and retain a configurable number of days.
    The script never copies a live `relay.db-wal` pair directly.
@@ -55,6 +69,7 @@ only for this single-worker invited deployment.
 - `templates/aichat-relay.service`: loopback-only Relay unit.
 - `templates/aichat-relay-backup.{service,timer}`: daily persistent backups.
 - `templates/caddy-route.caddy`: path-prefix route and default registration deny.
+- `templates/caddy-global-options.caddy`: scoped AIChat error-logger query redaction.
 - `scripts/install.sh`: staged release, local health, atomic Caddy patch, validation,
   public health, and automatic failure rollback.
 - `scripts/check.sh`: service, bind, HTTPS, registration deny, DB, backup, Caddy,
@@ -84,7 +99,9 @@ Expected starting boundary:
 - RustDesk remains active on `21115-21119`.
 - the Caddyfile contains exactly one fallback line matching the configured
   `AICHAT_CADDY_FALLBACK`;
-- Caddy access logging and global debug are disabled.
+- Caddy can adapt and validate the managed `log_name`/`log_skip` route and its
+  scoped error-logger query filter. Access/error logging remains enabled for
+  non-AIChat paths; adapted debug logging must be disabled.
 
 No step in this package installs Caddy, modifies NAT/router rules, or edits a
 firewall. Public TCP 443 and the existing certificate/DNS arrangement must
@@ -128,8 +145,10 @@ The installer performs these state changes only when it is run:
    `/opt/aichat-relay/releases/<release-id>`;
 3. installs loopback Relay and backup units;
 4. starts and accepts local `/health`;
-5. backs up and atomically patches the existing Caddyfile before the configured
-   fallback, validates it, reloads Caddy, and accepts public `/aichat/health`;
+5. first validates a full candidate that excludes only the AIChat prefix from
+   access logs and scopes its handler errors to a query-redacting named logger,
+   then backs up and atomically patches the existing Caddyfile before the
+   configured fallback, reloads Caddy, and accepts public `/aichat/health`;
 6. creates an initial consistent SQLite backup and enables the daily timer.
 
 If Relay start, Caddy validation/reload, or public health fails, the installer
@@ -235,7 +254,10 @@ Expected acceptance includes:
   and join return 403 when `AICHAT_CHECK_TOKEN` is supplied, otherwise their
   unauthenticated auth-gate probes return 401;
 - public Agent registration, channel creation, and channel join return 403;
-- Caddy validates and contains the managed route with no access/debug logging;
+- Caddy validates and contains the managed route/global logger block; adapted
+  JSON proves the exact AIChat-only `log_name`/`log_skip`, named error logger
+  query redaction, and default-logger exclusion, while existing root/AeroLink
+  logs remain and debug logging is rejected;
 - SQLite and latest-backup integrity pass;
 - RustDesk listeners remain visible and no AIChat unit references their ports.
 

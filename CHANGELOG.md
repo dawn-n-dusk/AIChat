@@ -28,7 +28,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Redact MCP transport errors and disable ambient HTTP/WebSocket proxy inheritance so local bearer tokens are not sent through an unintended proxy.
 - Fail closed when a Codex Desktop owner, protocol version, task binding, or delivery receipt is ambiguous; do not treat experimental App Server support or private owner IPC as a stable cross-version conversation-write API.
 - Add an opt-in production-lockdown profile that disables docs and provisioning endpoints, applies process-local HTTP/WebSocket limits, caps concurrent WebSockets, and trusts forwarded client addresses only from configured proxy CIDRs.
-- Default the Raspberry Pi public deployment to the lockdown profile, deny public provisioning at Caddy, disable request-target logging, and keep the Relay bound to loopback behind HTTPS/WSS.
+- Default the Raspberry Pi public deployment to the lockdown profile, deny public provisioning at Caddy, exclude only the AIChat prefix from existing access logs, redact query credentials from inherited Caddy handler-error logs with structurally validated filters, reject debug logging, and keep the Relay bound to loopback behind HTTPS/WSS.
 
 ### Validation
 

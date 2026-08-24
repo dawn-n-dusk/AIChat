@@ -158,9 +158,9 @@ if "$AICHAT_CADDY_BINARY" adapt --config "$AICHAT_CADDY_CONFIG" --adapter caddyf
     --relay-dial "127.0.0.1:${AICHAT_RELAY_PORT}" \
     --fallback-dial "${AICHAT_CADDY_FALLBACK#reverse_proxy }" \
     --public-provisioning "$AICHAT_PUBLIC_PROVISIONING"; then
-  pass "adapted Caddy route sends AIChat to Relay before the existing fallback"
+  pass "adapted Caddy route/logging has AIChat log_skip and error-log token redaction"
 else
-  fail "adapted Caddy route ordering or policy"
+  fail "adapted Caddy route ordering, log safety, or policy"
 fi
 rm -f "$adapted_caddy"
 if grep -Fq '# BEGIN AICHAT RELAY (managed by AIChat deploy package)' "$AICHAT_CADDY_CONFIG"; then
@@ -168,17 +168,24 @@ if grep -Fq '# BEGIN AICHAT RELAY (managed by AIChat deploy package)' "$AICHAT_C
 else
   fail "managed AIChat Caddy route is absent"
 fi
-if grep -Eq '^[[:space:]]*log[[:space:]]*\{|^[[:space:]]*debug([[:space:]]|$)' "$AICHAT_CADDY_CONFIG"; then
-  fail "Caddy access/debug logging could expose the WebSocket query token"
+if grep -Fq '# BEGIN AICHAT ERROR LOGGER REDACTION (managed by AIChat deploy package)' \
+  "$AICHAT_CADDY_CONFIG"; then
+  pass "managed scoped Caddy error-logger redaction is present"
 else
-  pass "Caddy access logging and global debug remain disabled"
+  fail "managed scoped Caddy error-logger redaction is absent"
+fi
+if grep -Eq '^[[:space:]]*log([[:space:]]|$)' "$AICHAT_CADDY_CONFIG"; then
+  info "existing Caddy access logging remains enabled outside the AIChat prefix"
+else
+  info "Caddy access logging is not enabled for this site"
 fi
 
 if grep -REn '21115|21116|21117|21118|21119' \
   /etc/systemd/system/aichat-relay.service \
   /etc/systemd/system/aichat-relay-backup.service \
   /etc/systemd/system/aichat-relay-backup.timer \
-  /etc/aichat-relay/caddy-route.caddy >/dev/null; then
+  /etc/aichat-relay/caddy-route.caddy \
+  /etc/aichat-relay/caddy-global-options.caddy >/dev/null; then
   fail "AIChat installed configuration references a protected RustDesk port"
 else
   pass "AIChat configuration does not reference RustDesk ports 21115-21119"

@@ -1,0 +1,14 @@
+# BEGIN AICHAT ERROR LOGGER REDACTION (managed by AIChat deploy package)
+# Caddy handler errors bypass site access-log `log_skip`. The route's log_name
+# assigns a private namespace; this logger retains those errors while redacting
+# the V0 WebSocket credential. Caddy excludes the namespace from the default
+# logger, preventing an unredacted duplicate.
+log aichat_relay_errors {
+    include http.log.error.aichat_relay
+    format filter {
+        request>uri query {
+            replace token REDACTED
+        }
+    }
+}
+# END AICHAT ERROR LOGGER REDACTION (managed by AIChat deploy package)

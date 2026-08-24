@@ -2,7 +2,13 @@
 # Insert this block inside the existing dawnndusk-rustdesk.duckdns.org site,
 # immediately before its fallback reverse_proxy. handle_path strips the public
 # prefix, so /aichat/v1/ws reaches the Relay as /v1/ws and WSS upgrades pass
-# through Caddy's reverse_proxy automatically.
+# through Caddy's reverse_proxy automatically. The top-level log_skip matcher
+# covers the bare redirect, provisioning denies, HTTP API, and WebSocket route;
+# Caddy path matchers intentionally ignore query strings.
+@aichat_access_log_skip path __AICHAT_PATH_PREFIX__ __AICHAT_PATH_PREFIX__/*
+log_name @aichat_access_log_skip aichat_relay
+log_skip @aichat_access_log_skip
+
 # BEGIN AICHAT PUBLIC PROVISIONING DENY
 @aichat_public_registration {
     method POST
@@ -24,7 +30,7 @@ respond @aichat_public_channel_join 403
 # END AICHAT PUBLIC PROVISIONING DENY
 
 handle __AICHAT_PATH_PREFIX__ {
-    redir __AICHAT_PATH_PREFIX__/ 308
+    redir * __AICHAT_PATH_PREFIX__/ 308
 }
 
 handle_path __AICHAT_PATH_PREFIX__/* {

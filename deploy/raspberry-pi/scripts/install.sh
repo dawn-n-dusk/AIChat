@@ -9,21 +9,55 @@ source "${SCRIPT_DIR}/lib.sh"
 
 load_deploy_config "${1:-}"
 require_root
-for command in "$AICHAT_PYTHON" curl getent install ln mv sed systemctl; do
+for command in "$AICHAT_PYTHON" cp curl getent install ln mktemp mv rm sed systemctl; do
   require_command "$command"
 done
 [[ -x "$AICHAT_CADDY_BINARY" ]] || die "Caddy binary is not executable: $AICHAT_CADDY_BINARY"
 [[ -f "$AICHAT_CADDY_CONFIG" ]] || die "Caddy config does not exist: $AICHAT_CADDY_CONFIG"
 
-# AIChat's V0 WebSocket token is in the query string. This package refuses a
-# Caddyfile with access logging or global debug enabled because either can expose
-# that URI before the application redacts its ASGI scope.
-if grep -Eq '^[[:space:]]*log[[:space:]]*\{' "$AICHAT_CADDY_CONFIG"; then
-  die "Caddy access logging is enabled; disable it or add a proven query-token redaction policy first"
+# AIChat's V0 WebSocket token is in the query string. A candidate Caddyfile must
+# prove that the exact AIChat prefix is excluded from access logging before any
+# package-owned service account, database, release, or live Caddyfile is changed.
+# Existing access logs for the root/AeroLink site remain enabled.
+preflight_root="$(mktemp -d)"
+preflight_route="${preflight_root}/caddy-route.caddy"
+preflight_global_options="${preflight_root}/caddy-global-options.caddy"
+preflight_adapted="${preflight_root}/adapted.json"
+preflight_candidate="$(mktemp "${AICHAT_CADDY_CONFIG}.aichat-candidate.XXXXXX")"
+preflight_backup=""
+cleanup_preflight() {
+  rm -rf -- "$preflight_root"
+  rm -f -- "$preflight_candidate"
+  if [[ -n "$preflight_backup" && "$preflight_backup" != UNCHANGED ]]; then
+    rm -f -- "$preflight_backup"
+  fi
+}
+trap cleanup_preflight EXIT
+cp -a "$AICHAT_CADDY_CONFIG" "$preflight_candidate"
+render_caddy_route "$preflight_route"
+render_caddy_global_options "$preflight_global_options"
+if ! preflight_backup="$($AICHAT_PYTHON "$SCRIPT_DIR/patch-caddy.py" \
+  --config "$preflight_candidate" \
+  --mode install \
+  --route "$preflight_route" \
+  --global-options "$preflight_global_options" \
+  --fallback "$AICHAT_CADDY_FALLBACK")"; then
+  die "failed to construct the candidate Caddyfile"
 fi
-if grep -Eq '^[[:space:]]*debug([[:space:]]|$)' "$AICHAT_CADDY_CONFIG"; then
-  die "Caddy global debug logging is enabled; disable it before public AIChat activation"
+if ! "$AICHAT_CADDY_BINARY" adapt \
+    --config "$preflight_candidate" --adapter caddyfile >"$preflight_adapted" ||
+  ! "$AICHAT_PYTHON" "$SCRIPT_DIR/validate-caddy-route.py" \
+    --adapted-json "$preflight_adapted" \
+    --path-prefix "$AICHAT_PATH_PREFIX" \
+    --relay-dial "127.0.0.1:${AICHAT_RELAY_PORT}" \
+    --fallback-dial "${AICHAT_CADDY_FALLBACK#reverse_proxy }" \
+    --public-provisioning "$AICHAT_PUBLIC_PROVISIONING" ||
+  ! "$AICHAT_CADDY_BINARY" validate \
+    --config "$preflight_candidate" --adapter caddyfile >/dev/null; then
+  die "candidate Caddyfile failed AIChat route/log-safety preflight; live Caddyfile is unchanged"
 fi
+cleanup_preflight
+trap - EXIT
 
 readonly APP_ROOT=/opt/aichat-relay
 readonly RELEASES_DIR=${APP_ROOT}/releases
@@ -33,6 +67,7 @@ readonly PREVIOUS_LINK=${APP_ROOT}/previous
 readonly ETC_DIR=/etc/aichat-relay
 readonly LIBEXEC_DIR=/usr/local/libexec/aichat-relay
 readonly CADDY_ROUTE=${ETC_DIR}/caddy-route.caddy
+readonly CADDY_GLOBAL_OPTIONS=${ETC_DIR}/caddy-global-options.caddy
 
 [[ ! -e "$RELEASE_DIR" ]] || die "release already exists: $RELEASE_DIR"
 
@@ -87,8 +122,9 @@ chmod -R go-w "$RELEASE_DIR"
 note "installing runtime configuration and systemd units"
 runtime_tmp="$(mktemp)"
 route_tmp="$(mktemp)"
+global_options_tmp="$(mktemp)"
 cleanup_files() {
-  rm -f "$runtime_tmp" "$route_tmp"
+  rm -f "$runtime_tmp" "$route_tmp" "$global_options_tmp"
 }
 trap cleanup_files EXIT
 {
@@ -117,7 +153,9 @@ if [[ -f "$ETC_DIR/relay.env" ]]; then
 fi
 install -o root -g aichat-relay -m 0640 "$runtime_tmp" "$ETC_DIR/relay.env"
 render_caddy_route "$route_tmp"
+render_caddy_global_options "$global_options_tmp"
 install -o root -g root -m 0644 "$route_tmp" "$CADDY_ROUTE"
+install -o root -g root -m 0644 "$global_options_tmp" "$CADDY_GLOBAL_OPTIONS"
 install -o root -g root -m 0755 "$SCRIPT_DIR/backup.sh" "$LIBEXEC_DIR/backup.sh"
 install -o root -g root -m 0755 "$SCRIPT_DIR/backup.py" "$LIBEXEC_DIR/backup.py"
 install -o root -g root -m 0755 "$SCRIPT_DIR/patch-caddy.py" "$LIBEXEC_DIR/patch-caddy.py"
@@ -155,12 +193,26 @@ caddy_backup="$($RELEASE_DIR/venv/bin/python "$SCRIPT_DIR/patch-caddy.py" \
   --config "$AICHAT_CADDY_CONFIG" \
   --mode install \
   --route "$CADDY_ROUTE" \
+  --global-options "$CADDY_GLOBAL_OPTIONS" \
   --fallback "$AICHAT_CADDY_FALLBACK")"
 
 restore_caddy() {
   if [[ -n "$caddy_backup" && "$caddy_backup" != UNCHANGED && -f "$caddy_backup" ]]; then
-    cp -a "$caddy_backup" "$AICHAT_CADDY_CONFIG"
-    "$AICHAT_CADDY_BINARY" reload --config "$AICHAT_CADDY_CONFIG" --adapter caddyfile || true
+    if ! "$RELEASE_DIR/venv/bin/python" "$SCRIPT_DIR/patch-caddy.py" \
+      --config "$AICHAT_CADDY_CONFIG" --mode restore --source "$caddy_backup"; then
+      printf 'ERROR: failed to atomically restore Caddy backup %s\n' "$caddy_backup" >&2
+      return 1
+    fi
+    if ! "$AICHAT_CADDY_BINARY" validate \
+      --config "$AICHAT_CADDY_CONFIG" --adapter caddyfile; then
+      printf 'ERROR: restored Caddy backup does not validate: %s\n' "$caddy_backup" >&2
+      return 1
+    fi
+    if ! "$AICHAT_CADDY_BINARY" reload \
+      --config "$AICHAT_CADDY_CONFIG" --adapter caddyfile; then
+      printf 'ERROR: restored Caddy backup but reload failed: %s\n' "$caddy_backup" >&2
+      return 1
+    fi
   fi
 }
 
@@ -174,21 +226,30 @@ if ! "$AICHAT_CADDY_BINARY" validate --config "$AICHAT_CADDY_CONFIG" --adapter c
     --fallback-dial "${AICHAT_CADDY_FALLBACK#reverse_proxy }" \
     --public-provisioning "$AICHAT_PUBLIC_PROVISIONING"; then
   rm -f "$adapted_caddy"
-  restore_caddy
+  if restore_caddy; then
+    rollback_release
+    die "Caddy validation/adapted-route acceptance failed; Caddyfile and Relay release were rolled back"
+  fi
   rollback_release
-  die "Caddy validation/adapted-route acceptance failed; Caddyfile and Relay release were rolled back"
+  die "Caddy validation/adapted-route acceptance failed; Relay rolled back but Caddyfile restore failed; recover from $caddy_backup"
 fi
 rm -f "$adapted_caddy"
 if ! "$AICHAT_CADDY_BINARY" reload --config "$AICHAT_CADDY_CONFIG" --adapter caddyfile; then
-  restore_caddy
+  if restore_caddy; then
+    rollback_release
+    die "Caddy reload failed; Caddyfile and Relay release were rolled back"
+  fi
   rollback_release
-  die "Caddy reload failed; Caddyfile and Relay release were rolled back"
+  die "Caddy reload failed; Relay rolled back but Caddyfile restore failed; recover from $caddy_backup"
 fi
 
 if ! curl --fail --silent --show-error --max-time 15 "$AICHAT_PUBLIC_BASE_URL/health" >/dev/null; then
-  restore_caddy
+  if restore_caddy; then
+    rollback_release
+    die "public HTTPS health check failed; Caddyfile and Relay release were rolled back"
+  fi
   rollback_release
-  die "public HTTPS health check failed; Caddyfile and Relay release were rolled back"
+  die "public HTTPS health check failed; Relay rolled back but Caddyfile restore failed; recover from $caddy_backup"
 fi
 
 systemctl enable --now aichat-relay-backup.timer >/dev/null

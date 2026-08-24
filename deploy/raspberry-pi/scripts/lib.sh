@@ -144,6 +144,11 @@ render_caddy_route() {
   fi
 }
 
+render_caddy_global_options() {
+  local output="$1"
+  cp "${AICHAT_DEPLOY_ROOT}/templates/caddy-global-options.caddy" "$output"
+}
+
 wait_for_local_health() {
   local attempts="${1:-30}"
   local index
