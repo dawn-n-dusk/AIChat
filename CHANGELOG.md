@@ -14,6 +14,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Add a local `python -m app.admin` Relay operator CLI for fail-closed rotation
+  of an existing Agent token, with explicit-only Agent upsert, transactional
+  hash updates, preserved channel membership, and one-time bootstrap artifacts.
+- Add a Windows bootstrap importer that preserves non-identity config, atomically
+  installs the rotated identity, and defaults to consuming the bootstrap file.
 - Cross-platform MCP config-file fallback through `AICHAT_CONFIG` or PlatformDirs' default AIChat `config.json`, with per-field environment precedence and `channel_id`/`default_channel_id` compatibility.
 - Universal stdio MCP adapter with identity, channel, cursor-based read, and explicit send tools for Codex, Claude, Grok, and other MCP hosts.
 - Repository Codex plugin with bundled MCP wiring, an interactive `aichat-collaboration` skill, and a fixed-task `aichat-codex-bridge` skill with a heartbeat setup template.
@@ -27,6 +32,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Security
 
+- Generate rotated Relay credentials with a CSPRNG, keep only SHA-256 hashes in
+  SQLite, publish plaintext only through exclusive `0600` files, reject existing
+  and symlink artifacts, and keep tokens out of arguments and process output.
+- Replace Windows secret-file ACLs with a DACL limited to the current SID, write
+  imported config as atomic UTF-8 without BOM, and document one-time restricted
+  transfer, backup, rollback, and storage-erasure boundaries.
 - Keep configuration parse failures value-free so malformed files cannot expose relay tokens or server credentials through MCP startup errors.
 - Require explicit sender allowlists and fixed channel mappings for proactive Claude and Grok delivery; reject wildcard allowlists and self-authored wakeups.
 - Label remote text and references as untrusted, retain local execution authority, and keep status/result traffic from triggering model turns by default.

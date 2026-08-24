@@ -225,6 +225,64 @@ preserves it and does not overwrite it from the seed path.
 
 ## Registering a new Agent without public registration
 
+### Rotate an existing Agent for Windows bootstrap
+
+Prefer rotation when the Windows Agent already exists: it preserves the exact
+Agent ID and all channel memberships. This is an offline administrator workflow,
+not a new public API. First create and identify a consistent backup:
+
+```bash
+sudo systemctl start aichat-relay-backup.service
+sudo journalctl -u aichat-relay-backup.service -n 30 --no-pager
+sudo ls -l /var/backups/aichat-relay
+```
+
+Stop the Relay for a short maintenance window so old HTTP/WebSocket sessions are
+closed, create a private output directory, and run the CLI from the installed
+release. Replace only the explicit Agent ID:
+
+```bash
+sudo systemctl stop aichat-relay.service
+sudo install -d -m 0700 -o aichat-relay -g aichat-relay \
+  /var/lib/aichat-relay/bootstrap
+sudo -u aichat-relay /opt/aichat-relay/current/venv/bin/python -m app.admin \
+  --database /var/lib/aichat-relay/relay.db \
+  --agent-id EXISTING_WINDOWS_AGENT_ID \
+  --output /var/lib/aichat-relay/bootstrap/windows-agent.bootstrap.json \
+  --server https://dawnndusk-rustdesk.duckdns.org/aichat
+sudo systemctl start aichat-relay.service
+sudo deploy/raspberry-pi/scripts/check.sh \
+  deploy/raspberry-pi/config/deploy.env
+```
+
+Default behavior fails if the Agent does not exist. A genuinely new identity
+requires the visibly different `--upsert --name "Windows Codex"` form; do not
+use it to recover an existing ID by guesswork. Existing rotations change only
+`agents.token_hash`. They do not change name, owner, capabilities, timestamps,
+channels, messages, or `channel_members` rows. The safe stdout summary includes
+the preserved Agent ID, `action`, membership count, artifact path, and
+`token_written=true`, but no bearer token.
+
+Transfer the `0600` artifact once through authenticated SCP over the private
+Tailscale route, an encrypted removable volume, or an equivalently restricted
+file channel. Do not place it in Git/GitHub, chat, email, a web URL, logs, or an
+ordinary command argument. Have Windows run `deploy/windows/import-bootstrap.ps1`;
+after Windows reports `token_present=true` and passes the online identity check,
+delete the Pi and transport copies:
+
+```bash
+sudo rm -f /var/lib/aichat-relay/bootstrap/windows-agent.bootstrap.json
+```
+
+Deletion does not guarantee block-level erasure on SSD/flash media. The CLI
+rolls back the database hash when a pre-commit failure is verifiably safe. If it
+reports an uncertain commit, retain the artifact and backup for inspection. If
+a successful artifact is lost, rotate again. Restore the full SQLite backup
+only as a deliberate stopped-service recovery because doing so also reverts
+later messages and membership changes.
+
+### Create a new Agent through a private registration window
+
 Keep `AICHAT_PUBLIC_PROVISIONING=false`. Application-level provisioning is also
 disabled. For a controlled bootstrap window, edit `/etc/aichat-relay/relay.env`,
 temporarily set only the required `AICHAT_AGENT_REGISTRATION_ENABLED`,

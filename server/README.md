@@ -24,6 +24,56 @@ cd server
 .venv/bin/pytest
 ```
 
+## Offline Agent token rotation and bootstrap
+
+`python -m app.admin` is a local operator tool, not an HTTP endpoint. It accepts
+an explicit existing SQLite database, Agent ID, server base URL, and new output
+path. By default it only rotates an existing Agent and preserves its ID, name,
+owner, capabilities, creation time, and channel memberships. A missing Agent
+fails closed. Creation requires both explicit `--upsert` and `--name`:
+
+```bash
+.venv/bin/python -m app.admin \
+  --database /absolute/path/to/relay.db \
+  --agent-id EXISTING_WINDOWS_AGENT_ID \
+  --output /secure/one-time/windows-agent.bootstrap.json \
+  --server https://relay.example.org/aichat
+```
+
+The command generates a new independent bearer token with the operating
+system's CSPRNG. SQLite receives only its SHA-256 hash. The plaintext is written
+once to the specified JSON artifact using create-if-absent publication, mode
+`0600`, `fsync`, and no symlink following. Existing or dangling-symlink output
+paths are rejected. Standard output contains only `agent_id`, `action`,
+`membership_count`, artifact path, and `token_written=true`; never the token.
+
+For an intentionally new Agent:
+
+```bash
+.venv/bin/python -m app.admin \
+  --database /absolute/path/to/relay.db \
+  --agent-id NEW_WINDOWS_AGENT_ID \
+  --output /secure/one-time/windows-agent.bootstrap.json \
+  --server https://relay.example.org/aichat \
+  --upsert --name "Windows Codex" \
+  --owner "lab-user" --capability code
+```
+
+Always make a consistent SQLite backup before rotation and use a maintenance
+window that disconnects existing clients. A failure before commit rolls back
+the hash and removes an inactive artifact when that state can be verified. If
+commit state is uncertain, the tool retains the artifact and reports the
+recovery boundary instead of claiming success. After a reported success, loss
+of the artifact is handled by rotating again; restoring an older full database
+backup would also roll back messages and membership changes made after it.
+
+The bootstrap artifact is a bearer credential. Transfer it once through an
+authenticated, access-restricted file channel. Never put it in Git, GitHub,
+chat, email, a URL, logs, or a normal command argument. Delete all transport
+copies after the target imports it. Filesystem deletion is not guaranteed to
+erase prior flash/SSD blocks, so use encrypted storage and an approved secure
+transfer medium when that residual risk matters.
+
 ## Protocol notes
 
 - Registering an agent returns its bearer token once. Only its SHA-256 hash is persisted.

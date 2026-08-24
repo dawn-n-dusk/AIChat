@@ -140,10 +140,92 @@ function Protect-SecretFile {
     if ($env:OS -ne "Windows_NT") {
         return
     }
-    $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-    & icacls.exe $Path "/inheritance:r" "/grant:r" "*$($sid):(F)" | Out-Null
-    if ($LASTEXITCODE -ne 0) {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $security = [Security.AccessControl.FileSecurity]::new()
+    $security.SetOwner($identity.User)
+    $security.SetAccessRuleProtection($true, $false)
+    $rule = [Security.AccessControl.FileSystemAccessRule]::new(
+        $identity.User,
+        [Security.AccessControl.FileSystemRights]::FullControl,
+        [Security.AccessControl.AccessControlType]::Allow
+    )
+    [void]$security.AddAccessRule($rule)
+    Set-Acl -LiteralPath $Path -AclObject $security
+
+    $applied = Get-Acl -LiteralPath $Path
+    $rules = @($applied.Access)
+    if ($rules.Count -ne 1) {
         throw "Failed to restrict ACLs on $Path"
+    }
+    $ruleSid = $rules[0].IdentityReference.Translate(
+        [Security.Principal.SecurityIdentifier]
+    ).Value
+    if ($ruleSid -ne $identity.User.Value -or
+        $rules[0].AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or
+        $rules[0].FileSystemRights -ne [Security.AccessControl.FileSystemRights]::FullControl -or
+        $rules[0].IsInherited) {
+        throw "Failed to restrict ACLs on $Path"
+    }
+}
+
+function Write-SecretJsonAtomic {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)]$Value,
+        [int]$Depth = 12
+    )
+
+    $parent = Split-Path -Parent $Path
+    New-Item -ItemType Directory -Path $parent -Force | Out-Null
+    $existing = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    if ($null -ne $existing -and
+        ($existing.PSIsContainer -or ($existing.Attributes -band [IO.FileAttributes]::ReparsePoint))) {
+        throw "Secret JSON destination must be a regular file: $Path"
+    }
+    if ($null -ne $existing) {
+        Protect-SecretFile -Path $Path
+    }
+    $temporary = "$Path.tmp-$([Guid]::NewGuid().ToString('N'))"
+    $stream = $null
+    $writer = $null
+    try {
+        $stream = [IO.FileStream]::new(
+            $temporary,
+            [IO.FileMode]::CreateNew,
+            [IO.FileAccess]::Write,
+            [IO.FileShare]::None
+        )
+        $stream.Dispose()
+        $stream = $null
+        Protect-SecretFile -Path $temporary
+
+        $json = ($Value | ConvertTo-Json -Depth $Depth) + [Environment]::NewLine
+        $stream = [IO.FileStream]::new(
+            $temporary,
+            [IO.FileMode]::Open,
+            [IO.FileAccess]::Write,
+            [IO.FileShare]::None
+        )
+        $writer = [IO.StreamWriter]::new($stream, [Text.UTF8Encoding]::new($false))
+        $writer.Write($json)
+        $writer.Flush()
+        $stream.Flush($true)
+        $writer.Dispose()
+        $writer = $null
+        $stream = $null
+
+        if ($null -ne $existing) {
+            [IO.File]::Replace($temporary, $Path, $null)
+        } else {
+            [IO.File]::Move($temporary, $Path)
+        }
+        Protect-SecretFile -Path $Path
+    } finally {
+        if ($null -ne $writer) { $writer.Dispose() }
+        if ($null -ne $stream) { $stream.Dispose() }
+        if (Test-Path -LiteralPath $temporary) {
+            Remove-Item -LiteralPath $temporary -Force
+        }
     }
 }
 

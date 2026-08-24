@@ -13,6 +13,7 @@ def test_required_windows_package_files_exist() -> None:
         "README.md",
         "common.ps1",
         "install.ps1",
+        "import-bootstrap.ps1",
         "check.ps1",
         "uninstall.ps1",
         "rollback.ps1",
@@ -59,6 +60,41 @@ def test_json_writer_is_utf8_without_bom_for_windows_powershell_51() -> None:
     common = (ROOT / "common.ps1").read_text(encoding="utf-8")
     assert "[IO.File]::WriteAllText" in common
     assert "[Text.UTF8Encoding]::new($false)" in common
+    assert "Write-SecretJsonAtomic" in common
+    assert "[IO.File]::Replace" in common
+    assert "$stream.Flush($true)" in common
+
+
+def test_bootstrap_import_has_no_secret_argument_or_secret_output() -> None:
+    script = (ROOT / "import-bootstrap.ps1").read_text(encoding="utf-8")
+    assert "[Parameter(Mandatory = $true)][string]$BootstrapPath" in script
+    assert "[string]$Token" not in script
+    assert "Get-Content -LiteralPath $artifactPath -Raw -Encoding UTF8" in script
+    assert "Write-SecretJsonAtomic -Path $paths.ConfigPath -Value $config" in script
+    assert "Remove-Item -LiteralPath $artifactPath -Force" in script
+    assert "token_present=true" in script
+    assert re.search(r"Write-(?:Host|Output|Error)[^\n]*\$token", script, re.IGNORECASE) is None
+
+
+def test_bootstrap_import_restricts_acl_before_read_and_preserves_other_config() -> None:
+    script = (ROOT / "import-bootstrap.ps1").read_text(encoding="utf-8")
+    protect_at = script.index("Protect-SecretFile -Path $artifactPath")
+    read_at = script.index("Get-Content -LiteralPath $artifactPath")
+    assert protect_at < read_at
+    assert "[IO.FileAttributes]::ReparsePoint" in script
+    assert "$config = Read-JsonObject -Path $paths.ConfigPath" in script
+    for field in ("server", "agent_id", "agent_name", "token"):
+        assert f'Set-ObjectProperty -Object $config -Name "{field}"' in script
+
+
+def test_secret_file_acl_is_replaced_with_current_sid_only() -> None:
+    common = (ROOT / "common.ps1").read_text(encoding="utf-8")
+    assert "[Security.Principal.WindowsIdentity]::GetCurrent()" in common
+    assert "$security.SetAccessRuleProtection($true, $false)" in common
+    assert "[Security.AccessControl.FileSystemRights]::FullControl" in common
+    assert "Set-Acl -LiteralPath $Path -AclObject $security" in common
+    assert "if ($rules.Count -ne 1)" in common
+    assert "$ruleSid -ne $identity.User.Value" in common
 
 
 def test_check_only_requires_selected_or_installed_components() -> None:
