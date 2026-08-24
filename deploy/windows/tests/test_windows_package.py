@@ -98,6 +98,8 @@ def test_secret_file_acl_is_replaced_with_current_sid_only() -> None:
     assert "$security.SetAccessRuleProtection($true, $false)" in common
     assert "[Security.AccessControl.FileSystemRights]::FullControl" in common
     assert "Set-Acl -LiteralPath $Path -AclObject $security" in common
+    assert "[IO.File]::Replace($temporary, $Path, $replacementBackup)" in common
+    assert "Restricted secret residue may remain" in common
     assert "if ($rules.Count -ne 1)" in common
     assert "$ruleSid -ne $identity.User.Value" in common
 

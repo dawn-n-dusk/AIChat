@@ -275,6 +275,7 @@ function Write-SecretJsonAtomic {
         Protect-SecretFile -Path $Path
     }
     $temporary = "$Path.tmp-$([Guid]::NewGuid().ToString('N'))"
+    $replacementBackup = "$Path.bak-$([Guid]::NewGuid().ToString('N'))"
     $stream = $null
     $writer = $null
     try {
@@ -305,7 +306,15 @@ function Write-SecretJsonAtomic {
 
         if ($null -ne $existing) {
             [void](Assert-AIChatPathWithinProtectedRoot -Path $Path -ProtectedRoot $ProtectedRoot)
-            [IO.File]::Replace($temporary, $Path, $null)
+            [void](Assert-AIChatPathWithinProtectedRoot `
+                -Path $replacementBackup `
+                -ProtectedRoot $ProtectedRoot `
+                -LeafMayBeMissing)
+            [IO.File]::Replace($temporary, $Path, $replacementBackup)
+            if (Test-Path -LiteralPath $replacementBackup) {
+                Protect-SecretFile -Path $replacementBackup
+                Remove-Item -LiteralPath $replacementBackup -Force
+            }
         } else {
             [IO.File]::Move($temporary, $Path)
         }
@@ -314,8 +323,18 @@ function Write-SecretJsonAtomic {
     } finally {
         if ($null -ne $writer) { $writer.Dispose() }
         if ($null -ne $stream) { $stream.Dispose() }
-        if (Test-Path -LiteralPath $temporary) {
-            Remove-Item -LiteralPath $temporary -Force
+        foreach ($residue in @($temporary, $replacementBackup)) {
+            if (Test-Path -LiteralPath $residue) {
+                try {
+                    Protect-SecretFile -Path $residue
+                    Remove-Item -LiteralPath $residue -Force
+                    if (Test-Path -LiteralPath $residue) {
+                        throw "Secret residue still exists after cleanup"
+                    }
+                } catch {
+                    throw "Restricted secret residue may remain at $residue; remove it manually"
+                }
+            }
         }
     }
 }

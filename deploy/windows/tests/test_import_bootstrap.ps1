@@ -86,6 +86,9 @@ try {
     if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
         throw "Imported config unexpectedly contains a UTF-8 BOM"
     }
+    if (@(Get-ChildItem -LiteralPath $configDirectory -Filter "config.json.bak-*" -Force).Count -ne 0) {
+        throw "Atomic replacement left a restricted backup residue"
+    }
 
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $acl = Get-Acl -LiteralPath $configPath
