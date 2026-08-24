@@ -36,8 +36,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   SQLite, publish plaintext only through exclusive `0600` files, reject existing
   and symlink artifacts, and keep tokens out of arguments and process output.
 - Replace Windows secret-file ACLs with a DACL limited to the current SID, write
-  imported config as atomic UTF-8 without BOM, and document one-time restricted
-  transfer, backup, rollback, and storage-erasure boundaries.
+  imported config as atomic UTF-8 without BOM, limit bootstrap/config paths to a
+  non-reparse LocalAppData root, hold bootstrap reads with exclusive file sharing,
+  exercise the importer under Windows PowerShell 5.1 CI, and document one-time
+  restricted transfer, same-SID trust, backup, rollback, and storage-erasure boundaries.
+- Require an explicit stopped-Relay confirmation before token rotation so old
+  authenticated WebSockets cannot survive the credential change, and report a
+  published-but-inactive artifact when cleanup itself is denied.
 - Keep configuration parse failures value-free so malformed files cannot expose relay tokens or server credentials through MCP startup errors.
 - Require explicit sender allowlists and fixed channel mappings for proactive Claude and Grok delivery; reject wildcard allowlists and self-authored wakeups.
 - Label remote text and references as untrusted, retain local execution authority, and keep status/result traffic from triggering model turns by default.

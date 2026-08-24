@@ -6,6 +6,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+REPOSITORY_ROOT = ROOT.parents[1]
 
 
 def test_required_windows_package_files_exist() -> None:
@@ -69,8 +70,9 @@ def test_bootstrap_import_has_no_secret_argument_or_secret_output() -> None:
     script = (ROOT / "import-bootstrap.ps1").read_text(encoding="utf-8")
     assert "[Parameter(Mandatory = $true)][string]$BootstrapPath" in script
     assert "[string]$Token" not in script
-    assert "Get-Content -LiteralPath $artifactPath -Raw -Encoding UTF8" in script
-    assert "Write-SecretJsonAtomic -Path $paths.ConfigPath -Value $config" in script
+    assert "[IO.FileStream]::new(" in script
+    assert "[IO.FileShare]::None" in script
+    assert "Write-SecretJsonAtomic -Path $paths.ConfigPath -Value $config -ProtectedRoot $protectedRoot" in script
     assert "Remove-Item -LiteralPath $artifactPath -Force" in script
     assert "token_present=true" in script
     assert re.search(r"Write-(?:Host|Output|Error)[^\n]*\$token", script, re.IGNORECASE) is None
@@ -79,9 +81,11 @@ def test_bootstrap_import_has_no_secret_argument_or_secret_output() -> None:
 def test_bootstrap_import_restricts_acl_before_read_and_preserves_other_config() -> None:
     script = (ROOT / "import-bootstrap.ps1").read_text(encoding="utf-8")
     protect_at = script.index("Protect-SecretFile -Path $artifactPath")
-    read_at = script.index("Get-Content -LiteralPath $artifactPath")
+    read_at = script.index("$artifactStream = [IO.FileStream]::new(")
     assert protect_at < read_at
     assert "[IO.FileAttributes]::ReparsePoint" in script
+    assert "Assert-AIChatPathWithinProtectedRoot" in script
+    assert 'Join-Path $protectedRoot "bootstrap"' in script
     assert "$config = Read-JsonObject -Path $paths.ConfigPath" in script
     for field in ("server", "agent_id", "agent_name", "token"):
         assert f'Set-ObjectProperty -Object $config -Name "{field}"' in script
@@ -90,11 +94,34 @@ def test_bootstrap_import_restricts_acl_before_read_and_preserves_other_config()
 def test_secret_file_acl_is_replaced_with_current_sid_only() -> None:
     common = (ROOT / "common.ps1").read_text(encoding="utf-8")
     assert "[Security.Principal.WindowsIdentity]::GetCurrent()" in common
+    assert "[Security.AccessControl.DirectorySecurity]::new()" in common
     assert "$security.SetAccessRuleProtection($true, $false)" in common
     assert "[Security.AccessControl.FileSystemRights]::FullControl" in common
     assert "Set-Acl -LiteralPath $Path -AclObject $security" in common
     assert "if ($rules.Count -ne 1)" in common
     assert "$ruleSid -ne $identity.User.Value" in common
+
+
+def test_secret_paths_are_limited_to_non_reparse_localappdata_root() -> None:
+    common = (ROOT / "common.ps1").read_text(encoding="utf-8")
+    importer = (ROOT / "import-bootstrap.ps1").read_text(encoding="utf-8")
+    assert "function Get-AIChatProtectedRoot" in common
+    assert "function Assert-AIChatPathWithinProtectedRoot" in common
+    assert "Secret path must remain below" in common
+    assert "Protected secret paths must not contain reparse points" in common
+    assert "same-SID process or administrator remains outside" in importer
+
+
+def test_ci_runs_windows_powershell_51_bootstrap_functional_test() -> None:
+    workflow = (REPOSITORY_ROOT / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    )
+    functional = ROOT / "tests" / "test_import_bootstrap.ps1"
+    assert functional.is_file()
+    assert "windows-bootstrap:" in workflow
+    assert "runs-on: windows-latest" in workflow
+    assert "powershell.exe -NoProfile -ExecutionPolicy Bypass" in workflow
+    assert "test_import_bootstrap.ps1" in workflow
 
 
 def test_check_only_requires_selected_or_installed_components() -> None:

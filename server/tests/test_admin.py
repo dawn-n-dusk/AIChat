@@ -71,6 +71,7 @@ def base_arguments(database: Path, agent_id: str, output: Path) -> list[str]:
         str(output),
         "--server",
         "https://relay.example.test/aichat/",
+        "--confirm-relay-stopped",
     ]
 
 
@@ -130,6 +131,22 @@ def test_missing_agent_fails_closed_without_artifact(
     result = run_admin(*base_arguments(database, "missing-agent", output))
     assert result.returncode == 2
     assert "fail-closed" in result.stderr
+    assert not output.exists()
+
+
+def test_rotation_requires_explicit_offline_confirmation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = create_database(tmp_path, monkeypatch)
+    agent_id, _, _ = seed_agent(database)
+    output = tmp_path / "offline-required.json"
+    arguments = base_arguments(database, agent_id, output)
+    arguments.remove("--confirm-relay-stopped")
+
+    result = run_admin(*arguments)
+
+    assert result.returncode == 2
+    assert "--confirm-relay-stopped" in result.stderr
     assert not output.exists()
 
 
@@ -213,7 +230,45 @@ def test_commit_failure_rolls_back_hash_and_removes_inactive_artifact(
             agent_id=agent_id,
             output=output,
             server="https://relay.example.test/aichat",
+            confirm_relay_stopped=True,
         )
 
     assert agent_state(database, agent_id) == before
     assert not os.path.lexists(output)
+
+
+def test_published_artifact_cleanup_failure_is_explicit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = create_database(tmp_path, monkeypatch)
+    agent_id, _, _ = seed_agent(database)
+    before = agent_state(database, agent_id)
+    output = tmp_path / "cleanup-failure.json"
+    real_fsync = admin.os.fsync
+    real_unlink = admin.os.unlink
+
+    def fail_directory_fsync(descriptor: int) -> None:
+        if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            raise OSError("synthetic directory fsync failure")
+        real_fsync(descriptor)
+
+    def reject_published_cleanup(path: str | os.PathLike[str]) -> None:
+        if Path(path) == output:
+            raise PermissionError("synthetic cleanup denial")
+        real_unlink(path)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(admin.os, "fsync", fail_directory_fsync)
+        patch.setattr(admin.os, "unlink", reject_published_cleanup)
+        with pytest.raises(admin.AdminError, match="inactive artifact manually"):
+            admin.provision_bootstrap(
+                database=database,
+                agent_id=agent_id,
+                output=output,
+                server="https://relay.example.test/aichat",
+                confirm_relay_stopped=True,
+            )
+
+    assert output.exists()
+    assert agent_state(database, agent_id) == before
+    output.unlink()

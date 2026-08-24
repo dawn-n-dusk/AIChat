@@ -21,6 +21,9 @@ console output:
 ```powershell
 $bootstrapDir = Join-Path $env:LOCALAPPDATA "AIChat\bootstrap"
 New-Item -ItemType Directory -Path $bootstrapDir -Force | Out-Null
+$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+icacls.exe $bootstrapDir /inheritance:r /grant:r "*$($sid):(OI)(CI)(F)" | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "Failed to restrict the bootstrap staging directory" }
 Copy-Item -LiteralPath "E:\secure-transfer\windows-agent.bootstrap.json" `
   -Destination (Join-Path $bootstrapDir "windows-agent.bootstrap.json")
 
@@ -29,8 +32,11 @@ Set-ExecutionPolicy -Scope Process Bypass
   -BootstrapPath (Join-Path $bootstrapDir "windows-agent.bootstrap.json")
 ```
 
-The importer rejects directories and reparse points, replaces the input file's
-ACL with one FullControl rule for the current Windows SID before reading it,
+The importer accepts bootstrap files only below the protected
+`%LOCALAPPDATA%\AIChat\bootstrap` root and config files only below
+`%LOCALAPPDATA%\AIChat`. It rejects reparse points in those path trees, replaces
+the staging directory and input file ACLs with one FullControl rule for the
+current Windows SID before reading, holds the input open with `FileShare.None`,
 validates the schema/server/Agent/token fields, and atomically writes UTF-8
 without BOM to `%LOCALAPPDATA%\AIChat\AIChat\config.json`. It preserves existing
 non-identity settings such as `channel_id` and `default_channel_id`, updates only
@@ -39,6 +45,12 @@ config ACL to the current SID. On success it deletes the imported artifact by
 default and reports only non-secret state including `token_present=true`.
 `-KeepBootstrap` is available only for an explicitly controlled diagnostic;
 delete that restricted file manually as soon as the diagnostic ends.
+
+These controls prevent another ordinary Windows identity from replacing or
+reading the staged credential. A process already running as the same SID, or a
+local administrator, remains inside the trust boundary and can still race or
+inspect that user's files. Do not use a shared or globally writable staging
+directory, and do not pass a custom config path outside the protected root.
 
 After a successful import, remove the source copy from the transfer medium or
 server only after confirming the Windows config exists. Ordinary deletion does

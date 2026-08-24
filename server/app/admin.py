@@ -140,7 +140,12 @@ def write_bootstrap_exclusive(path: Path, artifact: dict[str, object]) -> None:
         ) from error
     except Exception:
         if published and os.path.lexists(path):
-            os.unlink(path)
+            try:
+                os.unlink(path)
+            except OSError as cleanup_error:
+                raise AdminError(
+                    f"bootstrap artifact may remain at {path}; database activation did not complete, so remove the inactive artifact manually"
+                ) from cleanup_error
         raise
     finally:
         if descriptor is not None:
@@ -186,6 +191,7 @@ def provision_bootstrap(
     name: str | None = None,
     owner: str | None = None,
     capabilities: list[str] | None = None,
+    confirm_relay_stopped: bool = False,
 ) -> BootstrapSummary:
     database = require_database(database)
     output = require_output(output)
@@ -193,6 +199,10 @@ def provision_bootstrap(
     agent_id = agent_id.strip()
     if not agent_id or len(agent_id) > 200:
         raise AdminError("--agent-id must contain between 1 and 200 characters")
+    if not confirm_relay_stopped:
+        raise AdminError(
+            "offline rotation requires --confirm-relay-stopped so previously authenticated sessions are disconnected"
+        )
     if upsert and (name is None or not name.strip()):
         raise AdminError("--upsert requires a non-blank --name")
     if not upsert and any(value is not None for value in (name, owner, capabilities)):
@@ -346,6 +356,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--server", required=True)
     parser.add_argument(
+        "--confirm-relay-stopped",
+        action="store_true",
+        help=(
+            "confirm the Relay process is stopped so old authenticated HTTP/WebSocket "
+            "sessions cannot survive rotation"
+        ),
+    )
+    parser.add_argument(
         "--upsert",
         action="store_true",
         help="explicitly allow creating a missing Agent; requires --name",
@@ -368,6 +386,7 @@ def main(argv: list[str] | None = None) -> int:
             name=arguments.name,
             owner=arguments.owner,
             capabilities=arguments.capabilities,
+            confirm_relay_stopped=arguments.confirm_relay_stopped,
         )
     except AdminError as error:
         print(f"ERROR: {error}", file=sys.stderr)

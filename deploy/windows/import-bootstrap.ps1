@@ -14,6 +14,31 @@ if ($env:OS -ne "Windows_NT") {
     throw "AIChat bootstrap import must run as the target user on Windows"
 }
 
+$protectedRoot = Get-AIChatProtectedRoot
+$protectedRootItem = Get-Item -LiteralPath $protectedRoot -Force -ErrorAction SilentlyContinue
+if ($null -eq $protectedRootItem) {
+    New-Item -ItemType Directory -Path $protectedRoot | Out-Null
+    $protectedRootItem = Get-Item -LiteralPath $protectedRoot -Force
+}
+if (-not $protectedRootItem.PSIsContainer -or
+    ($protectedRootItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+    throw "The protected AIChat LocalAppData root must be a regular directory"
+}
+Protect-SecretFile -Path $protectedRoot
+
+$bootstrapRoot = Join-Path $protectedRoot "bootstrap"
+$bootstrapRootItem = Get-Item -LiteralPath $bootstrapRoot -Force -ErrorAction SilentlyContinue
+if ($null -eq $bootstrapRootItem) {
+    New-Item -ItemType Directory -Path $bootstrapRoot | Out-Null
+    $bootstrapRootItem = Get-Item -LiteralPath $bootstrapRoot -Force
+}
+if (-not $bootstrapRootItem.PSIsContainer -or
+    ($bootstrapRootItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+    throw "The AIChat bootstrap staging path must be a regular directory"
+}
+Protect-SecretFile -Path $bootstrapRoot
+[void](Assert-AIChatPathWithinProtectedRoot -Path $bootstrapRoot -ProtectedRoot $protectedRoot)
+
 function Get-BootstrapString {
     param(
         [Parameter(Mandatory = $true)][psobject]$Object,
@@ -26,21 +51,39 @@ function Get-BootstrapString {
     return $property.Value.Trim()
 }
 
-$artifactItem = Get-Item -LiteralPath $BootstrapPath -Force
+$artifactPath = Assert-AIChatPathWithinProtectedRoot `
+    -Path $BootstrapPath `
+    -ProtectedRoot $bootstrapRoot
+$artifactItem = Get-Item -LiteralPath $artifactPath -Force
 if ($artifactItem.PSIsContainer -or ($artifactItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
     throw "BootstrapPath must be a regular file, not a directory or reparse point"
 }
-$artifactPath = $artifactItem.FullName
 
-# Restrict the transported artifact before parsing it. This replaces the DACL
-# with one FullControl rule for the current Windows SID.
+# Restrict the trusted staging directory and transported artifact before parsing
+# it. A same-SID process or administrator remains outside this local boundary.
 Protect-SecretFile -Path $artifactPath
 
+$artifactStream = $null
+$artifactReader = $null
 try {
-    $raw = Get-Content -LiteralPath $artifactPath -Raw -Encoding UTF8
+    $artifactStream = [IO.FileStream]::new(
+        $artifactPath,
+        [IO.FileMode]::Open,
+        [IO.FileAccess]::Read,
+        [IO.FileShare]::None
+    )
+    $artifactReader = [IO.StreamReader]::new(
+        $artifactStream,
+        [Text.UTF8Encoding]::new($false, $true),
+        $true
+    )
+    $raw = $artifactReader.ReadToEnd()
     $bootstrap = $raw | ConvertFrom-Json
 } catch {
     throw "Bootstrap JSON could not be parsed; diagnostic details were suppressed"
+} finally {
+    if ($null -ne $artifactReader) { $artifactReader.Dispose() }
+    if ($null -ne $artifactStream) { $artifactStream.Dispose() }
 }
 if ($null -eq $bootstrap -or
     $bootstrap -is [Array] -or
@@ -77,6 +120,22 @@ if ($token.Length -lt 43 -or $token.Length -gt 512 -or $token -notmatch '^[A-Za-
 }
 
 $paths = Get-AIChatWindowsPaths -StateRoot $StateRoot -ConfigPath $ConfigPath
+$paths.ConfigPath = Assert-AIChatPathWithinProtectedRoot `
+    -Path $paths.ConfigPath `
+    -ProtectedRoot $protectedRoot `
+    -LeafMayBeMissing
+$configParent = Split-Path -Parent $paths.ConfigPath
+$configParentItem = Get-Item -LiteralPath $configParent -Force -ErrorAction SilentlyContinue
+if ($null -eq $configParentItem) {
+    New-Item -ItemType Directory -Path $configParent | Out-Null
+    $configParentItem = Get-Item -LiteralPath $configParent -Force
+}
+if (-not $configParentItem.PSIsContainer -or
+    ($configParentItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+    throw "AIChat config parent must be a regular directory"
+}
+Protect-SecretFile -Path $configParent
+[void](Assert-AIChatPathWithinProtectedRoot -Path $configParent -ProtectedRoot $protectedRoot)
 try {
     $config = Read-JsonObject -Path $paths.ConfigPath
 } catch {
@@ -87,11 +146,12 @@ Set-ObjectProperty -Object $config -Name "agent_id" -Value $agentId
 Set-ObjectProperty -Object $config -Name "agent_name" -Value $agentName
 Set-ObjectProperty -Object $config -Name "token" -Value $token
 
-Write-SecretJsonAtomic -Path $paths.ConfigPath -Value $config
+Write-SecretJsonAtomic -Path $paths.ConfigPath -Value $config -ProtectedRoot $protectedRoot
 
 $raw = $null
 $bootstrap = $null
 $token = $null
+$config = $null
 $deleted = $false
 if (-not $KeepBootstrap) {
     try {

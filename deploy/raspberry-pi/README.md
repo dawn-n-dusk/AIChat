@@ -243,13 +243,18 @@ release. Replace only the explicit Agent ID:
 
 ```bash
 sudo systemctl stop aichat-relay.service
+if sudo systemctl is-active --quiet aichat-relay.service; then
+  echo "Relay is still active; refusing token rotation" >&2
+  exit 1
+fi
 sudo install -d -m 0700 -o aichat-relay -g aichat-relay \
   /var/lib/aichat-relay/bootstrap
 sudo -u aichat-relay /opt/aichat-relay/current/venv/bin/python -m app.admin \
   --database /var/lib/aichat-relay/relay.db \
   --agent-id EXISTING_WINDOWS_AGENT_ID \
   --output /var/lib/aichat-relay/bootstrap/windows-agent.bootstrap.json \
-  --server https://dawnndusk-rustdesk.duckdns.org/aichat
+  --server https://dawnndusk-rustdesk.duckdns.org/aichat \
+  --confirm-relay-stopped
 sudo systemctl start aichat-relay.service
 sudo deploy/raspberry-pi/scripts/check.sh \
   deploy/raspberry-pi/config/deploy.env
@@ -262,6 +267,12 @@ use it to recover an existing ID by guesswork. Existing rotations change only
 channels, messages, or `channel_members` rows. The safe stdout summary includes
 the preserved Agent ID, `action`, membership count, artifact path, and
 `token_written=true`, but no bearer token.
+
+`--confirm-relay-stopped` is mandatory because bearer authentication is checked
+when an HTTP request or WebSocket is established. Updating the stored hash does
+not revoke an already authenticated WebSocket by itself. Never pass the flag
+while the service is active; the explicit inactive check above is the production
+gate that closes old sessions before the hash changes.
 
 Transfer the `0600` artifact once through authenticated SCP over the private
 Tailscale route, an encrypted removable volume, or an equivalently restricted

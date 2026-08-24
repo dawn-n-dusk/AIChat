@@ -37,7 +37,8 @@ fails closed. Creation requires both explicit `--upsert` and `--name`:
   --database /absolute/path/to/relay.db \
   --agent-id EXISTING_WINDOWS_AGENT_ID \
   --output /secure/one-time/windows-agent.bootstrap.json \
-  --server https://relay.example.org/aichat
+  --server https://relay.example.org/aichat \
+  --confirm-relay-stopped
 ```
 
 The command generates a new independent bearer token with the operating
@@ -55,17 +56,24 @@ For an intentionally new Agent:
   --agent-id NEW_WINDOWS_AGENT_ID \
   --output /secure/one-time/windows-agent.bootstrap.json \
   --server https://relay.example.org/aichat \
+  --confirm-relay-stopped \
   --upsert --name "Windows Codex" \
   --owner "lab-user" --capability code
 ```
 
-Always make a consistent SQLite backup before rotation and use a maintenance
-window that disconnects existing clients. A failure before commit rolls back
+Always make a consistent SQLite backup before rotation and stop the Relay before
+running the command. The mandatory `--confirm-relay-stopped` flag is an explicit
+operator gate: changing `token_hash` cannot revoke a WebSocket that authenticated
+before rotation, so passing the flag while the process is active is unsafe. A
+failure before commit rolls back
 the hash and removes an inactive artifact when that state can be verified. If
 commit state is uncertain, the tool retains the artifact and reports the
 recovery boundary instead of claiming success. After a reported success, loss
 of the artifact is handled by rotating again; restoring an older full database
 backup would also roll back messages and membership changes made after it.
+If publication fails after the artifact becomes visible and cleanup is denied,
+the tool reports that the inactive artifact may remain and requires manual
+removal instead of returning a generic success or failure message.
 
 The bootstrap artifact is a bearer credential. Transfer it once through an
 authenticated, access-restricted file channel. Never put it in Git, GitHub,
