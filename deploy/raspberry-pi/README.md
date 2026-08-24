@@ -32,10 +32,17 @@ changed. Running validation locally does not connect to or deploy the host.
    trusts forwarded client addresses only from loopback (`127.0.0.0/8,::1/128`).
 4. Caddy terminates HTTPS/WSS and `handle_path /aichat/*` strips the prefix
    before proxying. WebSocket Upgrade is handled by Caddy automatically.
-5. Public identity/channel provisioning is denied with HTTP 403 by default:
-   Agent registration, channel creation, and channel join. The Relay endpoints
-   remain available on loopback for controlled provisioning through an SSH
-   tunnel over Tailscale. A path prefix is routing, not access control.
+5. Public identity/channel provisioning has two independent gates. Caddy keeps
+   exact POST-only denies for Agent registration, exact channel creation, and
+   channel join in an explicit ordered `route` before the Relay proxy; query
+   strings still match because Caddy path matchers ignore them, while GET is not
+   denied by this edge policy. Edge 403 responses carry
+   `X-AIChat-Edge-Deny: provisioning` for acceptance checks. The Relay's
+   production-lockdown feature flags independently deny the same mutations if a
+   request reaches loopback. Controlled provisioning remains possible only by
+   temporarily opening the required application flag and using an SSH tunnel
+   over Tailscale while the public Caddy gate stays closed. A path prefix alone
+   is routing, not access control.
 6. Uvicorn access logs are disabled. Existing Caddy access logs remain enabled
    for the root/AeroLink site, while a top-level `log_skip` matcher excludes only
    `/aichat` and `/aichat/*` before redirects, provisioning denies, HTTP APIs,
@@ -68,7 +75,8 @@ only for this single-worker invited deployment.
 - `config/deploy.env.example`: reviewed deployment values; contains no bearer token.
 - `templates/aichat-relay.service`: loopback-only Relay unit.
 - `templates/aichat-relay-backup.{service,timer}`: daily persistent backups.
-- `templates/caddy-route.caddy`: path-prefix route and default registration deny.
+- `templates/caddy-route.caddy`: ordered path-prefix proxy and exact POST-only
+  public registration/channel provisioning denies.
 - `templates/caddy-global-options.caddy`: scoped AIChat error-logger query redaction.
 - `scripts/install.sh`: staged release, local health, atomic Caddy patch, validation,
   public health, initial-backup acceptance, and transactional failure rollback.
@@ -266,13 +274,27 @@ sudo --preserve-env=AICHAT_CHECK_TOKEN \
   deploy/raspberry-pi/config/deploy.env
 ```
 
-Without `AICHAT_CHECK_TOKEN`, the acceptance script expects channel creation and
-join probes to stop at the authentication gate with HTTP 401; this proves only
-that unauthenticated mutation is rejected. With a valid existing token, the
-same probes pass authentication and must return HTTP 403 from the application
-feature gates. Agent registration requires no authentication and must always
-return 403 under the production profile. The token is also reused for the
-optional WSS handshake and is never printed.
+The acceptance script never sends a schema-valid Agent registration or channel
+creation payload. Its public edge probes cover missing and deliberately invalid
+tokens for all three provisioning paths, and add a valid-token pass when
+`AICHAT_CHECK_TOKEN` is supplied. Registration and channel creation use `{}`;
+join targets a known-nonexistent ID. Every POST includes a query string, must
+return 403, and must carry `X-AIChat-Edge-Deny: provisioning`; GET requests to
+the same paths must not carry that marker or return the edge 403. This proves
+the edge matcher is POST-only, query-independent, and ahead of the Relay without
+risking a database write.
+
+Application lockdown remains the second gate. `check.sh` verifies the installed
+feature flags exactly, uses invalid local registration/channel-create bodies to
+prove the acceptance run cannot create records, and, when a valid token is
+supplied, requires a nonexistent channel join to return the application 403.
+Without the token, that join must stop at the local authentication gate with
+401. Registration and channel creation cannot be actively driven through their
+application feature gates without sending a schema-valid mutation, so their
+runtime protection is established by the installed-setting checks plus the
+Relay security test suite, not by a potentially state-changing acceptance
+request. The token is also reused for the optional WSS handshake and is never
+printed.
 
 Expected acceptance includes:
 
@@ -280,14 +302,19 @@ Expected acceptance includes:
 - local and public health success;
 - installed production profile values match the reviewed deployment config;
 - local `/docs` and `/openapi.json` return 404;
-- application-level registration returns 403; authenticated channel creation
-  and join return 403 when `AICHAT_CHECK_TOKEN` is supplied, otherwise their
-  unauthenticated auth-gate probes return 401;
-- public Agent registration, channel creation, and channel join return 403;
+- application lockdown settings match the reviewed false values; invalid local
+  registration/channel-create bodies return 422 without creating records, and
+  a valid-token nonexistent join returns the application 403 when
+  `AICHAT_CHECK_TOKEN` is supplied (otherwise it returns the auth-gate 401);
+- public Agent registration, channel creation, and channel join return a
+  marker-bearing edge 403 for missing/invalid and optional valid tokens even
+  with query strings, while GET is not rejected by the POST-only edge matcher;
 - Caddy validates and contains the managed route/global logger block; adapted
-  JSON proves the exact AIChat-only `log_name`/`log_skip`, named error logger
-  query redaction, and default-logger exclusion, while existing root/AeroLink
-  logs remain and debug logging is rejected;
+  JSON binds the three exact provisioning denies to the direct parent of the
+  unique exact Relay route and proves that route precedes the unique fallback in
+  their real ancestor context, plus the exact AIChat-only `log_name`/`log_skip`,
+  named error logger query redaction, and default-logger exclusion, while
+  existing root/AeroLink logs remain and debug logging is rejected;
 - SQLite and latest-backup integrity pass;
 - RustDesk listeners remain visible and no AIChat unit references their ports.
 

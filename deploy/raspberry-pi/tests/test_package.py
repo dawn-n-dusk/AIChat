@@ -31,6 +31,18 @@ def run_shell(script: str, *arguments: str) -> subprocess.CompletedProcess[str]:
 
 
 def valid_adapted_document() -> dict[str, object]:
+    provisioning_paths = [
+        "/aichat/v1/agents/register",
+        "/aichat/v1/channels",
+        "/aichat/v1/channels/*/join",
+    ]
+    provisioning_routes = [
+        {
+            "match": [{"method": ["POST"], "path": [path]}],
+            "handle": [{"handler": "static_response", "status_code": 403}],
+        }
+        for path in provisioning_paths
+    ]
     return {
         "logging": {
             "logs": {
@@ -71,47 +83,94 @@ def valid_adapted_document() -> dict[str, object]:
                                 ],
                             },
                             {
-                                "match": [{"path": ["/aichat"]}],
                                 "handle": [
                                     {
                                         "handler": "subroute",
                                         "routes": [
                                             {
+                                                "match": [
+                                                    {
+                                                        "method": ["POST"],
+                                                        "path": provisioning_paths,
+                                                    }
+                                                ],
                                                 "handle": [
                                                     {
-                                                        "handler": "static_response",
-                                                        "headers": {"Location": ["/aichat/"]},
-                                                        "status_code": 308,
+                                                        "handler": "headers",
+                                                        "response": {
+                                                            "set": {
+                                                                "X-Aichat-Edge-Deny": [
+                                                                    "provisioning"
+                                                                ]
+                                                            }
+                                                        },
                                                     }
-                                                ]
-                                            }
+                                                ],
+                                            },
+                                            *provisioning_routes,
+                                            {
+                                                "match": [{"path": ["/aichat"]}],
+                                                "handle": [
+                                                    {
+                                                        "handler": "subroute",
+                                                        "routes": [
+                                                            {
+                                                                "handle": [
+                                                                    {
+                                                                        "handler": "static_response",
+                                                                        "headers": {
+                                                                            "Location": [
+                                                                                "/aichat/"
+                                                                            ]
+                                                                        },
+                                                                        "status_code": 308,
+                                                                    }
+                                                                ]
+                                                            }
+                                                        ],
+                                                    }
+                                                ],
+                                            },
+                                            {
+                                                "match": [{"path": ["/aichat/*"]}],
+                                                "handle": [
+                                                    {
+                                                        "handler": "subroute",
+                                                        "routes": [
+                                                            {
+                                                                "handle": [
+                                                                    {
+                                                                        "handler": "rewrite",
+                                                                        "strip_path_prefix": "/aichat",
+                                                                    }
+                                                                ]
+                                                            },
+                                                            {
+                                                                "handle": [
+                                                                    {
+                                                                        "handler": "request_body",
+                                                                        "max_size": 4_000_000,
+                                                                    },
+                                                                    {
+                                                                        "handler": "reverse_proxy",
+                                                                        "upstreams": [
+                                                                            {
+                                                                                "dial": "127.0.0.1:8787"
+                                                                            }
+                                                                        ],
+                                                                    },
+                                                                ]
+                                                            },
+                                                        ],
+                                                    }
+                                                ],
+                                            },
                                         ],
-                                    }
-                                ],
-                            },
-                            {
-                                "match": [{"path": ["/aichat/*"]}],
-                                "handle": [
-                                    {"handler": "request_body", "max_size": 4_000_000},
+                                    },
                                     {
                                         "handler": "reverse_proxy",
-                                        "upstreams": [{"dial": "127.0.0.1:8787"}],
+                                        "upstreams": [{"dial": "127.0.0.1:17300"}],
                                     },
-                                ],
-                            },
-                            {
-                                "handler": "subroute",
-                                "routes": [
-                                    {
-                                        "handle": [
-                                            {
-                                                "handler": "reverse_proxy",
-                                                "upstreams": [
-                                                    {"dial": "127.0.0.1:17300"}
-                                                ],
-                                            }
-                                        ]
-                                    }
                                 ],
                             },
                         ]
@@ -120,6 +179,15 @@ def valid_adapted_document() -> dict[str, object]:
             }
         }
     }
+
+
+def public_adapted_document() -> dict[str, object]:
+    document = valid_adapted_document()
+    route_context = document["apps"]["http"]["servers"]["srv0"]["routes"][1]["handle"][
+        0
+    ]["routes"]
+    del route_context[:4]
+    return document
 
 
 class DeploymentPackageTests(unittest.TestCase):
@@ -461,8 +529,18 @@ printf 'status=%s\n' "$status"
             self.assertIn(f"{name}={value}", example)
             self.assertIn(name, installer)
             self.assertIn(name, checker)
-        self.assertIn("unauthenticated POST /${authenticated_lockdown_paths[$index]}", checker)
-        self.assertIn("channel create/join feature-gate 403 checks require AICHAT_CHECK_TOKEN", checker)
+        self.assertIn("invalid local registration probe cannot write an Agent", checker)
+        self.assertIn("application lockdown denies non-mutating authenticated channel join", checker)
+        self.assertIn("provisioning_auth_names=(missing invalid)", checker)
+        self.assertIn("provisioning_auth_names+=(valid)", checker)
+        self.assertIn("expect_edge_http_status 403", checker)
+        self.assertIn("X-AIChat-Edge-Deny", checker)
+        self.assertIn("aichat_edge_probe=", checker)
+        self.assertIn("expect_not_edge_denied", checker)
+        self.assertNotIn("local-registration-must-stay-closed", checker)
+        self.assertNotIn("local-channel-create-must-stay-closed", checker)
+        self.assertNotIn("public-registration-must-stay-closed", checker)
+        self.assertNotIn("public-channel-create-must-stay-closed", checker)
         self.assertIn('-H "Authorization: Bearer $AICHAT_CHECK_TOKEN"', checker)
 
     def test_installed_templates_do_not_use_rustdesk_ports(self) -> None:
@@ -474,13 +552,29 @@ printf 'status=%s\n' "$status"
 
     def test_caddy_route_has_prefix_strip_limits_and_public_provisioning_denies(self) -> None:
         route = (TEMPLATES / "caddy-route.caddy").read_text()
+        self.assertIn("route {", route)
         self.assertIn("handle_path __AICHAT_PATH_PREFIX__/*", route)
         self.assertIn("reverse_proxy 127.0.0.1:__AICHAT_RELAY_PORT__", route)
         self.assertIn("max_size 4MB", route)
-        self.assertIn("/v1/agents/register*", route)
+        self.assertIn("/v1/agents/register", route)
         self.assertIn("/v1/channels", route)
-        self.assertIn("/v1/channels/*/join*", route)
+        self.assertIn("/v1/channels/*/join", route)
+        self.assertNotIn("/v1/agents/register*", route)
+        self.assertNotIn("/v1/channels/*/join*", route)
         self.assertGreaterEqual(route.count("respond @aichat_public_"), 3)
+        self.assertIn("X-AIChat-Edge-Deny provisioning", route)
+        self.assertLess(
+            route.index("respond @aichat_public_registration 403"),
+            route.index("handle_path __AICHAT_PATH_PREFIX__/*"),
+        )
+        self.assertLess(
+            route.index("respond @aichat_public_channel_create 403"),
+            route.index("handle_path __AICHAT_PATH_PREFIX__/*"),
+        )
+        self.assertLess(
+            route.index("respond @aichat_public_channel_join 403"),
+            route.index("handle_path __AICHAT_PATH_PREFIX__/*"),
+        )
         self.assertIn(
             "@aichat_access_log_skip path __AICHAT_PATH_PREFIX__ __AICHAT_PATH_PREFIX__/*",
             route,
@@ -568,7 +662,7 @@ printf 'status=%s\n' "$status"
     def test_adapted_caddy_validator_compares_reverse_proxy_handler_order(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             adapted = Path(directory) / "adapted.json"
-            document = valid_adapted_document()
+            document = public_adapted_document()
             document["apps"]["http"]["servers"]["srv0"]["routes"].insert(
                 0,
                 {
@@ -593,6 +687,305 @@ printf 'status=%s\n' "$status"
             )
             self.assertIn("route invariants passed", result.stdout)
 
+    def test_adapted_caddy_validator_requires_ordered_provisioning_deny_context(self) -> None:
+        arguments = (
+            "python3",
+            str(SCRIPTS / "validate-caddy-route.py"),
+            "--path-prefix",
+            "/aichat",
+            "--relay-dial",
+            "127.0.0.1:8787",
+            "--fallback-dial",
+            "127.0.0.1:17300",
+            "--public-provisioning",
+            "false",
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            adapted = Path(directory) / "adapted.json"
+            adapted.write_text(json.dumps(valid_adapted_document()))
+            result = run(*arguments[:2], "--adapted-json", str(adapted), *arguments[2:])
+            self.assertIn("route invariants passed", result.stdout)
+
+        invalid_documents = []
+
+        reordered = valid_adapted_document()
+        reordered_context = reordered["apps"]["http"]["servers"]["srv0"]["routes"][1][
+            "handle"
+        ][0]["routes"]
+        registration_deny = reordered_context.pop(1)
+        reordered_context.append(registration_deny)
+        invalid_documents.append(("precede it", reordered))
+
+        split = valid_adapted_document()
+        split_outer = split["apps"]["http"]["servers"]["srv0"]["routes"]
+        split_context = split_outer[1]["handle"][0]["routes"]
+        split_outer.insert(1, split_context.pop(1))
+        invalid_documents.append(("direct members", split))
+
+        get_only = valid_adapted_document()
+        get_context = get_only["apps"]["http"]["servers"]["srv0"]["routes"][1][
+            "handle"
+        ][0]["routes"]
+        get_context[1]["match"][0]["method"] = ["GET"]
+        invalid_documents.append(("POST-only", get_only))
+
+        query_bound = valid_adapted_document()
+        query_context = query_bound["apps"]["http"]["servers"]["srv0"]["routes"][1][
+            "handle"
+        ][0]["routes"]
+        query_context[1]["match"][0]["query"] = {"probe": ["required"]}
+        invalid_documents.append(("POST-only", query_bound))
+
+        for expected, document in invalid_documents:
+            with self.subTest(expected=expected), tempfile.TemporaryDirectory() as directory:
+                adapted = Path(directory) / "adapted.json"
+                adapted.write_text(json.dumps(document))
+                result = subprocess.run(
+                    [*arguments[:2], "--adapted-json", str(adapted), *arguments[2:]],
+                    text=True,
+                    capture_output=True,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(expected, result.stderr)
+
+    def test_adapted_caddy_validator_requires_enabled_public_route_to_have_no_managed_denies(
+        self,
+    ) -> None:
+        arguments = (
+            "python3",
+            str(SCRIPTS / "validate-caddy-route.py"),
+            "--path-prefix",
+            "/aichat",
+            "--relay-dial",
+            "127.0.0.1:8787",
+            "--fallback-dial",
+            "127.0.0.1:17300",
+            "--public-provisioning",
+            "true",
+        )
+
+        documents = [(None, public_adapted_document())]
+        unrelated_deny = public_adapted_document()
+        unrelated_deny["apps"]["http"]["servers"]["srv0"]["routes"][1]["handle"][0][
+            "routes"
+        ].insert(
+            0,
+            {
+                "match": [{"method": ["POST"], "path": ["/unrelated/*"]}],
+                "handle": [{"handler": "static_response", "status_code": 403}],
+            },
+        )
+        documents.append((None, unrelated_deny))
+        documents.append(("overlapping managed POST deny remains", valid_adapted_document()))
+
+        marker_only = public_adapted_document()
+        marker_source = valid_adapted_document()["apps"]["http"]["servers"]["srv0"][
+            "routes"
+        ][1]["handle"][0]["routes"][0]
+        marker_only["apps"]["http"]["servers"]["srv0"]["routes"][1]["handle"][0][
+            "routes"
+        ].insert(0, marker_source)
+        documents.append(("edge-deny marker remains", marker_only))
+
+        for expected, document in documents:
+            with self.subTest(expected=expected), tempfile.TemporaryDirectory() as directory:
+                adapted = Path(directory) / "adapted.json"
+                adapted.write_text(json.dumps(document))
+                result = subprocess.run(
+                    [*arguments[:2], "--adapted-json", str(adapted), *arguments[2:]],
+                    text=True,
+                    capture_output=True,
+                )
+                if expected is None:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn("route invariants passed", result.stdout)
+                else:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(expected, result.stderr)
+
+    def test_adapted_caddy_validator_rejects_cross_context_decoy_relay(self) -> None:
+        document = valid_adapted_document()
+        wrapper = document["apps"]["http"]["servers"]["srv0"]["routes"][1]
+        managed_routes = wrapper["handle"][0]["routes"]
+        exact_relay_route = managed_routes.pop()
+        managed_routes.append(
+            {
+                "match": [{"path": ["/decoy"]}],
+                "handle": [
+                    {
+                        "handler": "reverse_proxy",
+                        "upstreams": [{"dial": "127.0.0.1:8787"}],
+                    }
+                ],
+            }
+        )
+        wrapper["handle"].insert(
+            1,
+            {"handler": "subroute", "routes": [exact_relay_route]},
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            adapted = Path(directory) / "adapted.json"
+            adapted.write_text(json.dumps(document))
+            result = subprocess.run(
+                [
+                    "python3",
+                    str(SCRIPTS / "validate-caddy-route.py"),
+                    "--adapted-json",
+                    str(adapted),
+                    "--path-prefix",
+                    "/aichat",
+                    "--relay-dial",
+                    "127.0.0.1:8787",
+                    "--fallback-dial",
+                    "127.0.0.1:17300",
+                    "--public-provisioning",
+                    "false",
+                ],
+                text=True,
+                capture_output=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("direct members of the exact Relay route context", result.stderr)
+
+    def test_adapted_caddy_validator_rejects_unrelated_handler_order_decoy(self) -> None:
+        document = valid_adapted_document()
+        wrapper = document["apps"]["http"]["servers"]["srv0"]["routes"][1]
+        managed_handler, fallback = wrapper["handle"]
+        fallback_before_exact_with_decoy = {
+            "handler": "subroute",
+            "routes": [
+                {
+                    "handle": [
+                        {
+                            "handler": "reverse_proxy",
+                            "upstreams": [{"dial": "127.0.0.1:8787"}],
+                        }
+                    ]
+                },
+                {"handle": [fallback]},
+            ],
+        }
+        wrapper["handle"] = [fallback_before_exact_with_decoy, managed_handler]
+
+        with tempfile.TemporaryDirectory() as directory:
+            adapted = Path(directory) / "adapted.json"
+            adapted.write_text(json.dumps(document))
+            result = subprocess.run(
+                [
+                    "python3",
+                    str(SCRIPTS / "validate-caddy-route.py"),
+                    "--adapted-json",
+                    str(adapted),
+                    "--path-prefix",
+                    "/aichat",
+                    "--relay-dial",
+                    "127.0.0.1:8787",
+                    "--fallback-dial",
+                    "127.0.0.1:17300",
+                    "--public-provisioning",
+                    "false",
+                ],
+                text=True,
+                capture_output=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("real ancestor context", result.stderr)
+
+    def test_adapted_caddy_validator_rejects_cross_server_deny_decoy(self) -> None:
+        document = valid_adapted_document()
+        managed_routes = document["apps"]["http"]["servers"]["srv0"]["routes"][1][
+            "handle"
+        ][0]["routes"]
+        moved_policy_routes = managed_routes[:4]
+        del managed_routes[:4]
+        document["apps"]["http"]["servers"]["other"] = {
+            "routes": [
+                *moved_policy_routes,
+                {
+                    "match": [{"path": ["/cross-server-decoy"]}],
+                    "handle": [
+                        {
+                            "handler": "reverse_proxy",
+                            "upstreams": [{"dial": "127.0.0.1:8787"}],
+                        }
+                    ],
+                },
+            ]
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            adapted = Path(directory) / "adapted.json"
+            adapted.write_text(json.dumps(document))
+            result = subprocess.run(
+                [
+                    "python3",
+                    str(SCRIPTS / "validate-caddy-route.py"),
+                    "--adapted-json",
+                    str(adapted),
+                    "--path-prefix",
+                    "/aichat",
+                    "--relay-dial",
+                    "127.0.0.1:8787",
+                    "--fallback-dial",
+                    "127.0.0.1:17300",
+                    "--public-provisioning",
+                    "false",
+                ],
+                text=True,
+                capture_output=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("direct members of the exact Relay route context", result.stderr)
+
+    def test_public_provisioning_rejects_combined_and_legacy_wildcard_denies(self) -> None:
+        managed_paths = [
+            "/aichat/v1/agents/register",
+            "/aichat/v1/channels",
+            "/aichat/v1/channels/*/join",
+        ]
+        deny_matchers = (
+            {"method": ["POST"], "path": managed_paths},
+            {"method": ["POST"], "path": ["/aichat/v1/agents/register*"]},
+            {"method": ["POST"], "path": ["/aichat/v1/channels/*/join*"]},
+        )
+        for matcher in deny_matchers:
+            document = public_adapted_document()
+            managed_routes = document["apps"]["http"]["servers"]["srv0"]["routes"][1][
+                "handle"
+            ][0]["routes"]
+            managed_routes.insert(
+                0,
+                {
+                    "match": [matcher],
+                    "handle": [{"handler": "static_response", "status_code": 403}],
+                },
+            )
+            with self.subTest(matcher=matcher), tempfile.TemporaryDirectory() as directory:
+                adapted = Path(directory) / "adapted.json"
+                adapted.write_text(json.dumps(document))
+                result = subprocess.run(
+                    [
+                        "python3",
+                        str(SCRIPTS / "validate-caddy-route.py"),
+                        "--adapted-json",
+                        str(adapted),
+                        "--path-prefix",
+                        "/aichat",
+                        "--relay-dial",
+                        "127.0.0.1:8787",
+                        "--fallback-dial",
+                        "127.0.0.1:17300",
+                        "--public-provisioning",
+                        "true",
+                    ],
+                    text=True,
+                    capture_output=True,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("overlapping managed POST deny remains", result.stderr)
+
     def test_adapted_caddy_validator_rejects_missing_or_overbroad_log_skip(self) -> None:
         invalid_matchers = (
             None,
@@ -604,7 +997,7 @@ printf 'status=%s\n' "$status"
             },
         )
         for matcher in invalid_matchers:
-            document = valid_adapted_document()
+            document = public_adapted_document()
             document["apps"]["http"]["servers"]["srv0"]["routes"].pop(0)
             if matcher is not None:
                 document["apps"]["http"]["servers"]["srv0"]["routes"].insert(
@@ -639,7 +1032,7 @@ printf 'status=%s\n' "$status"
                 self.assertIn("AIChat log_name/log_skip route", result.stderr)
 
     def test_adapted_caddy_validator_rejects_cross_server_log_skip(self) -> None:
-        document = valid_adapted_document()
+        document = public_adapted_document()
         misplaced = document["apps"]["http"]["servers"]["srv0"]["routes"].pop(0)
         document["apps"]["http"]["servers"]["other"] = {"routes": [misplaced]}
         with tempfile.TemporaryDirectory() as directory:
@@ -668,10 +1061,14 @@ printf 'status=%s\n' "$status"
 
     def test_adapted_caddy_validator_rejects_broken_bare_prefix_redirect(self) -> None:
         for location, status in (("308", 302), ("/aichat/", 302), ("/wrong/", 308)):
-            document = valid_adapted_document()
-            response = document["apps"]["http"]["servers"]["srv0"]["routes"][1][
+            document = public_adapted_document()
+            route_context = document["apps"]["http"]["servers"]["srv0"]["routes"][1][
                 "handle"
-            ][0]["routes"][0]["handle"][0]
+            ][0]["routes"]
+            redirect = next(
+                route for route in route_context if route.get("match") == [{"path": ["/aichat"]}]
+            )
+            response = redirect["handle"][0]["routes"][0]["handle"][0]
             response["headers"]["Location"] = [location]
             response["status_code"] = status
             with self.subTest(location=location, status=status), tempfile.TemporaryDirectory() as directory:
@@ -699,7 +1096,7 @@ printf 'status=%s\n' "$status"
                 self.assertIn("slash form with 308", result.stderr)
 
     def test_adapted_caddy_validator_rejects_debug_logging(self) -> None:
-        document = valid_adapted_document()
+        document = public_adapted_document()
         document["logging"] = {"logs": {"default": {"level": "DEBUG"}}}
         with tempfile.TemporaryDirectory() as directory:
             adapted = Path(directory) / "adapted.json"
@@ -726,7 +1123,7 @@ printf 'status=%s\n' "$status"
             self.assertIn("enables debug logging", result.stderr)
 
     def test_adapted_caddy_validator_requires_default_error_log_redaction(self) -> None:
-        document = valid_adapted_document()
+        document = public_adapted_document()
         document["logging"]["logs"]["aichat_relay_errors"]["encoder"]["fields"][
             "request>uri"
         ]["actions"][0]["parameter"] = "other"
