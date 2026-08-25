@@ -47,6 +47,7 @@ def test_scripts_do_not_embed_secret_shaped_values() -> None:
 
 def test_install_scope_and_safety_contracts_are_present() -> None:
     install = (ROOT / "install.ps1").read_text(encoding="utf-8")
+    common = (ROOT / "common.ps1").read_text(encoding="utf-8")
     uninstall = (ROOT / "uninstall.ps1").read_text(encoding="utf-8")
     runner = (ROOT / "run-adapter.ps1").read_text(encoding="utf-8")
     assert "SupportsShouldProcess = $true" in install
@@ -55,6 +56,8 @@ def test_install_scope_and_safety_contracts_are_present() -> None:
     assert "Existing AIChat token preserved" in install
     assert "AICHAT_TOKEN = [string]$config.token" in runner
     assert "token value" not in runner.lower()
+    assert '$ErrorActionPreference = "Continue"' in common
+    assert "ExitCode = $exitCode" in common
 
 
 def test_json_writer_is_utf8_without_bom_for_windows_powershell_51() -> None:
@@ -127,6 +130,39 @@ def test_ci_runs_windows_powershell_51_bootstrap_functional_test() -> None:
     assert "test_import_bootstrap.ps1" in workflow
 
 
+def test_codex_plugin_mcp_is_explicitly_enabled_and_slow_start_safe() -> None:
+    plugin_root = REPOSITORY_ROOT / "plugins" / "aichat"
+    manifest = json.loads(
+        (plugin_root / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8")
+    )
+    config = json.loads((plugin_root / ".mcp.json").read_text(encoding="utf-8"))
+    entry = config["mcpServers"]["aichat"]
+    assert manifest["mcpServers"] == "./.mcp.json"
+    assert entry["enabled"] is True
+    assert entry["command"] == "uvx"
+    assert entry["startup_timeout_sec"] >= 60
+    assert entry["tool_timeout_sec"] == 30
+
+
+def test_installer_refreshes_only_installer_owned_codex_plugin_state() -> None:
+    install = (ROOT / "install.ps1").read_text(encoding="utf-8")
+    assert '"plugin", "marketplace", "upgrade", "aichat-repo", "--json"' in install
+    assert '"plugin", "add", "aichat@aichat-repo", "--json"' in install
+    assert "elseif ($ownership.CodexMarketplaceAdded)" in install
+    assert "elseif ($ownership.CodexPluginAdded)" in install
+    assert "Existing user-managed Codex plugin" in install
+
+
+def test_ci_runs_windows_powershell_51_plugin_mcp_functional_test() -> None:
+    workflow = (REPOSITORY_ROOT / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    )
+    functional = ROOT / "tests" / "test_plugin_mcp_autoload.ps1"
+    assert functional.is_file()
+    assert "powershell.exe -NoProfile -ExecutionPolicy Bypass" in workflow
+    assert "test_plugin_mcp_autoload.ps1" in workflow
+
+
 def test_check_only_requires_selected_or_installed_components() -> None:
     check = (ROOT / "check.ps1").read_text(encoding="utf-8")
     assert "Report-Optional" in check
@@ -134,3 +170,6 @@ def test_check_only_requires_selected_or_installed_components() -> None:
     assert "if ($claudeExpected)" in check
     assert "if ($grokBridgeExpected)" in check
     assert '"import aichat_mcp"' in check
+    assert '"codex-plugin-mcp"' in check
+    assert '"mcp", "get", "aichat"' in check
+    assert "startup_timeout_sec" in check

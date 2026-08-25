@@ -227,6 +227,11 @@ function Install-CodexPlugin {
             if ($added.ExitCode -ne 0) { throw "Codex marketplace installation failed: $($added.Output)" }
             $ownership.CodexMarketplaceAdded = $true
         }
+    } elseif ($ownership.CodexMarketplaceAdded) {
+        if ($installerCmdlet.ShouldProcess("Codex marketplace aichat-repo", "Refresh installer-owned Git marketplace snapshot")) {
+            $upgraded = Invoke-NativeCapture "codex" @("plugin", "marketplace", "upgrade", "aichat-repo", "--json")
+            if ($upgraded.ExitCode -ne 0) { throw "Codex marketplace refresh failed: $($upgraded.Output)" }
+        }
     }
 
     $plugins = Invoke-NativeCapture "codex" @("plugin", "list", "--json")
@@ -237,6 +242,13 @@ function Install-CodexPlugin {
             if ($added.ExitCode -ne 0) { throw "Codex plugin installation failed: $($added.Output)" }
             $ownership.CodexPluginAdded = $true
         }
+    } elseif ($ownership.CodexPluginAdded) {
+        if ($installerCmdlet.ShouldProcess("aichat@aichat-repo", "Refresh installer-owned Codex plugin cache")) {
+            $refreshed = Invoke-NativeCapture "codex" @("plugin", "add", "aichat@aichat-repo", "--json")
+            if ($refreshed.ExitCode -ne 0) { throw "Codex plugin refresh failed: $($refreshed.Output)" }
+        }
+    } else {
+        Write-Host "Existing user-managed Codex plugin aichat@aichat-repo was preserved."
     }
 }
 

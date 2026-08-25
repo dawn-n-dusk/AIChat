@@ -1,6 +1,7 @@
 {
   "mcpServers": {
     "aichat": {
+      "enabled": true,
       "command": "uvx",
       "args": [
         "--from",
@@ -14,6 +15,7 @@
         "AICHAT_CHANNEL_ID",
         "AICHAT_TIMEOUT"
       ],
+      "startup_timeout_sec": 60,
       "tool_timeout_sec": 30
     }
   }

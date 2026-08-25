@@ -135,6 +135,19 @@ if (Test-ExternalCommand "codex") {
     $plugins = Invoke-NativeCapture "codex" @("plugin", "list", "--json")
     $pluginPresent = $plugins.ExitCode -eq 0 -and (Test-OutputContainsName $plugins.Output '"aichat"')
     if ($ownership.CodexPluginAdded) { Report-Check "codex-plugin" $pluginPresent "aichat@aichat-repo" } else { Report-Optional "codex-plugin" $pluginPresent "aichat@aichat-repo" }
+    $pluginMcp = Invoke-NativeCapture "codex" @("mcp", "get", "aichat")
+    $pluginMcpEnabled = $pluginMcp.ExitCode -eq 0 -and $pluginMcp.Output -match '(?m)^\s*enabled:\s*true\s*$'
+    $pluginMcpUsesUvx = $pluginMcp.ExitCode -eq 0 -and $pluginMcp.Output -match '(?m)^\s*command:\s*uvx\s*$'
+    $pluginMcpStartupOk = $false
+    if ($pluginMcp.ExitCode -eq 0 -and $pluginMcp.Output -match '(?m)^\s*startup_timeout_sec:\s*([0-9]+(?:\.[0-9]+)?)\s*$') {
+        $pluginMcpStartupOk = [double]$Matches[1] -ge 60
+    }
+    $pluginMcpReady = $pluginMcpEnabled -and $pluginMcpUsesUvx -and $pluginMcpStartupOk
+    if ($ownership.CodexPluginAdded) {
+        Report-Check "codex-plugin-mcp" $pluginMcpReady "aichat enabled with uvx and startup_timeout_sec >= 60"
+    } else {
+        Report-Optional "codex-plugin-mcp" $pluginMcpReady "aichat enabled with uvx and startup_timeout_sec >= 60"
+    }
     $codexMcp = Invoke-NativeCapture "codex" @("mcp", "get", "aichat-local")
     if ($ownership.CodexMcpAdded) { Report-Check "codex-mcp" ($codexMcp.ExitCode -eq 0) "aichat-local" } else { Report-Optional "codex-mcp" ($codexMcp.ExitCode -eq 0) "aichat-local" }
 }
