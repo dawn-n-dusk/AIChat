@@ -5,6 +5,9 @@ set -Eeuo pipefail
 readonly AICHAT_DEPLOY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly AICHAT_RUSTDESK_PORT_MIN=21115
 readonly AICHAT_RUSTDESK_PORT_MAX=21119
+readonly AICHAT_PUBLIC_HEALTH_ATTEMPTS=5
+readonly AICHAT_PUBLIC_HEALTH_SLEEP_SECONDS=10
+readonly AICHAT_PUBLIC_HEALTH_MAX_TIME_SECONDS=15
 
 die() {
   printf 'ERROR: %s\n' "$*" >&2
@@ -348,5 +351,44 @@ wait_for_local_health() {
     fi
     sleep 1
   done
+  return 1
+}
+
+wait_for_public_health() {
+  local attempts="${1:-$AICHAT_PUBLIC_HEALTH_ATTEMPTS}"
+  local sleep_seconds="${2:-$AICHAT_PUBLIC_HEALTH_SLEEP_SECONDS}"
+  local max_time_seconds="${3:-$AICHAT_PUBLIC_HEALTH_MAX_TIME_SECONDS}"
+  local base_url="${4:-$AICHAT_PUBLIC_BASE_URL}"
+  local curl_status=0 index
+
+  [[ "$attempts" =~ ^[1-9][0-9]*$ ]] || {
+    printf 'ERROR: public HTTPS health attempts must be a positive integer\n' >&2
+    return 2
+  }
+  [[ "$sleep_seconds" =~ ^[0-9]+$ ]] || {
+    printf 'ERROR: public HTTPS health sleep must be a non-negative integer\n' >&2
+    return 2
+  }
+  [[ "$max_time_seconds" =~ ^[1-9][0-9]*$ ]] || {
+    printf 'ERROR: public HTTPS health max-time must be a positive integer\n' >&2
+    return 2
+  }
+
+  for ((index = 1; index <= attempts; index += 1)); do
+    if curl --disable --fail --silent --retry 0 --max-time "$max_time_seconds" \
+      "${base_url}/health" >/dev/null 2>&1; then
+      note "public HTTPS health accepted on attempt ${index}/${attempts}"
+      return 0
+    else
+      curl_status=$?
+    fi
+    if ((index < attempts)); then
+      printf 'WARNING: public HTTPS health attempt %d/%d failed (curl status %d); retrying in %d seconds\n' \
+        "$index" "$attempts" "$curl_status" "$sleep_seconds" >&2
+      sleep "$sleep_seconds"
+    fi
+  done
+  printf 'ERROR: public HTTPS health failed after %d attempts (last curl status %d)\n' \
+    "$attempts" "$curl_status" >&2
   return 1
 }

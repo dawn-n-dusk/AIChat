@@ -11,12 +11,16 @@ repo_root="${2:-/workspace}"
 
 case "$scenario" in
   first-success) install_kind=first; fail_stage=none; expected=success ;;
+  first-public-retry-success) install_kind=first; fail_stage=public-retry; expected=success ;;
+  first-public-fail) install_kind=first; fail_stage=public-health; expected=failure ;;
   upgrade-success) install_kind=upgrade; fail_stage=none; expected=success ;;
   first-local-fail) install_kind=first; fail_stage=local-health; expected=failure ;;
   upgrade-daemon-fail) install_kind=upgrade; fail_stage=daemon-reload; expected=failure ;;
   upgrade-local-fail) install_kind=upgrade; fail_stage=local-health; expected=failure ;;
   upgrade-caddy-fail) install_kind=upgrade; fail_stage=caddy-reload; expected=failure ;;
+  upgrade-public-retry-success) install_kind=upgrade; fail_stage=public-retry; expected=success ;;
   upgrade-public-fail) install_kind=upgrade; fail_stage=public-health; expected=failure ;;
+  upgrade-public-network-fail) install_kind=upgrade; fail_stage=public-network; expected=failure ;;
   upgrade-backup-fail) install_kind=upgrade; fail_stage=backup; expected=failure ;;
   upgrade-previous-fail) install_kind=upgrade; fail_stage=previous-update; expected=failure ;;
   upgrade-rollback-incomplete) install_kind=upgrade; fail_stage=rollback-incomplete; expected=incomplete ;;
@@ -106,22 +110,43 @@ SH
 
 cat >"${mock_bin}/sleep" <<'SH'
 #!/bin/sh
-exit 0
+set -eu
+printf '%s\n' "${1:-missing}" >>/mock-state/sleep_arguments
 SH
 
 cat >"${mock_bin}/curl" <<'SH'
 #!/bin/sh
 set -eu
+first_argument="${1:-}"
+previous_argument=""
+retry_count=0
+retry_value=""
 url=""
 for argument in "$@"; do
+  if [ "$previous_argument" = --retry ]; then
+    retry_value="$argument"
+  fi
+  if [ "$argument" = --retry ]; then
+    retry_count=$((retry_count + 1))
+  fi
   case "$argument" in
     http://*|https://*) url="$argument" ;;
   esac
+  previous_argument="$argument"
 done
 case "$url" in
   http://127.0.0.1:*)
+    target="$(readlink /opt/aichat-relay/current 2>/dev/null || true)"
+    case "$target" in
+      */old-current)
+        count=0
+        [ -f /mock-state/old_service_health_count ] &&
+          count="$(cat /mock-state/old_service_health_count)"
+        count=$((count + 1))
+        printf '%s\n' "$count" >/mock-state/old_service_health_count
+        ;;
+    esac
     if [ "${FAIL_STAGE:-}" = local-health ]; then
-      target="$(readlink /opt/aichat-relay/current 2>/dev/null || true)"
       case "$target" in
         */mock-new) exit 1 ;;
       esac
@@ -129,9 +154,24 @@ case "$url" in
     exit 0
     ;;
   https://*)
+    [ "$first_argument" = --disable ] || exit 91
+    [ "$retry_count" -eq 1 ] || exit 92
+    [ "$retry_value" = 0 ] || exit 93
+    printf '%s\n' "$*" >>/mock-state/public_curl_arguments
+    count=0
+    [ -f /mock-state/public_health_count ] &&
+      count="$(cat /mock-state/public_health_count)"
+    count=$((count + 1))
+    printf '%s\n' "$count" >/mock-state/public_health_count
+    if [ "${FAIL_STAGE:-}" = public-retry ] && [ "$count" -le 3 ]; then
+      exit 22
+    fi
     if [ "${FAIL_STAGE:-}" = public-health ] ||
       [ "${FAIL_STAGE:-}" = rollback-incomplete ]; then
-      exit 1
+      exit 22
+    fi
+    if [ "${FAIL_STAGE:-}" = public-network ]; then
+      exit 7
     fi
     exit 0
     ;;
@@ -355,6 +395,24 @@ if [[ "$expected" == success ]]; then
   assert_eq "$(read_state timer_active)" true
   assert_eq "$(read_state timer_enabled)" true
   grep -q '^AICHAT_RELAY_PORT=8787$' /etc/aichat-relay/relay.env
+  if [[ "$fail_stage" == public-retry ]]; then
+    assert_file_text "${mock_state}/public_health_count" 4
+    assert_eq "$(wc -l <"${mock_state}/sleep_arguments" | tr -d ' ')" 3
+    [[ "$(sort -u "${mock_state}/sleep_arguments")" == 10 ]] || {
+      printf 'ASSERTION FAILED: public health retry did not use 10-second sleeps\n' >&2
+      exit 1
+    }
+    assert_file_text "${mock_state}/caddy_reload_count" 1
+    [[ "$(grep -c '^--disable ' "${mock_state}/public_curl_arguments")" -eq 4 ]] || {
+      printf 'ASSERTION FAILED: public curl did not disable curlrc first on every attempt\n' >&2
+      exit 1
+    }
+    [[ "$(grep -c -- '--retry 0' "${mock_state}/public_curl_arguments")" -eq 4 ]] || {
+      printf 'ASSERTION FAILED: public curl did not force retry 0 on every attempt\n' >&2
+      exit 1
+    }
+    grep -q 'public HTTPS health accepted on attempt 4/5' "$output"
+  fi
 else
   [[ "$installer_status" -ne 0 ]] || {
     printf 'ASSERTION FAILED: failure scenario returned success\n' >&2
@@ -386,6 +444,13 @@ else
     }
     for path in \
       /etc/aichat-relay/relay.env \
+      /etc/aichat-relay/caddy-route.caddy \
+      /etc/aichat-relay/caddy-global-options.caddy \
+      /usr/local/libexec/aichat-relay/backup.sh \
+      /usr/local/libexec/aichat-relay/backup.py \
+      /usr/local/libexec/aichat-relay/patch-caddy.py \
+      /usr/local/libexec/aichat-relay/seed-database.py \
+      /usr/local/libexec/aichat-relay/validate-caddy-route.py \
       /etc/systemd/system/aichat-relay.service \
       /etc/systemd/system/aichat-relay-backup.service \
       /etc/systemd/system/aichat-relay-backup.timer; do
@@ -398,6 +463,33 @@ else
     assert_eq "$(read_state service_enabled)" false
     assert_eq "$(read_state timer_active)" false
     assert_eq "$(read_state timer_enabled)" false
+  fi
+
+  if [[ "$fail_stage" == public-health || "$fail_stage" == public-network ]]; then
+    assert_file_text "${mock_state}/public_health_count" 5
+    assert_eq "$(wc -l <"${mock_state}/sleep_arguments" | tr -d ' ')" 4
+    [[ "$(sort -u "${mock_state}/sleep_arguments")" == 10 ]] || {
+      printf 'ASSERTION FAILED: failed public health retry did not use 10-second sleeps\n' >&2
+      exit 1
+    }
+    assert_file_text "${mock_state}/caddy_reload_count" 2
+    [[ "$(grep -c '^--disable ' "${mock_state}/public_curl_arguments")" -eq 5 ]] || {
+      printf 'ASSERTION FAILED: failed public curl did not disable curlrc first on every attempt\n' >&2
+      exit 1
+    }
+    [[ "$(grep -c -- '--retry 0' "${mock_state}/public_curl_arguments")" -eq 5 ]] || {
+      printf 'ASSERTION FAILED: failed public curl did not force retry 0 on every attempt\n' >&2
+      exit 1
+    }
+    if [[ "$install_kind" == upgrade ]]; then
+      assert_file_text "${mock_state}/old_service_health_count" 1
+    else
+      [[ ! -e "${mock_state}/old_service_health_count" ]] || {
+        printf 'ASSERTION FAILED: first-install rollback unexpectedly started an old Relay\n' >&2
+        exit 1
+      }
+    fi
+    grep -q 'public HTTPS health failed after 5 attempts' "$output"
   fi
 fi
 

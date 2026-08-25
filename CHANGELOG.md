@@ -14,8 +14,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Make Raspberry Pi Relay first install and upgrades fail closed on malformed or dangling release links, normalize staged virtual-environment permissions for the dedicated service account under `umask 027`, and transactionally restore release links, runtime files, systemd units, Caddy, and prior service/timer state after failed acceptance.
 - Add disposable mocked installer failure injection for first install, upgrade, Caddy, health, backup, link-update, and incomplete-rollback paths.
 - Preserve Raspberry Pi Caddy provisioning-deny order with an explicit route block, and bind adapted validation to the unique exact Relay route object, its direct provisioning-deny context, and its real ancestor ordering before the unique fallback; recursive or cross-context decoy proxies cannot satisfy the check.
+- Retry Raspberry Pi installer public health for a bounded Caddy convergence
+  window after reload, ignoring root curl configuration and disabling curl's
+  own retries, while persistent HTTP or network failures still restore the
+  prior Caddy configuration, release links, and service state on first install
+  and upgrade.
 
 ### Added
+
+- Run the lightweight Raspberry Pi deployment package validator as a dedicated
+  Linux GitHub Actions job; privileged Docker failure injection remains an
+  explicit maintainer gate.
 
 - Add a local `python -m app.admin` Relay operator CLI for fail-closed rotation
   of an existing Agent token, with explicit-only Agent upsert, transactional

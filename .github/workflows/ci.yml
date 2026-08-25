@@ -68,6 +68,18 @@ jobs:
       - name: Build server distributions
         run: python -m build
 
+  raspberry-pi-package:
+    name: Raspberry Pi deployment package (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Validate shell, Python, package, and rollback fixtures
+        run: deploy/raspberry-pi/scripts/validate-package.sh
+
   windows-bootstrap:
     name: Windows bootstrap (PowerShell 5.1)
     runs-on: windows-latest

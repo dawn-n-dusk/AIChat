@@ -9,12 +9,16 @@ readonly REPO_ROOT
 readonly IMAGE="${AICHAT_INSTALL_TEST_IMAGE:-python:3.13-slim}"
 readonly -a SCENARIOS=(
   first-success
+  first-public-retry-success
+  first-public-fail
   upgrade-success
   first-local-fail
   upgrade-daemon-fail
   upgrade-local-fail
   upgrade-caddy-fail
+  upgrade-public-retry-success
   upgrade-public-fail
+  upgrade-public-network-fail
   upgrade-backup-fail
   upgrade-previous-fail
   upgrade-rollback-incomplete
