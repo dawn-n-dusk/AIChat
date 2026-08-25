@@ -18,6 +18,7 @@ const DEFAULT_OUTBOUND_RETRY_MAX_ATTEMPTS = 10;
 const MAX_ORPHAN_TURNS = 20;
 const MAX_STDOUT_BUFFER = 4 * 1024 * 1024;
 const TERMINAL_TURN_STATUSES = new Set(["completed", "failed", "interrupted", "cancelled"]);
+const VALID_SOURCE_MESSAGE_TYPES = new Set(["text", "request", "result", "status"]);
 
 export const REPLY_OUTPUT_SCHEMA = Object.freeze({
   type: "object",
@@ -115,6 +116,11 @@ export class AppServerDriver {
       DEFAULT_OUTBOUND_RETRY_MAX_ATTEMPTS,
       1,
       "CODEX_OUTBOUND_RETRY_MAX_ATTEMPTS",
+    );
+    this.lifecycleStatusEnabled = booleanSetting(
+      env.AICHAT_LIFECYCLE_STATUS_ENABLED,
+      true,
+      "AICHAT_LIFECYCLE_STATUS_ENABLED",
     );
     this.cwd = env.CODEX_APP_SERVER_CWD?.trim() || null;
     this.approvalPolicy = env.CODEX_APP_SERVER_APPROVAL_POLICY?.trim() || null;
@@ -304,7 +310,7 @@ export class AppServerDriver {
     if (externalStarter) {
       await this.#prepareAmbiguousAttempt(request, "owner");
       try {
-        const started = await externalStarter(withReplyContract(request.envelope));
+        const started = await externalStarter(turnInputFor(request));
         try {
           turnId = extractTurnId(started);
         } catch (error) {
@@ -395,13 +401,13 @@ export class AppServerDriver {
       input: [
         {
           type: "text",
-          text: withReplyContract(request.envelope),
+          text: turnInputFor(request),
           text_elements: [],
         },
       ],
       clientUserMessageId: request.deliveryId,
-      outputSchema: REPLY_OUTPUT_SCHEMA,
       responsesapiClientMetadata: { aichat_delivery_id: request.deliveryId },
+      ...(isReplyEligibleRequest(request) ? { outputSchema: REPLY_OUTPUT_SCHEMA } : {}),
       ...(this.cwd ? { cwd: this.cwd } : {}),
       ...(this.approvalPolicy ? { approvalPolicy: this.approvalPolicy } : {}),
       ...(this.sandboxPolicy ? { sandboxPolicy: this.sandboxPolicy } : {}),
@@ -441,6 +447,8 @@ export class AppServerDriver {
     const record = {
       deliveryId: request.deliveryId,
       sourceMessageId: request.sourceMessageId,
+      sourceMessageType: request.metadata.messageType,
+      replyEligible: isReplyEligibleRequest(request),
       threadId: request.threadId,
       hostId: request.hostId,
       phase: "ambiguous",
@@ -591,7 +599,7 @@ export class AppServerDriver {
       phase: "completed",
       completionStatus: typeof status === "string" ? status : null,
     };
-    if (status === "completed" && !nextRecord.outboundEvent) {
+    if (record.replyEligible && status === "completed" && !nextRecord.outboundEvent) {
       const structuredReply = parseModelDeclaredReply(finalText);
       if (structuredReply) {
         nextRecord.outboundEvent = {
@@ -605,15 +613,19 @@ export class AppServerDriver {
           messageType: structuredReply.messageType,
           references: structuredReply.references,
         };
-      } else {
+      } else if (this.lifecycleStatusEnabled) {
         nextRecord.outboundEvent = systemStatusEvent(record, "completed");
+      } else {
+        nextRecord.outboundEvent = suppressedCompletionEvent(record, "completed");
       }
-    } else if (!nextRecord.outboundEvent && typeof status === "string") {
-      nextRecord.outboundEvent = systemStatusEvent(
-        record,
-        status === "failed" ? "failed" : "blocked",
-        status,
-      );
+    } else if (record.replyEligible && !nextRecord.outboundEvent && typeof status === "string") {
+      nextRecord.outboundEvent = this.lifecycleStatusEnabled
+        ? systemStatusEvent(
+            record,
+            status === "failed" ? "failed" : "blocked",
+            status,
+          )
+        : suppressedCompletionEvent(record, status);
     }
     const committed = await this.#replaceRecordAfterPersist(record.deliveryId, (live) => ({
       ...live,
@@ -1091,7 +1103,12 @@ export class AppServerReceiptStore {
         if (!Array.isArray(parsed.receipts)) throw new Error("invalid receipt list");
         return boundedStoredRecords(parsed.receipts.map(migrateStoredReceipt));
       }
-      if (parsed.version !== 2 || !Array.isArray(parsed.records)) {
+      if (parsed.version === 2 && Array.isArray(parsed.records)) {
+        return boundedStoredRecords(
+          parsed.records.map((record) => parseStoredRecord(record, { legacyEligibility: true })),
+        );
+      }
+      if (parsed.version !== 3 || !Array.isArray(parsed.records)) {
         throw new Error("invalid receipt state version");
       }
       return boundedStoredRecords(parsed.records.map(parseStoredRecord));
@@ -1104,7 +1121,7 @@ export class AppServerReceiptStore {
   async save(binding, state) {
     const normalized = normalizeLoadedDriverState(state);
     const payload = `${JSON.stringify(
-      { version: 2, binding, records: normalized.records },
+      { version: 3, binding, records: normalized.records },
       null,
       2,
     )}\n`;
@@ -1206,6 +1223,14 @@ function validateDeliveryRequest(request, binding) {
   }
   if (request.threadId !== binding.threadId || (request.hostId ?? null) !== binding.hostId) {
     throw new Error("Codex delivery does not match the fixed driver binding");
+  }
+  if (
+    !request.metadata ||
+    typeof request.metadata !== "object" ||
+    Array.isArray(request.metadata) ||
+    !VALID_SOURCE_MESSAGE_TYPES.has(request.metadata.messageType)
+  ) {
+    throw new Error("Codex delivery metadata.messageType is required and must be valid");
   }
 }
 
@@ -1329,6 +1354,8 @@ function migrateStoredReceipt(value) {
   return {
     deliveryId: value.deliveryId,
     sourceMessageId: value.sourceMessageId,
+    sourceMessageType: null,
+    replyEligible: false,
     threadId: value.threadId,
     hostId: value.hostId ?? null,
     phase: "accepted",
@@ -1343,7 +1370,7 @@ function migrateStoredReceipt(value) {
   };
 }
 
-function parseStoredRecord(value) {
+function parseStoredRecord(value, { legacyEligibility = false } = {}) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("invalid stored delivery record");
   }
@@ -1373,9 +1400,26 @@ function parseStoredRecord(value) {
   if (value.outboundDelivered && value.outboundBlocked) {
     throw new Error("stored delivery record cannot be delivered and blocked");
   }
+  let sourceMessageType = null;
+  let replyEligible = false;
+  if (!legacyEligibility) {
+    if (value.sourceMessageType != null && !VALID_SOURCE_MESSAGE_TYPES.has(value.sourceMessageType)) {
+      throw new Error("invalid stored delivery record sourceMessageType");
+    }
+    if (typeof value.replyEligible !== "boolean") {
+      throw new Error("invalid stored delivery record replyEligible");
+    }
+    sourceMessageType = value.sourceMessageType;
+    replyEligible = value.replyEligible;
+    if (replyEligible !== (sourceMessageType === "request")) {
+      throw new Error("stored delivery record reply eligibility mismatch");
+    }
+  }
   const record = {
     deliveryId: value.deliveryId,
     sourceMessageId: value.sourceMessageId,
+    sourceMessageType,
+    replyEligible,
     threadId: value.threadId,
     hostId: value.hostId ?? null,
     phase: value.phase,
@@ -1388,7 +1432,10 @@ function parseStoredRecord(value) {
     outboundBlocked: value.outboundBlocked,
     connectorCheckpointed: value.connectorCheckpointed === true,
   };
-  if (value.outboundEvent != null) record.outboundEvent = parseStoredOutboundEvent(value.outboundEvent, record);
+  if (value.outboundEvent != null && !legacyEligibility) {
+    record.outboundEvent = parseStoredOutboundEvent(value.outboundEvent, record);
+  }
+  if (legacyEligibility) record.outboundDelivered = record.outboundBlocked = false;
   if ((record.outboundDelivered || record.outboundBlocked) && !record.outboundEvent) {
     throw new Error("stored delivery record outbound status has no event");
   }
@@ -1402,6 +1449,9 @@ function parseStoredOutboundEvent(value, record) {
   const modelDeclared = value.modelDeclared === true;
   const systemGenerated = value.systemGenerated === true;
   if (modelDeclared === systemGenerated) throw new Error("invalid stored outbound event declaration");
+  if (!record.replyEligible) {
+    throw new Error("stored ineligible delivery record must not contain an outbound event");
+  }
   for (const field of ["eventId", "threadId", "sourceMessageId", "deliveryId", "text"]) {
     if (typeof value[field] !== "string" || !value[field]) {
       throw new Error(`invalid stored outbound event ${field}`);
@@ -1410,7 +1460,9 @@ function parseStoredOutboundEvent(value, record) {
   if (
     (modelDeclared
       ? value.eventId !== outboundEventId(record.deliveryId, record.turnId)
-      : !/^app-server-status-[a-f0-9]{64}$/.test(value.eventId)) ||
+      : value.suppressRelay === true
+        ? !/^app-server-suppressed-[a-f0-9]{64}$/.test(value.eventId)
+        : !/^app-server-status-[a-f0-9]{64}$/.test(value.eventId)) ||
     value.threadId !== record.threadId ||
     (value.hostId ?? null) !== record.hostId ||
     value.sourceMessageId !== record.sourceMessageId ||
@@ -1425,12 +1477,24 @@ function parseStoredOutboundEvent(value, record) {
   ) {
     throw new Error("invalid stored outbound event messageType");
   }
+  if (value.suppressRelay != null && typeof value.suppressRelay !== "boolean") {
+    throw new Error("invalid stored outbound event suppressRelay");
+  }
+  if (value.suppressRelay === true && !systemGenerated) {
+    throw new Error("only connector-generated events may suppress Relay egress");
+  }
   if (
     !Array.isArray(value.references) ||
     value.references.length > 100 ||
     value.references.some((item) => typeof item !== "string" || !item || item.length > 2_048)
   ) {
     throw new Error("invalid stored outbound event references");
+  }
+  if (
+    value.suppressRelay === true &&
+    (value.text !== JSON.stringify({ status: "suppressed" }) || value.references.length !== 0)
+  ) {
+    throw new Error("invalid stored suppressed lifecycle event payload");
   }
   return {
     ...(modelDeclared ? { modelDeclared: true } : { systemGenerated: true }),
@@ -1442,6 +1506,7 @@ function parseStoredOutboundEvent(value, record) {
     text: value.text,
     messageType: value.messageType,
     references: [...value.references],
+    ...(value.suppressRelay === true ? { suppressRelay: true } : {}),
   };
 }
 
@@ -1490,6 +1555,31 @@ function systemStatusEvent(record, status, reason = null) {
     messageType: "status",
     references: [],
   };
+}
+
+function suppressedCompletionEvent(record, completionStatus) {
+  return {
+    systemGenerated: true,
+    suppressRelay: true,
+    eventId: `app-server-suppressed-${createHash("sha256")
+      .update(`${record.deliveryId}\0${record.turnId ?? ""}\0${completionStatus}`)
+      .digest("hex")}`,
+    threadId: record.threadId,
+    hostId: record.hostId,
+    sourceMessageId: record.sourceMessageId,
+    deliveryId: record.deliveryId,
+    text: JSON.stringify({ status: "suppressed" }),
+    messageType: "status",
+    references: [],
+  };
+}
+
+function isReplyEligibleRequest(request) {
+  return request.metadata?.messageType === "request";
+}
+
+function turnInputFor(request) {
+  return isReplyEligibleRequest(request) ? withReplyContract(request.envelope) : request.envelope;
 }
 
 export function sanitizedCodexEnvironment(source = process.env) {
@@ -1561,6 +1651,14 @@ function integerSetting(value, fallback, minimum, name) {
     throw new Error(`${name} must be at least ${minimum}`);
   }
   return parsed;
+}
+
+function booleanSetting(value, fallback, name) {
+  if (value == null || value.trim() === "") return fallback;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "true") return true;
+  if (normalized === "false") return false;
+  throw new Error(`${name} must be true or false`);
 }
 
 function parseOptionalJson(value, name) {

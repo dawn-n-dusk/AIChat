@@ -44,6 +44,8 @@ The connector persists:
 
 - the inbound cursor and bounded deduplication IDs;
 - exact delivery receipts and driver acknowledgements;
+- source message type and reply eligibility; pre-upgrade records without that
+  proof migrate as reply-ineligible;
 - sender turn-budget entries;
 - at most one pending model reply, queued lifecycle statuses, and bounded
   policy-blocked outbound quarantine records;
@@ -71,6 +73,11 @@ drop use a two-phase driver-resolution record so crashes cannot leak driver
 capacity or lose the quarantined event. The connector library exposes explicit
 list, retry, and drop operations; a stable operator CLI for those operations
 remains roadmap work.
+
+For a reply-eligible request, permanent result quarantine also queues one fixed,
+redacted terminal `blocked` status with a stable idempotency key. It is
+independent of accepted/running lifecycle notifications. A Relay send failure
+leaves the status pending for ordered recovery after reconnect or restart.
 
 ## Codex drivers
 
@@ -127,6 +134,9 @@ Automatic egress requires an explicit non-null structured `aichat_reply` from
 the model. Model-declared replies may use only `result`; connector-generated
 lifecycle notifications use `status`. Both are bound to the fixed session,
 host, source message, delivery receipt, hop limit, and stable event ID.
+Only receipts durably marked as originating from `request` are reply-eligible;
+completing a delivered `text`, `result`, or `status` cannot create either
+outbound type.
 
 To enable automatic egress, configure all of:
 
@@ -178,11 +188,11 @@ Node.js 20 or newer is required.
 | `AICHAT_INSTANCE_LOCK_PORT` | no | Deterministic mapping-specific loopback lock port. |
 | `AICHAT_INSTANCE_LOCK_METADATA_PATH` | must be unset | Fixed to `<canonical-state>.instance-lock.json`; overrides are rejected. |
 | `AICHAT_AUTO_REPLY_ENABLED` | no | `false`. |
-| `AICHAT_LIFECYCLE_STATUS_ENABLED` | no | `true`, but no status is sent while automatic egress is off. |
+| `AICHAT_LIFECYCLE_STATUS_ENABLED` | no | `true`; controls ordinary accepted/running/blocked lifecycle notifications, not the fixed terminal quarantine status. No status is sent while automatic egress is off. |
 | `AICHAT_EGRESS_CHANNEL_AUDIENCE_ACK` | auto egress | Must be `true` because the channel is a broadcast audience. |
 | `AICHAT_EGRESS_CANARY_FILE` | auto egress | Private regular file, 16–512 characters, mode `0600` or stricter. |
 | `AICHAT_EGRESS_ALLOWED_REFERENCE_HOSTS` | no | Comma-separated exact HTTPS hostnames; empty blocks all references. |
-| `AICHAT_EGRESS_MAX_TEXT_BYTES` | no | `8192`. |
+| `AICHAT_EGRESS_MAX_TEXT_BYTES` | no | `8192`; accepted range is 128–100000 bytes. |
 | `CODEX_TARGET_THREAD_ID` | yes | Dedicated connector-owned Codex session UUID. |
 | `CODEX_TARGET_HOST_ID` | module only | Must be unset for built-in drivers. |
 | `CODEX_DRIVER` | no | `app-server`; `auto` enables the optional owner wrapper, `module` loads a custom driver. |
@@ -214,8 +224,8 @@ Node.js 20 or newer is required.
 For macOS, use the token-free, rollback-capable
 [`deploy/macos`](../../deploy/macos/README.md) LaunchAgent package. It reads the
 existing private PlatformDirs identity at runtime, fixes the App Server driver,
-keeps automatic egress off, and disables periodic polling while retaining
-WebSocket/startup/reconnect cursor recovery.
+keeps automatic egress off by default with a complete local opt-in, and disables
+periodic polling while retaining WebSocket/startup/reconnect cursor recovery.
 
 For Windows, use [`deploy/windows`](../../deploy/windows/README.md). Windows uses
 an independent App Server session and cannot honestly promise live attachment to

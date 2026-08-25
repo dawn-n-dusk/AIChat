@@ -62,7 +62,15 @@ function harness(items, options = {}) {
   };
   const stateStore = {
     async load() {
-      return emptyState(options.initialState);
+      const state = emptyState(options.initialState);
+      if (options.preserveLegacyReceiptEligibility !== true) {
+        state.receipts = state.receipts.map((receipt) => ({
+          sourceMessageType: "request",
+          replyEligible: true,
+          ...receipt,
+        }));
+      }
+      return state;
     },
     async save(value) {
       saveCalls += 1;
@@ -282,7 +290,10 @@ test("outbound DLP blocks the exact relay token in text or references before rel
     const result = await ctx.connector.handleOutboundReply(outboundEvent(receipt, overrides));
     assert.equal(result.blocked, true);
     assert.equal(result.eventId, "driver-event-1");
-    assert.equal(ctx.sent.length, 0);
+    assert.equal(ctx.sent.length, 1);
+    assert.equal(ctx.sent[0].messageType, "status");
+    assert.equal(ctx.sent[0].text, terminalBlockedText());
+    assert.equal(ctx.sent[0].text.includes(token), false);
     assert.equal(ctx.connector.status().pendingOutboundEventId, null);
     assert.equal(ctx.connector.status().blockedOutboundCount, 1);
     assert.equal(ctx.connector.listBlockedOutbound()[0].reasonCode, "AICHAT_OUTBOUND_DLP");
@@ -318,7 +329,9 @@ test("outbound DLP quarantines a persisted pending reply without wedging recover
   await ctx.connector.initialize();
   const result = await ctx.connector.requestRecovery();
   assert.equal(result, 1);
-  assert.equal(ctx.sent.length, 0);
+  assert.equal(ctx.sent.length, 1);
+  assert.equal(ctx.sent[0].messageType, "status");
+  assert.equal(ctx.sent[0].text, terminalBlockedText());
   assert.equal(ctx.connector.status().pendingOutboundEventId, null);
   assert.equal(ctx.connector.status().blockedOutboundCount, 1);
   assert.equal(ctx.connector.listBlockedOutbound()[0].reasonCode, "AICHAT_OUTBOUND_DLP");
@@ -331,9 +344,81 @@ test("outbound DLP quarantines a persisted pending reply without wedging recover
     /acknowledgeRelease=true/,
   );
   await ctx.connector.retryBlockedOutbound("old-event", { acknowledgeRelease: true });
-  assert.equal(ctx.sent.length, 1);
+  assert.equal(ctx.sent.length, 2);
   assert.equal(ctx.connector.status().blockedOutboundCount, 0);
   assert.equal(ctx.connector.getDeliveryReceipt("message-1").replied, true);
+});
+
+test("terminal quarantine status survives send failure and restarts with stable idempotency", async () => {
+  const token = "restart-secret-value";
+  const first = harness([relayMessage()], { token, failSendCalls: [1] });
+  await first.connector.initialize();
+  await first.connector.recoverPage();
+  const receipt = first.connector.getDeliveryReceipt("message-1");
+  const blocked = await first.connector.handleOutboundReply(
+    outboundEvent(receipt, { text: `blocked ${token}` }),
+  );
+  assert.equal(blocked.blocked, true);
+  assert.equal(first.connector.status().pendingStatusCount, 1);
+  assert.equal(first.sent.length, 1);
+  assert.equal(first.sent[0].text, terminalBlockedText());
+  const failedIdempotencyKey = first.sent[0].idempotencyKey;
+  const persisted = first.saves.at(-1);
+  await first.connector.stop();
+
+  const second = harness([], { initialState: persisted });
+  await second.connector.initialize();
+  assert.equal(second.sent.length, 1);
+  assert.equal(second.sent[0].text, terminalBlockedText());
+  assert.equal(second.sent[0].idempotencyKey, failedIdempotencyKey);
+  assert.equal(second.connector.status().pendingStatusCount, 0);
+});
+
+test("legacy receipts and non-request source messages are durably reply-ineligible", async () => {
+  const legacyReceipt = {
+    sourceMessageId: "legacy-result",
+    deliveryId: "legacy-delivery",
+    senderId: "agent-remote",
+    hopCount: 0,
+    replied: false,
+    outboundMessageId: null,
+    acceptedAt: "2026-08-24T00:00:00Z",
+  };
+  const pendingOutbound = {
+    eventId: "legacy-event",
+    sourceMessageId: "legacy-result",
+    deliveryId: "legacy-delivery",
+    channelId: "channel-1",
+    text: "must not escape",
+    messageType: "result",
+    references: [],
+    hopCount: 1,
+    idempotencyKey: "legacy-key",
+  };
+  const legacy = harness([], {
+    preserveLegacyReceiptEligibility: true,
+    initialState: { receipts: [legacyReceipt], pendingOutbound },
+  });
+  await legacy.connector.initialize();
+  assert.equal(legacy.sent.length, 0);
+  assert.equal(legacy.connector.listBlockedOutbound()[0].reasonCode, "AICHAT_REPLY_INELIGIBLE");
+
+  const injected = harness([relayMessage({ id: "result-injection", type: "result" })]);
+  injected.connector.config.deliverTypes = new Set(["result"]);
+  await injected.connector.initialize();
+  await injected.connector.recoverPage();
+  const injectedReceipt = injected.connector.getDeliveryReceipt("result-injection");
+  assert.equal(injectedReceipt.sourceMessageType, "result");
+  assert.equal(injectedReceipt.replyEligible, false);
+  const disposition = await injected.connector.handleOutboundReply(
+    outboundEvent(injectedReceipt, {
+      eventId: "result-injection-event",
+      sourceMessageId: "result-injection",
+    }),
+  );
+  assert.equal(disposition.blocked, true);
+  assert.equal(disposition.reasonCode, "AICHAT_REPLY_INELIGIBLE");
+  assert.equal(injected.sent.length, 0);
 });
 
 test("operator drop of a quarantined result is explicit and releases its receipt", async () => {
@@ -672,6 +757,34 @@ test("lifecycle statuses are structured, correlated, and never delivered as a ne
   );
 });
 
+test("lifecycle-off completion is checkpointed locally without Relay egress", async () => {
+  const ctx = harness([relayMessage()], { lifecycleStatusEnabled: false });
+  await ctx.connector.initialize();
+  await ctx.connector.recoverPage();
+  const receipt = ctx.connector.getDeliveryReceipt("message-1");
+  const event = {
+    systemGenerated: true,
+    suppressRelay: true,
+    eventId: `app-server-suppressed-${"a".repeat(64)}`,
+    threadId: "thread-1",
+    hostId: null,
+    sourceMessageId: "message-1",
+    deliveryId: receipt.deliveryId,
+    text: JSON.stringify({ status: "suppressed" }),
+    messageType: "status",
+    references: [],
+  };
+  const disposition = await ctx.connector.handleOutboundReply(event);
+  assert.equal(disposition.suppressed, true);
+  assert.equal(ctx.sent.length, 0);
+  const completed = ctx.connector.getDeliveryReceipt("message-1");
+  assert.equal(completed.replied, true);
+  assert.match(completed.outboundMessageId, /^local-suppressed-[a-f0-9]{64}$/);
+  const duplicate = await ctx.connector.handleOutboundReply(event);
+  assert.equal(duplicate.duplicate, true);
+  assert.equal(ctx.sent.length, 0);
+});
+
 test("retryable driver rejection emits blocked status without advancing the cursor", async () => {
   const driver = new MockCodexDriver();
   driver.deliver = async () => {
@@ -793,6 +906,8 @@ function completedDriverRecord(index) {
   return {
     deliveryId,
     sourceMessageId,
+    sourceMessageType: "request",
+    replyEligible: true,
     threadId: "thread-1",
     hostId: null,
     phase: "completed",
@@ -826,6 +941,8 @@ function capacityReceipts(count, { replied }) {
       sourceMessageId: `capacity-message-${suffix}`,
       deliveryId: `capacity-delivery-${suffix}`,
       senderId: "agent-remote",
+      sourceMessageType: "request",
+      replyEligible: true,
       hopCount: 0,
       replied,
       outboundMessageId: replied ? `capacity-outbound-${suffix}` : null,
@@ -833,6 +950,14 @@ function capacityReceipts(count, { replied }) {
       outboundEventId: `capacity-event-${suffix}`,
       driverReleasePending: null,
     };
+  });
+}
+
+function terminalBlockedText() {
+  return JSON.stringify({
+    status: "blocked",
+    terminal: true,
+    reason: "outbound_quarantined",
   });
 }
 

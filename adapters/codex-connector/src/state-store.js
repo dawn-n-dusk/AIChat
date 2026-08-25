@@ -22,10 +22,10 @@ export class StateStore {
       if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
         throw new Error("state must be a JSON object");
       }
-      if (!Number.isInteger(parsed.version) || parsed.version < 1 || parsed.version > 4) {
+      if (!Number.isInteger(parsed.version) || parsed.version < 1 || parsed.version > 5) {
         throw new Error("unsupported connector state version");
       }
-      const receipts = boundReceipts(parseReceipts(parsed.delivery_receipts));
+      const receipts = boundReceipts(parseReceipts(parsed.delivery_receipts, parsed.version));
       const pendingStatuses = parsePendingStatuses(parsed.pending_statuses);
       const blockedOutbound = parseBlockedOutbound(parsed.blocked_outbound);
       const turnBudget = parseTurnBudget(parsed.turn_budget);
@@ -66,7 +66,7 @@ export class StateStore {
         assertCapacity(turnBudget, MAX_TURN_BUDGET, "turn_budget");
         const payload = `${JSON.stringify(
           {
-            version: 4,
+            version: 5,
             cursor,
             seen_ids: [...seenIds].slice(-MAX_SEEN_IDS),
             outbound_seen_ids: [...outboundSeenIds].slice(-MAX_SEEN_IDS),
@@ -108,7 +108,7 @@ export function emptyState() {
   };
 }
 
-function parseReceipts(value) {
+function parseReceipts(value, stateVersion) {
   if (value == null) return [];
   if (!Array.isArray(value)) throw new Error("delivery_receipts must be an array");
   return value.map((item) => {
@@ -117,6 +117,14 @@ function parseReceipts(value) {
       sourceMessageId: requiredString(item.source_message_id, "delivery receipt source_message_id"),
       deliveryId: requiredString(item.delivery_id, "delivery receipt delivery_id"),
       senderId: requiredString(item.sender_id, "delivery receipt sender_id"),
+      sourceMessageType:
+        stateVersion >= 5
+          ? optionalSourceMessageType(
+              item.source_message_type,
+              "delivery receipt source_message_type",
+            )
+          : null,
+      replyEligible: stateVersion >= 5 ? item.reply_eligible === true : false,
       hopCount: boundedInteger(item.hop_count, 0, 8, "delivery receipt hop_count"),
       replied: item.replied === true,
       outboundMessageId: optionalString(item.outbound_message_id),
@@ -129,6 +137,9 @@ function parseReceipts(value) {
     }
     if (receipt.driverReleasePending && !receipt.outboundEventId) {
       throw new Error("driver release pending receipt must contain outbound_event_id");
+    }
+    if (stateVersion >= 5 && receipt.replyEligible !== (receipt.sourceMessageType === "request")) {
+      throw new Error("delivery receipt reply eligibility does not match source_message_type");
     }
     return receipt;
   });
@@ -185,6 +196,8 @@ function toStoredReceipt(receipt) {
     source_message_id: receipt.sourceMessageId,
     delivery_id: receipt.deliveryId,
     sender_id: receipt.senderId,
+    source_message_type: receipt.sourceMessageType,
+    reply_eligible: receipt.replyEligible === true,
     hop_count: receipt.hopCount,
     replied: receipt.replied,
     outbound_message_id: receipt.outboundMessageId,
@@ -259,6 +272,14 @@ function parseStringArray(value) {
 
 function requiredString(value, name) {
   if (typeof value !== "string" || !value) throw new Error(`${name} must be a non-empty string`);
+  return value;
+}
+
+function optionalSourceMessageType(value, name) {
+  if (value == null) return null;
+  if (!new Set(["text", "request", "result", "status"]).has(value)) {
+    throw new Error(`${name} is invalid`);
+  }
   return value;
 }
 

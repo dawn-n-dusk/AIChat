@@ -118,6 +118,106 @@ test("AppServerDriver starts a fixed turn, correlates notifications, and emits m
   await driver.stop();
 });
 
+test("AppServerDriver persists source type and never creates outbound events for result input", async () => {
+  const protocol = [];
+  const process = fakeAppServer((message, child) => {
+    protocol.push(message);
+    if (message.method === "initialize") child.respond(message.id, {});
+    else if (message.method === "thread/resume") {
+      child.respond(message.id, { thread: { id: "thread-1" } });
+    } else if (message.method === "turn/start") {
+      child.respond(message.id, { turn: { id: "turn-result-input", status: "inProgress" } });
+      setImmediate(() => {
+        child.notify("item/completed", {
+          threadId: "thread-1",
+          turnId: "turn-result-input",
+          item: {
+            type: "agentMessage",
+            text: JSON.stringify({
+              aichat_reply: { text: "loop candidate", message_type: "result", references: [] },
+            }),
+          },
+        });
+        child.notify("turn/completed", {
+          threadId: "thread-1",
+          turn: { id: "turn-result-input", status: "completed" },
+        });
+      });
+    }
+  });
+  const store = memoryReceiptStore();
+  const outbound = [];
+  const driver = new AppServerDriver({
+    binding,
+    env: {},
+    spawnImpl: () => process,
+    receiptStore: store,
+    logger: { error() {} },
+  });
+  await driver.start({ binding, onOutboundReply: async (event) => outbound.push(event) });
+  const receipt = await driver.deliver(
+    deliveryRequest({ metadata: { messageType: "result" } }),
+  );
+  await driver.acknowledgeDelivery(receipt.deliveryId);
+  await waitFor(() => store.state.records[0]?.phase === "completed");
+  assert.equal(store.state.records[0].sourceMessageType, "result");
+  assert.equal(store.state.records[0].replyEligible, false);
+  assert.equal(store.state.records[0].outboundEvent, null);
+  assert.equal(outbound.length, 0);
+  const turnStart = protocol.find((message) => message.method === "turn/start");
+  assert.equal("outputSchema" in turnStart.params, false);
+  assert.doesNotMatch(turnStart.params.input[0].text, /MODEL-DECLARED STRUCTURED REPLY/);
+  await driver.stop();
+});
+
+test("lifecycle-off request completion and failure emit only local suppression events", async () => {
+  for (const [status, finalText] of [
+    ["completed", JSON.stringify({ aichat_reply: null })],
+    ["failed", null],
+  ]) {
+    const turnId = `turn-lifecycle-off-${status}`;
+    const process = fakeAppServer((message, child) => {
+      if (message.method === "initialize") child.respond(message.id, {});
+      else if (message.method === "thread/resume") {
+        child.respond(message.id, { thread: { id: "thread-1" } });
+      } else if (message.method === "turn/start") {
+        child.respond(message.id, { turn: { id: turnId, status: "inProgress" } });
+        setImmediate(() => {
+          if (finalText != null) {
+            child.notify("item/completed", {
+              threadId: "thread-1",
+              turnId,
+              item: { type: "agentMessage", text: finalText },
+            });
+          }
+          child.notify("turn/completed", {
+            threadId: "thread-1",
+            turn: { id: turnId, status },
+          });
+        });
+      }
+    });
+    const store = memoryReceiptStore();
+    const outbound = [];
+    const driver = new AppServerDriver({
+      binding,
+      env: { AICHAT_LIFECYCLE_STATUS_ENABLED: "false" },
+      spawnImpl: () => process,
+      receiptStore: store,
+      logger: { error() {} },
+    });
+    await driver.start({ binding, onOutboundReply: async (event) => outbound.push(event) });
+    const receipt = await driver.deliver(deliveryRequest());
+    await driver.acknowledgeDelivery(receipt.deliveryId);
+    await waitFor(() => outbound.length === 1);
+    assert.equal(outbound[0].suppressRelay, true);
+    assert.equal(outbound[0].messageType, "status");
+    assert.equal(outbound[0].text, JSON.stringify({ status: "suppressed" }));
+    await waitFor(() => store.state.records[0].outboundDelivered === true);
+    await driver.stop();
+  }
+});
+
 test("app-server post-write timeout stays ambiguous, persists, and never starts a second turn", async () => {
   const protocol = [];
   const timers = controllableTimers();
@@ -776,7 +876,7 @@ test("app-server rejects a task marker embedded inside a larger line", async () 
   await driver.stop();
 });
 
-test("AppServerReceiptStore migrates v1 accepted receipts to durable v2 records", async () => {
+test("AppServerReceiptStore migrates v1 receipts to fail-closed durable v3 records", async () => {
   const directory = await mkdtemp(join(tmpdir(), "aichat-app-server-state-"));
   const path = join(directory, "receipts.json");
   await writeFile(
@@ -800,8 +900,43 @@ test("AppServerReceiptStore migrates v1 accepted receipts to durable v2 records"
   const loaded = await store.load(binding);
   assert.equal(loaded.records[0].phase, "accepted");
   assert.equal(loaded.records[0].transport, "app-server");
+  assert.equal(loaded.records[0].sourceMessageType, null);
+  assert.equal(loaded.records[0].replyEligible, false);
   await store.save(binding, loaded);
-  assert.equal(JSON.parse(await readFile(path, "utf8")).version, 2);
+  assert.equal(JSON.parse(await readFile(path, "utf8")).version, 3);
+});
+
+test("AppServerReceiptStore loads v2 outbound records as reply-ineligible without replay", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "aichat-app-server-v2-state-"));
+  const path = join(directory, "receipts.json");
+  const legacy = acceptedRecord({
+    phase: "completed",
+    completionStatus: "completed",
+    outboundEvent: {
+      modelDeclared: true,
+      eventId: `app-server-event-${createHash("sha256")
+        .update("delivery-1\0turn-1")
+        .digest("hex")}`,
+      threadId: "thread-1",
+      hostId: null,
+      sourceMessageId: "message-1",
+      deliveryId: "delivery-1",
+      text: "legacy result",
+      messageType: "result",
+      references: [],
+    },
+    outboundDelivered: false,
+    outboundBlocked: false,
+    connectorCheckpointed: true,
+  });
+  delete legacy.sourceMessageType;
+  delete legacy.replyEligible;
+  await writeFile(path, JSON.stringify({ version: 2, binding, records: [legacy] }));
+  const loaded = await new AppServerReceiptStore(path).load(binding);
+  assert.equal(loaded.records[0].sourceMessageType, null);
+  assert.equal(loaded.records[0].replyEligible, false);
+  assert.equal(loaded.records[0].outboundEvent, null);
+  assert.equal(loaded.records[0].outboundDelivered, false);
 });
 
 test("driver refuses receipt state above capacity instead of evicting incomplete records", async () => {
@@ -1229,7 +1364,7 @@ function deliveryRequest(overrides = {}) {
       `source_message_sha256: ${createHash("sha256").update("message-1").digest("hex")}\n` +
       "UNTRUSTED REMOTE PAYLOAD JSON (LENGTH-DELIMITED)\n{\"text\":\"hello\"}\n" +
       "END LENGTH-DELIMITED UNTRUSTED REMOTE PAYLOAD JSON",
-    metadata: {},
+    metadata: { messageType: "request" },
     ...overrides,
   };
 }
@@ -1238,6 +1373,8 @@ function ambiguousRecord(overrides = {}) {
   return {
     deliveryId: "delivery-1",
     sourceMessageId: "message-1",
+    sourceMessageType: "request",
+    replyEligible: true,
     threadId: "thread-1",
     hostId: null,
     phase: "ambiguous",
