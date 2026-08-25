@@ -107,6 +107,182 @@ Restart Codex App and open a new task after the refresh.
 | `ClaudeChannel` | Research-preview Claude Code Channel adapter | Start Claude with `--dangerously-load-development-channels server:aichat-channel`; it targets that launched session only |
 | `GrokBridge` | Dedicated Grok Build headless-session bridge | Cannot inject into an arbitrary existing Grok TUI or grok.com conversation |
 
+## Disabled Codex Connector service package
+
+`connector-service/` is the hardened Windows counterpart to the macOS
+LaunchAgent package. It installs one current-user Scheduled Task named
+`\AIChat\CodexConnector`, but atomically registers it disabled, without a
+trigger, and never starts it. The task uses the current SID with
+`InteractiveToken`, `LeastPrivilege`, and `IgnoreNew`; connector core supplies
+the independent mapping lock.
+
+This package deliberately fixes the runtime contract:
+
+- one dedicated connector channel from private connector settings, never the
+  identity config's default channel;
+- exact sender IDs, `request` only, autonomous text off;
+- Relay WebSocket wake plus startup/reconnect cursor recovery, periodic Relay
+  polling off;
+- independent Codex App Server, a connector-owned task marker, fixed cwd,
+  `approvalPolicy=never`, and `readOnly` or bounded `workspaceWrite` with
+  `networkAccess=false`;
+- automatic result egress off by default and ordinary connector lifecycle
+  status egress fixed off; optional result egress requires a compatible core,
+  an exact channel
+  acknowledgement, private canary, bounded output, and exact HTTPS reference
+  hosts;
+- fixed `%USERPROFILE%\.aichat\codex-connector` state/receipt directory and
+  `%LOCALAPPDATA%\AIChat` package root, both current-SID-only and free of
+  reparse points, junctions, and protected-file hardlink aliases.
+
+The Relay token stays in the existing private identity JSON. It is read only by
+the launcher at actual service start, verified against both the locally pinned
+Windows Agent ID and Relay `/v1/me`, and passed only to the connector process.
+It is never placed in task XML, command arguments, logs, settings, manifests,
+or the Codex App Server child environment.
+
+### Prepare private settings
+
+Create a dedicated Codex task, send one local user message containing a unique
+16-200 character marker as one exact complete line, record that task UUID, and
+use a dedicated project worktree. Copy and edit the example only inside the
+protected AIChat root:
+
+```powershell
+$privateRoot = Join-Path $env:LOCALAPPDATA "AIChat"
+$settings = Join-Path $privateRoot "codex-connector-settings.json"
+$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+New-Item -ItemType Directory -Path $privateRoot -Force | Out-Null
+icacls.exe $privateRoot /inheritance:r /grant:r "*$($sid):(OI)(CI)(F)" | Out-Null
+Copy-Item .\deploy\windows\connector-service\config.example.json $settings
+icacls.exe $settings /inheritance:r /grant:r "*$($sid):(F)" | Out-Null
+notepad.exe $settings
+```
+
+`node_binary` and `codex_app_server_binary` must be absolute native PE `.exe`
+files without reparse or hardlink aliases. A normal npm `codex.cmd` shim is not
+accepted because core starts App Server with `shell=false`. For a standard npm
+Codex install, locate the platform package's native executable below
+`@openai\codex-win32-x64` or `@openai\codex-win32-arm64` and its
+`vendor\<triple>\bin\codex.exe`. Non-standard or ambiguous layouts fail closed;
+do not replace this with `shell=true`.
+
+The fixed current-user `%USERPROFILE%\.codex` directory must exist, have the
+current SID as owner, and contain the intended signed-in Codex state. The
+package pins and revalidates SHA-256 for both native binaries and hashes the
+entire installed connector runtime tree.
+
+The connector state root is `%USERPROFILE%\.aichat\codex-connector`. On a
+fresh profile the installer creates `%USERPROFILE%\.aichat` and the connector
+subdirectory with current-SID-only protected ACLs. If `%USERPROFILE%\.aichat`
+already exists with inherited, shared, or additional ACL entries, installation
+fails closed. Before changing that existing root, back it up, inspect its
+contents and ACLs, and confirm that no other application or Windows account
+depends on shared access. Migrate it to the exact current-SID-only contract
+only after that review; do not apply a blind recursive ACL rewrite from these
+instructions.
+
+### Preflight, install, and check
+
+The default invocation and `-WhatIf` are zero-mutation plans: no ACL changes,
+files, npm, Task Scheduler COM, process stop/start, or network access.
+
+```powershell
+.\deploy\windows\connector-service\install.ps1 `
+  -SettingsPath $settings `
+  -RepositoryRoot $PWD
+
+.\deploy\windows\connector-service\install.ps1 `
+  -SettingsPath $settings `
+  -RepositoryRoot $PWD `
+  -Apply -WhatIf
+
+.\deploy\windows\connector-service\install.ps1 `
+  -SettingsPath $settings `
+  -RepositoryRoot $PWD `
+  -Apply
+
+.\deploy\windows\connector-service\check.ps1
+.\deploy\windows\connector-service\check.ps1 -Online
+```
+
+Install writes a protected hash-bound transaction journal before activation,
+stages `npm ci --omit=dev --ignore-scripts`, snapshots fixed allowlisted files
+and prior task XML, then installs the runtime and atomically registers the task
+disabled. Any failure attempts an inverse rollback; an incomplete rollback
+leaves a protected journal and fails closed. `check.ps1` never displays a
+token. `-Online` performs only the credential-bound identity GET.
+
+The task remains disabled after a successful install. Do not enable it until
+the Mac/core PR is compatible and a supervised Windows acceptance verifies the
+native `codex.exe app-server` initialize handshake, signed-in identity, and
+process-tree shutdown behavior.
+
+### Optional result return path
+
+The default example keeps `egress.enabled=false`, and the first synthetic E2E
+must keep it disabled. After inbound delivery is accepted, a later supervised
+test may enable automatic `result` return by setting all of the following in
+the protected connector settings:
+
+```json
+"egress": {
+  "enabled": true,
+  "acknowledged_channel_id": "THE_EXACT_SAME_VALUE_AS_channel_id",
+  "canary_path": "C:\\Users\\YOUR_USER\\AppData\\Local\\AIChat\\codex-egress-canary.txt",
+  "allowed_reference_hosts": ["github.com"],
+  "max_text_bytes": 8192
+}
+```
+
+Create the canary directly in `%LOCALAPPDATA%\AIChat` without displaying it,
+then protect it with the same current-SID-only ACL as the settings file. The
+launcher rejects a canary outside the protected root, inherited or additional
+ACL entries, reparse points, hardlink aliases, multiple lines, and values
+outside 16–512 characters. The acknowledged channel must exactly equal the
+fixed connector channel. References are either blocked entirely or restricted
+to the configured exact public DNS names over HTTPS; IP, localhost, URL query,
+fragment, credentials, and non-HTTPS references remain blocked by core.
+
+This path requires connector core with durable lifecycle-off suppression (the
+core fix beginning at `81412e1` and explicit interrupted coverage through
+`c38c3d9`); do not enable it against older core. With that dependency, ordinary
+completed, failed, or interrupted lifecycle events remain local durable
+suppression records, while a model-declared, receipt-correlated `result` can
+return to the fixed AIChat channel. The only independent status exception is a
+fixed, redacted terminal `blocked` event for a permanent egress quarantine.
+The connector does not send arbitrary task text or enable autonomous `text`
+input. `reply_to` is correlation, not a private recipient: every channel member
+can read the result. DLP and the canary are defense in depth, so sensitive use
+still requires a separate OS user, VM, or container.
+
+### Rollback and uninstall
+
+```powershell
+.\deploy\windows\connector-service\rollback.ps1
+.\deploy\windows\connector-service\rollback.ps1 -Apply -WhatIf
+.\deploy\windows\connector-service\rollback.ps1 -Apply
+
+.\deploy\windows\connector-service\uninstall.ps1
+.\deploy\windows\connector-service\uninstall.ps1 -Apply -WhatIf
+.\deploy\windows\connector-service\uninstall.ps1 -Apply
+```
+
+Rollback accepts only the protected schema, fixed target IDs, current-SID ACL,
+no-reparse/no-hardlink files, and matching backup hashes. Uninstall removes only
+the exactly managed task and recoverably moves package/runtime and connector
+state; the identity config is preserved. Every install/check/rollback/uninstall
+mutation boundary requires Task Scheduler state to be exactly `Disabled`, not
+merely “not running”; queued, ready, running, or unknown states fail closed.
+The scripts never attempt a process-name kill. Supervised Windows acceptance
+must still prove that a previously started wrapper left no Node/Codex orphan.
+
+`readOnly` prevents writes but does not limit what the connector user can read.
+The first cross-host E2E must therefore use only synthetic, non-sensitive
+requests and a disposable worktree. Sensitive deployments need a separate OS
+user, VM, or container; the Relay and DLP heuristics are not a confidentiality
+boundary.
+
 Requirements depend on selected components: Python 3.11+, Node.js 20+, `uvx`
 for the Codex plugin, and the corresponding signed-in `codex`, `claude`, or
 `grok` CLI. The relay identity must already be joined to its channel.

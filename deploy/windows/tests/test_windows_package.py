@@ -24,6 +24,21 @@ def test_required_windows_package_files_exist() -> None:
     }
     assert required <= {path.name for path in ROOT.iterdir() if path.is_file()}
 
+    service_root = ROOT / "connector-service"
+    service_required = {
+        "README.md",
+        "common.ps1",
+        "launcher.ps1",
+        "install.ps1",
+        "check.ps1",
+        "rollback.ps1",
+        "uninstall.ps1",
+        "config.example.json",
+    }
+    assert service_required <= {
+        path.name for path in service_root.iterdir() if path.is_file()
+    }
+
 
 def test_example_json_is_valid_and_contains_only_placeholders() -> None:
     config = json.loads((ROOT / "config.example.json").read_text(encoding="utf-8"))
@@ -33,9 +48,33 @@ def test_example_json_is_valid_and_contains_only_placeholders() -> None:
     assert "REPLACE" in config["channel_id"]
     assert "REPLACE" in settings["allowed_sender_ids"]
 
+    connector = json.loads(
+        (ROOT / "connector-service" / "config.example.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert "REPLACE" in connector["expected_agent_id"]
+    assert "REPLACE" in connector["channel_id"]
+    assert isinstance(connector["allowed_sender_ids"], list)
+    assert connector["allowed_sender_ids"]
+    assert connector["sandbox_policy"] == {
+        "type": "readOnly",
+        "networkAccess": False,
+    }
+    assert connector["egress"] == {
+        "enabled": False,
+        "acknowledged_channel_id": "",
+        "canary_path": "",
+        "allowed_reference_hosts": [],
+        "max_text_bytes": 8192,
+    }
+    assert connector["node_binary"].lower().endswith("node.exe")
+    assert connector["npm_cli_path"].lower().endswith("npm-cli.js")
+    assert connector["codex_app_server_binary"].lower().endswith("codex.exe")
+
 
 def test_scripts_do_not_embed_secret_shaped_values() -> None:
-    text = "\n".join(path.read_text(encoding="utf-8") for path in ROOT.glob("*.ps1"))
+    text = "\n".join(path.read_text(encoding="utf-8") for path in ROOT.rglob("*.ps1"))
     forbidden = [
         r"sk-[A-Za-z0-9_-]{16,}",
         r"github_pat_[A-Za-z0-9_]{20,}",
@@ -173,3 +212,188 @@ def test_check_only_requires_selected_or_installed_components() -> None:
     assert '"codex-plugin-mcp"' in check
     assert '"mcp", "get", "aichat"' in check
     assert "startup_timeout_sec" in check
+
+
+def test_connector_service_is_disabled_triggerless_and_current_user_only() -> None:
+    root = ROOT / "connector-service"
+    common = (root / "common.ps1").read_text(encoding="utf-8")
+    install = (root / "install.ps1").read_text(encoding="utf-8")
+    assert 'RegisterTask("CodexConnector", $xml, 14' in common
+    assert "<Enabled>false</Enabled>" in common
+    assert "<Triggers" not in common
+    assert "<LogonType>InteractiveToken</LogonType>" in common
+    assert "<RunLevel>LeastPrivilege</RunLevel>" in common
+    assert "<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>" in common
+    assert "AllowStartOnDemand>true" in common
+    assert "Assert-AIChatTaskContract -Task $existingTask" in install
+    assert "Assert-AIChatTaskDisabledState -Task $Task" in common
+    assert "[int]$Task.State -ne 1" in common
+    assert "Assert-AIChatTaskSnapshotForMutation" in common
+    assert "Connector Scheduled Task appeared before mutation" in common
+    assert "Test-AIChatTaskSchedulerNotFoundException" in common
+    assert "-2147024894" in common
+    assert "-2147024891" in (ROOT / "tests" / "test_connector_service.ps1").read_text(
+        encoding="utf-8"
+    )
+    assert "Connector Scheduled Task still exists after deletion" in "\n".join(
+        path.read_text(encoding="utf-8") for path in root.glob("*.ps1")
+    )
+    assert "Start-ScheduledTask" not in "\n".join(
+        path.read_text(encoding="utf-8") for path in root.glob("*.ps1")
+    )
+
+
+def test_connector_service_launcher_fixes_security_and_environment_contract() -> None:
+    root = ROOT / "connector-service"
+    launcher = (root / "launcher.ps1").read_text(encoding="utf-8")
+    common = (root / "common.ps1").read_text(encoding="utf-8")
+    required = {
+        '["AICHAT_DELIVER_TYPES"] = "request"',
+        '["AICHAT_AUTONOMOUS_TEXT_ENABLED"] = "false"',
+        '["AICHAT_WEBSOCKET_ENABLED"] = "true"',
+        '["AICHAT_PERIODIC_RECOVERY_ENABLED"] = "false"',
+        '["AICHAT_LIFECYCLE_STATUS_ENABLED"] = "false"',
+        '["CODEX_DRIVER"] = "app-server"',
+        '["CODEX_CONNECTOR_TASK_OWNED"] = "true"',
+        '["CODEX_APP_SERVER_APPROVAL_POLICY"] = "never"',
+        '["CODEX_DESKTOP_OWNER_IPC_ENABLED"] = "false"',
+    }
+    for value in required:
+        assert value in launcher
+    assert '["AICHAT_AUTO_REPLY_ENABLED"]' in launcher
+    assert '["AICHAT_EGRESS_CHANNEL_AUDIENCE_ACK"] = "true"' in launcher
+    assert '["AICHAT_EGRESS_CANARY_FILE"]' in launcher
+    assert '["AICHAT_EGRESS_ALLOWED_REFERENCE_HOSTS"]' in launcher
+    assert '["AICHAT_EGRESS_MAX_TEXT_BYTES"]' in launcher
+    assert '$processInfo.EnvironmentVariables.Clear()' in launcher
+    assert '"USERPROFILE"' not in launcher
+    assert '"APPDATA"' not in launcher
+    assert "expected_agent_id" in launcher
+    assert "/v1/me" in common
+    assert "diagnostic suppressed" in launcher
+    assert "-RequirePinnedHashes" in launcher
+    assert "Get-AIChatTreeHash" in launcher
+    assert "ProcessStartInfo" in launcher
+    assert "UseShellExecute = $false" in launcher
+
+
+def test_connector_service_result_egress_is_explicit_and_fail_closed() -> None:
+    root = ROOT / "connector-service"
+    common = (root / "common.ps1").read_text(encoding="utf-8")
+    launcher = (root / "launcher.ps1").read_text(encoding="utf-8")
+    example = json.loads((root / "config.example.json").read_text(encoding="utf-8"))
+    assert example["egress"]["enabled"] is False
+    assert "egress.acknowledged_channel_id must exactly match channel_id" in common
+    assert "Assert-AIChatPrivateFile -Path $canaryPath" in common
+    assert "exact public DNS hostnames" in common
+    assert "egress.max_text_bytes must be from 128 through 100000" in common
+    assert 'AICHAT_DELIVER_TYPES"] = "request"' in launcher
+    assert 'AICHAT_LIFECYCLE_STATUS_ENABLED"] = "false"' in launcher
+    assert "AICHAT_EGRESS_CHANNEL_AUDIENCE_ACK" in launcher
+
+
+def test_connector_service_private_path_and_hardlink_contracts_are_fail_closed() -> None:
+    common = (ROOT / "connector-service" / "common.ps1").read_text(encoding="utf-8")
+    assert "FILE_FLAG_OPEN_REPARSE_POINT" in common
+    assert "GetFileInformationByHandle" in common
+    assert "NumberOfLinks" in common
+    assert "Get-AIChatHardLinkCount" in common
+    assert "AreAccessRulesProtected" in common
+    assert "GetAccessRules(" in common
+    assert "must not contain reparse points" in common
+    assert "UNC paths are not allowed" in common
+    assert 'Get-AIChatConnectorDataRoot' in common
+    assert '"state.json"' in common
+    assert "Assert-AIChatConnectorDataTree" in common
+
+
+def test_connector_service_whatif_returns_before_mutating_capabilities() -> None:
+    install = (ROOT / "connector-service" / "install.ps1").read_text(encoding="utf-8")
+    early_return = install.index("if (-not $Apply -or $WhatIfPreference)")
+    dot_source = install.index('. (Join-Path $PSScriptRoot "common.ps1")')
+    assert early_return < dot_source
+    plan_prefix = install[:early_return]
+    for forbidden in ("Test-Path", "Resolve-Path", "Get-Item", "Get-ChildItem"):
+        assert forbidden not in plan_prefix
+    assert 'Write-Host "mutation_performed=false"' in install[early_return:dot_source]
+    prefix = install[:dot_source]
+    for forbidden in (
+        "Set-Acl",
+        "Add-Type",
+        "RegisterTask",
+        "Invoke-RestMethod",
+        "New-Object -ComObject",
+        "Start-Process",
+    ):
+        assert forbidden not in prefix
+
+
+def test_connector_service_journal_uses_fixed_ids_hashes_and_inverse_rollback() -> None:
+    root = ROOT / "connector-service"
+    common = (root / "common.ps1").read_text(encoding="utf-8")
+    install = (root / "install.ps1").read_text(encoding="utf-8")
+    rollback = (root / "rollback.ps1").read_text(encoding="utf-8")
+    assert 'schema_version = 1' in install
+    assert 'kind = "aichat-windows-connector-transaction"' in install
+    assert 'status = "prepared"' in install
+    assert 'Set-AIChatTransactionStatus -Status "applying"' in install
+    assert 'Set-AIChatTransactionStatus -Status "applied"' in install
+    assert 'Set-AIChatTransactionStatus -Status "committed"' in install
+    assert "Get-AIChatDeploymentTargets" in common
+    assert 'common = $Paths.CommonPath' in common
+    assert 'active_release = $Paths.ActiveReleasePath' in common
+    assert "Get-FileHash" in common
+    assert "Assert-AIChatTransactionManifest" in rollback
+    assert "Invoke-AIChatManifestRollback" in rollback
+    assert "Restore-AIChatTaskSnapshot" in common
+
+
+def test_connector_service_pins_native_node_npm_and_codex_without_path_shim() -> None:
+    root = ROOT / "connector-service"
+    common = (root / "common.ps1").read_text(encoding="utf-8")
+    install = (root / "install.ps1").read_text(encoding="utf-8")
+    assert "must be a native .exe because the connector uses shell=false" in common
+    assert "must be a native PE executable" in common
+    assert "npm_cli_path must remain inside the pinned Node.js installation" in common
+    assert "node_sha256" in common
+    assert "npm_cli_sha256" in common
+    assert "codex_sha256" in common
+    assert common.index("$nodeHash =") < common.index("$nodeVersion =")
+    assert common.index("$codexHash =") < common.index("$codexVersion =")
+    assert common.index('throw "node_binary hash does not match') < common.index(
+        "$nodeVersion ="
+    )
+    assert common.index('throw "codex_app_server_binary hash does not match') < common.index(
+        "$codexVersion ="
+    )
+    assert "Get-Command \"npm.cmd\"" not in install
+    assert "& $settings.node_binary $settings.npm_cli_path ci" in install
+
+
+def test_online_identity_check_validates_transport_before_authorization() -> None:
+    root = ROOT / "connector-service"
+    common = (root / "common.ps1").read_text(encoding="utf-8")
+    checker = (root / "check.ps1").read_text(encoding="utf-8")
+    launcher = (root / "launcher.ps1").read_text(encoding="utf-8")
+    validator = common.index("function Get-AIChatValidatedServer")
+    authorized_get = common.index("Invoke-RestMethod", validator)
+    https_gate = common.index("must use HTTPS outside loopback", validator)
+    assert https_gate < authorized_get
+    assert "-MaximumRedirection 0" in common[authorized_get : authorized_get + 500]
+    assert "Test-AIChatRelayIdentity" in checker
+    assert "Invoke-RestMethod" not in checker
+    assert "Test-AIChatRelayIdentity" in launcher
+    assert "Invoke-RestMethod" not in launcher
+
+
+def test_ci_runs_windows_connector_service_functional_test() -> None:
+    functional = ROOT / "tests" / "test_connector_service.ps1"
+    wrapper = ROOT / "tests" / "test_plugin_mcp_autoload.ps1"
+    assert functional.is_file()
+    wrapper_text = wrapper.read_text(encoding="utf-8")
+    assert "test_connector_service.ps1" in wrapper_text
+    assert "$protectedRootExisted = Test-Path" in wrapper_text
+    assert "test-created AIChat root because it is no longer empty" in wrapper_text
+    assert wrapper_text.index("Remove-Item -LiteralPath $protectedRoot -Force") < wrapper_text.index(
+        "$connectorServiceTest ="
+    )

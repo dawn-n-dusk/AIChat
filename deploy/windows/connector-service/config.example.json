@@ -1,0 +1,27 @@
+{
+  "identity_config_path": "C:\\Users\\YOUR_USER\\AppData\\Local\\AIChat\\AIChat\\config.json",
+  "expected_agent_id": "REPLACE_WITH_THIS_WINDOWS_AGENT_ID",
+  "channel_id": "REPLACE_WITH_DEDICATED_CONNECTOR_CHANNEL_ID",
+  "allowed_sender_ids": [
+    "REPLACE_WITH_EXACT_REMOTE_AGENT_ID"
+  ],
+  "target_thread_id": "00000000-0000-0000-0000-000000000000",
+  "task_marker": "AIChat connector-owned task marker 00000000-0000-0000-0000-000000000000",
+  "app_server_cwd": "C:\\absolute\\path\\to\\dedicated\\project-worktree",
+  "sandbox_policy": {
+    "type": "readOnly",
+    "networkAccess": false
+  },
+  "egress": {
+    "enabled": false,
+    "acknowledged_channel_id": "",
+    "canary_path": "",
+    "allowed_reference_hosts": [],
+    "max_text_bytes": 8192
+  },
+  "max_turns_per_sender_per_hour": 10,
+  "max_deliveries_per_recovery": 20,
+  "node_binary": "C:\\Program Files\\nodejs\\node.exe",
+  "npm_cli_path": "C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js",
+  "codex_app_server_binary": "C:\\absolute\\path\\to\\native\\codex.exe"
+}
