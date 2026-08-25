@@ -100,6 +100,28 @@ jobs:
         shell: pwsh
         run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File deploy/windows/tests/test_plugin_mcp_autoload.ps1
 
+  macos-connector-package:
+    name: macOS connector package (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Validate shell and Python entrypoints
+        shell: bash
+        run: |
+          bash -n deploy/macos/scripts/install.sh
+          bash -n deploy/macos/scripts/check.sh
+          bash -n deploy/macos/scripts/rollback.sh
+          python -m py_compile deploy/macos/scripts/launcher.py deploy/macos/scripts/render-plist.py
+      - name: Run launcher-to-core configuration regression
+        run: python -m unittest discover -s deploy/macos/tests -v
+
   mcp-adapter:
     name: MCP adapter (Linux, Python 3.11)
     runs-on: ubuntu-latest

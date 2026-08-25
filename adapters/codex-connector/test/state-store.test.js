@@ -32,6 +32,8 @@ test("StateStore round-trips cursor, deduplication, receipts, and pending outbou
           sourceMessageId: "message-1",
           deliveryId: "delivery-1",
           senderId: "agent-remote",
+          sourceMessageType: "request",
+          replyEligible: true,
           hopCount: 0,
           replied: false,
           outboundMessageId: null,
@@ -81,9 +83,11 @@ test("StateStore round-trips cursor, deduplication, receipts, and pending outbou
   assert.equal(loaded.receipts[0].deliveryId, "delivery-1");
   assert.equal(loaded.pendingOutbound.idempotencyKey, "stable-key");
   assert.equal(loaded.blockedOutbound[0].reasonCode, "AICHAT_OUTBOUND_DLP");
+  assert.equal(loaded.receipts[0].sourceMessageType, "request");
+  assert.equal(loaded.receipts[0].replyEligible, true);
   if (process.platform !== "win32") assert.equal((await stat(path)).mode & 0o777, 0o600);
   assert.equal(loaded.turnBudget[0].senderId, "agent-remote");
-  assert.equal(JSON.parse(await readFile(path, "utf8")).version, 4);
+  assert.equal(JSON.parse(await readFile(path, "utf8")).version, 5);
 });
 
 test("StateStore fails closed on malformed persisted state", async () => {
@@ -109,6 +113,48 @@ test("StateStore accepts version 1 receipts and rejects unknown future versions"
     () => new StateStore(path).load(),
     /unsupported connector state version/,
   );
+});
+
+test("StateStore loads pre-v5 receipts as reply-ineligible and persists that fail-closed state", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "aichat-codex-state-v4-"));
+  const path = join(directory, "state.json");
+  await writeFile(
+    path,
+    JSON.stringify({ version: 4, delivery_receipts: [storedReceipt(1, false)] }),
+  );
+  const store = new StateStore(path);
+  const loaded = await store.load();
+  assert.equal(loaded.receipts[0].sourceMessageType, null);
+  assert.equal(loaded.receipts[0].replyEligible, false);
+  await store.save({
+    ...loaded,
+    seenIds: new Set(loaded.seenIds),
+    outboundSeenIds: new Set(loaded.outboundSeenIds),
+    receipts: new Map(loaded.receipts.map((receipt) => [receipt.sourceMessageId, receipt])),
+  });
+  const persisted = JSON.parse(await readFile(path, "utf8"));
+  assert.equal(persisted.version, 5);
+  assert.equal(persisted.delivery_receipts[0].source_message_type, null);
+  assert.equal(persisted.delivery_receipts[0].reply_eligible, false);
+});
+
+test("StateStore rejects malformed v5 reply eligibility instead of upgrading it", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "aichat-codex-state-v5-bad-"));
+  const path = join(directory, "state.json");
+  await writeFile(
+    path,
+    JSON.stringify({
+      version: 5,
+      delivery_receipts: [
+        {
+          ...storedReceipt(1, false),
+          source_message_type: "result",
+          reply_eligible: "false",
+        },
+      ],
+    }),
+  );
+  await assert.rejects(() => new StateStore(path).load(), /reply_eligible must be true or false/);
 });
 
 test("StateStore atomic writes preserve an existing parent directory mode", async (t) => {

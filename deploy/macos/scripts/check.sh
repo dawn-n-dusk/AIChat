@@ -33,12 +33,10 @@ plutil -lint "$PLIST_PATH" >/dev/null
   --settings "$SETTINGS_PATH" \
   --connector "${CURRENT_LINK}/runtime/src/cli.js" \
   --node "$node_binary" \
-  --check-settings >/dev/null
+  --check-settings
 
 printf 'release_ok=true\n'
 printf 'plist_ok=true\n'
-printf 'settings_ok=true\n'
-printf 'token_read=false\n'
 if launchctl print "gui/${UID}/${LABEL}" >/dev/null 2>&1; then
   printf 'launchagent_loaded=true\n'
 else
