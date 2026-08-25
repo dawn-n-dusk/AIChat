@@ -218,12 +218,27 @@ class MacOSLauncherTests(unittest.TestCase):
                 handle,
             )
         plist_path.chmod(0o600)
+        shim_dir = self.root / "bin"
+        shim_dir.mkdir(mode=0o700)
+        launchctl_log = self.root / "launchctl.log"
+        launchctl = shim_dir / "launchctl"
+        launchctl.write_text(
+            "#!/bin/bash\n"
+            f"printf '%s\\n' \"$*\" >>{json.dumps(str(launchctl_log))}\n"
+            "exit 1\n",
+            encoding="utf-8",
+        )
+        launchctl.chmod(0o700)
         completed = subprocess.run(
             [
                 "bash",
                 str(REPOSITORY_ROOT / "deploy" / "macos" / "scripts" / "check.sh"),
             ],
-            env={**os.environ, "HOME": str(self.home)},
+            env={
+                **os.environ,
+                "HOME": str(self.home),
+                "PATH": f"{shim_dir}{os.pathsep}{os.environ['PATH']}",
+            },
             check=True,
             capture_output=True,
             text=True,
@@ -231,6 +246,19 @@ class MacOSLauncherTests(unittest.TestCase):
         self.assertIn("automatic_egress=true", completed.stdout)
         self.assertIn("token_read=false", completed.stdout)
         self.assertIn("launchagent_loaded=false", completed.stdout)
+        self.assertEqual(
+            launchctl_log.read_text(encoding="utf-8").splitlines(),
+            [f"print gui/{os.getuid()}/org.aichat.codex-connector"],
+        )
+        self.assertFalse(
+            (
+                self.home
+                / "Library"
+                / "Application Support"
+                / "AIChat"
+                / ".codex-connector-operation.lock"
+            ).exists()
+        )
 
     @staticmethod
     def write_private_json(path: Path, value: dict[str, object]) -> None:

@@ -78,7 +78,56 @@ deploy/macos/scripts/install.sh \
 ```
 
 The preflight validates settings but deliberately does not read the identity
-token. Apply only after reviewing the reported paths:
+token. `--stage-only` without `--apply` is also a read-only preview and creates
+no files under `HOME`:
+
+```bash
+deploy/macos/scripts/install.sh --stage-only \
+  --settings "$HOME/Library/Application Support/AIChat/codex-connector-settings.json" \
+  --repository-root "$PWD"
+```
+
+### Content-addressed, inert staging
+
+Publish a content-addressed candidate without querying or mutating launchd:
+
+```bash
+deploy/macos/scripts/install.sh --apply --stage-only \
+  --settings "$HOME/Library/Application Support/AIChat/codex-connector-settings.json" \
+  --repository-root "$PWD"
+```
+
+AIChat candidate artifacts are written only beneath the protected
+`codex-connector-launchagent/staged` tree. The operation also creates the shared
+current-user `0600` lock described below; npm may use its normal user cache and
+logs. It runs locked `npm ci`, validates the
+copied settings with `launcher.py --check-settings`, recursively restricts the
+release to current-user `0700` directories and `0600` files (the launcher is
+`0700`), rejects symlinks and special files, and content-addresses the release
+over the connector sources, settings, launcher, exact Node/Python paths, and the
+full installed dependency digest. This makes same-user tampering detectable
+during a later staged check; it is not an immutability boundary against the same
+user or an administrator. The staged settings preserve only the private
+identity-file path; neither the identity file nor its token is read. Credential and
+authorization environment variables are removed specifically from the staged
+`npm ci` and `launcher.py --check-settings` subprocesses.
+
+The staged plist is stored inside that release and binds only to files inside
+the same staged release. It is never copied to `~/Library/LaunchAgents`, never
+passed to `launchctl`, and no connector process is started. An already loaded
+active service, its active `current` link, settings, launcher, external plist,
+and rollback snapshot remain unchanged. Repeating the same stage reports
+`already_staged=true` and does not add another equivalent release.
+
+Staging is an audit/check/remove facility only. There is intentionally no
+promotion command in this package (`promotion_supported=false`). A later plain
+`--apply` does not activate the reviewed staged fingerprint; it independently
+rebuilds from the then-current repository and settings and follows the existing
+bootstrap path.
+
+### Active installation
+
+Apply only after reviewing the reported paths:
 
 ```bash
 deploy/macos/scripts/install.sh --apply \
@@ -100,7 +149,22 @@ read by the installer.
 
 ## Check and rollback
 
-The check is offline and never reads the identity file:
+Check only the inert staged candidate without calling `launchctl`:
+
+```bash
+deploy/macos/scripts/check.sh --stage-only
+```
+
+This reports `checked_scope=staged`, `launchagent_checked=false`,
+`activation_performed=false`, `connector_process_started=false`, and
+`token_read=false`. It validates the exact plist binding, package fingerprint,
+locked dependency versions, dependency content digest, ownership, file types,
+and permissions.
+
+The normal check validates both states. With only an inert candidate it reports
+`state=staged-only` and does not infer whether a same-label launchd job exists.
+With an active package it uses `launchctl print` to distinguish `active`,
+`active-unloaded`, and the corresponding states with a staged candidate:
 
 ```bash
 deploy/macos/scripts/check.sh
@@ -116,7 +180,29 @@ deploy/macos/scripts/rollback.sh --apply
 Rollback preserves the newer release directory for forensic inspection or a
 later manual recovery. It validates and reports the restored egress posture,
 then restores the previous current link, settings, launcher, plist, and
-loaded/unloaded state recorded by the installer.
+loaded/unloaded state recorded by an active installer. Stage-only never writes
+`last-backup`, so it cannot create an activation rollback or cause rollback to
+bootstrap a service.
+
+Preview or remove only the inert staged candidate:
+
+```bash
+deploy/macos/scripts/uninstall.sh --stage-only
+deploy/macos/scripts/uninstall.sh --stage-only --apply
+```
+
+This command never removes an active install. Before removal it refuses to
+proceed if the shared LaunchAgent label is loaded, because an operator may have
+manually bootstrapped the staged plist. Removal atomically hides the staged
+pointer and release behind recoverable tombstones before deletion; an
+interrupted removal is resumed by rerunning the same apply command.
+
+Install, stage, check, rollback, and staged-removal operations coordinate through
+the current-user `0600` file
+`~/Library/Application Support/AIChat/.codex-connector-operation.lock` with
+non-blocking process-scoped shared or exclusive locks. Read-only checks of a
+legacy active install that predates this file remain non-mutating and fail if a
+new locked operation appears during the snapshot.
 
 ## Outbound collaboration
 
