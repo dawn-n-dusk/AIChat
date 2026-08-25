@@ -2,6 +2,7 @@
 
 set -Eeuo pipefail
 umask 077
+export PYTHONDONTWRITEBYTECODE=1
 
 readonly LABEL="org.aichat.codex-connector"
 readonly STATE_ROOT="${HOME}/Library/Application Support/AIChat/codex-connector-launchagent"
@@ -10,7 +11,10 @@ readonly SETTINGS_PATH="${STATE_ROOT}/settings.json"
 readonly LAUNCHER_PATH="${STATE_ROOT}/launcher.py"
 readonly LAST_BACKUP="${STATE_ROOT}/last-backup"
 readonly PLIST_PATH="${HOME}/Library/LaunchAgents/${LABEL}.plist"
+readonly LOCK_PATH="${HOME}/Library/Application Support/AIChat/.codex-connector-operation.lock"
 
+original_args=("$@")
+original_arg_count=$#
 apply=false
 if [[ "${1:-}" == "--apply" ]]; then
   apply=true
@@ -19,6 +23,56 @@ fi
 if (($# > 0)); then
   printf 'Usage: rollback.sh [--apply]\n' >&2
   exit 2
+fi
+
+python_binary="$(command -v python3 || true)"
+[[ -n "$python_binary" && "$python_binary" == /* ]] || {
+  printf 'ERROR: Python 3 is required on PATH\n' >&2
+  exit 1
+}
+
+legacy_lock_absent=false
+if [[ -z "${AICHAT_MACOS_OPERATION_LOCK_FD:-}" ]]; then
+  if [[ -e "$LOCK_PATH" || -L "$LOCK_PATH" ]]; then
+    lock_mode="--shared"
+    if [[ "$apply" == true ]]; then
+      lock_mode="--exclusive"
+    fi
+    if ((original_arg_count > 0)); then
+      exec "$python_binary" "$(dirname "${BASH_SOURCE[0]}")/operation-lock.py" \
+        --home "$HOME" \
+        --lock-path "$LOCK_PATH" \
+        "$lock_mode" \
+        /bin/bash "$0" "${original_args[@]}"
+    else
+      exec "$python_binary" "$(dirname "${BASH_SOURCE[0]}")/operation-lock.py" \
+        --home "$HOME" \
+        --lock-path "$LOCK_PATH" \
+        "$lock_mode" \
+        /bin/bash "$0"
+    fi
+  elif [[ "$apply" == true ]]; then
+    exec "$python_binary" "$(dirname "${BASH_SOURCE[0]}")/operation-lock.py" \
+      --home "$HOME" \
+      --lock-path "$LOCK_PATH" \
+      --exclusive \
+      --create \
+      /bin/bash "$0" "${original_args[@]}"
+  else
+    legacy_lock_absent=true
+  fi
+fi
+if [[ -n "${AICHAT_MACOS_OPERATION_LOCK_FD:-}" ]]; then
+  if [[ "$apply" == true ]]; then
+    "$python_binary" "$(dirname "${BASH_SOURCE[0]}")/staged-package.py" verify-lock \
+      --home "$HOME" \
+      --state-root "$STATE_ROOT" \
+      --exclusive
+  else
+    "$python_binary" "$(dirname "${BASH_SOURCE[0]}")/staged-package.py" verify-lock \
+      --home "$HOME" \
+      --state-root "$STATE_ROOT"
+  fi
 fi
 [[ -f "$LAST_BACKUP" ]] || {
   printf 'ERROR: no recorded macOS connector install is available to roll back\n' >&2
@@ -73,6 +127,10 @@ printf 'rollback_snapshot=%s\n' "$backup_id"
 printf 'current_release_preserved=true\n'
 printf 'restored_automatic_egress=%s\n' "$restored_automatic_egress"
 if [[ "$apply" != true ]]; then
+  if [[ "$legacy_lock_absent" == true && ( -e "$LOCK_PATH" || -L "$LOCK_PATH" ) ]]; then
+    printf 'ERROR: package state changed while the legacy rollback preview was read; retry\n' >&2
+    exit 1
+  fi
   printf 'dry_run=true\n'
   exit 0
 fi

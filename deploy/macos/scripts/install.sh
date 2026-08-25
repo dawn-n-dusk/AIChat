@@ -2,6 +2,7 @@
 
 set -Eeuo pipefail
 umask 077
+export PYTHONDONTWRITEBYTECODE=1
 
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly PACKAGE_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -15,22 +16,31 @@ readonly BACKUPS_DIR="${STATE_ROOT}/backups"
 readonly LAST_BACKUP="${STATE_ROOT}/last-backup"
 readonly PLIST_PATH="${HOME}/Library/LaunchAgents/${LABEL}.plist"
 readonly LOG_DIR="${HOME}/Library/Logs/AIChat"
+readonly LOCK_PATH="${HOME}/Library/Application Support/AIChat/.codex-connector-operation.lock"
 
+original_args=("$@")
 apply=false
+stage_only=false
 settings_source=""
 repository_root=""
+staging_root=""
 
 usage() {
   printf '%s\n' \
-    "Usage: install.sh --settings /absolute/settings.json --repository-root /absolute/AIChat [--apply]" \
+    "Usage: install.sh --settings /absolute/settings.json --repository-root /absolute/AIChat [--apply] [--stage-only]" \
     "" \
-    "Without --apply, performs read-only preflight and prints the intended paths."
+    "Without --apply, performs read-only preflight and prints the intended paths." \
+    "Use --apply --stage-only to publish an inert candidate without launchctl."
 }
 
 while (($# > 0)); do
   case "$1" in
     --apply)
       apply=true
+      shift
+      ;;
+    --stage-only)
+      stage_only=true
       shift
       ;;
     --settings)
@@ -88,6 +98,15 @@ node_major="$($node_binary -p 'Number(process.versions.node.split(".")[0])')"
   exit 1
 }
 
+if [[ "$apply" == true && -z "${AICHAT_MACOS_OPERATION_LOCK_FD:-}" ]]; then
+  exec "$python_binary" "$SCRIPT_DIR/operation-lock.py" \
+    --home "$HOME" \
+    --lock-path "$LOCK_PATH" \
+    --exclusive \
+    --create \
+    /bin/bash "$0" "${original_args[@]}"
+fi
+
 "$python_binary" "$SCRIPT_DIR/launcher.py" \
   --settings "$settings_source" \
   --connector "${CONNECTOR_SOURCE}/src/cli.js" \
@@ -99,8 +118,35 @@ printf 'state_root=%s\n' "$STATE_ROOT"
 printf 'plist=%s\n' "$PLIST_PATH"
 printf 'periodic_recovery=false\n'
 printf 'driver=app-server\n'
+printf 'stage_only=%s\n' "$stage_only"
 if [[ "$apply" != true ]]; then
   printf 'dry_run=true\n'
+  exit 0
+fi
+
+"$python_binary" "$SCRIPT_DIR/staged-package.py" prepare \
+  --home "$HOME" \
+  --state-root "$STATE_ROOT"
+
+cleanup() {
+  if [[ -n "$staging_root" && -d "$staging_root" ]]; then
+    rm -rf -- "$staging_root"
+  fi
+}
+trap cleanup EXIT
+
+if [[ "$stage_only" == true ]]; then
+  "$python_binary" "$SCRIPT_DIR/staged-package.py" publish \
+    --home "$HOME" \
+    --state-root "$STATE_ROOT" \
+    --settings "$settings_source" \
+    --connector-source "$CONNECTOR_SOURCE" \
+    --script-dir "$SCRIPT_DIR" \
+    --node "$node_binary" \
+    --npm "$npm_binary" \
+    --python "$python_binary" \
+    --label "$LABEL" \
+    --log-dir "$LOG_DIR"
   exit 0
 fi
 
@@ -113,11 +159,6 @@ staging_plist="${staging_root}/${LABEL}.plist"
 staging_settings="${staging_root}/settings.json"
 staging_launcher="${staging_root}/launcher.py"
 service_was_loaded=false
-
-cleanup() {
-  rm -rf -- "$staging_root"
-}
-trap cleanup EXIT
 
 mkdir -p -- "$staging_release/runtime/src" "$release_dir" "$backup_dir" "$LOG_DIR" \
   "$(dirname "$PLIST_PATH")"
@@ -223,4 +264,25 @@ fi
 printf '%s\n' "$release_id" >"$LAST_BACKUP"
 transaction_active=false
 printf 'installed_release=%s\n' "$release_id"
+if [[ -e "${STATE_ROOT}/staged/current" || -L "${STATE_ROOT}/staged/current" ]]; then
+  printf 'staged=true\n'
+  if staged_summary="$(
+    "$python_binary" "$SCRIPT_DIR/staged-package.py" check \
+      --home "$HOME" \
+      --state-root "$STATE_ROOT" 2>/dev/null
+  )"; then
+    printf 'staged_valid=true\n'
+    awk -F= '$1 == "staged_release" { print $0 }' <<<"$staged_summary"
+  else
+    printf 'staged_valid=false\n'
+    printf 'WARNING: active install succeeded, but the isolated staged candidate is invalid\n' >&2
+  fi
+else
+  printf 'staged=false\n'
+  printf 'staged_valid=absent\n'
+fi
+printf 'promotion_supported=false\n'
+printf 'active=true\n'
+printf 'launchagent_loaded=true\n'
+printf 'token_read=false\n'
 printf 'token_stored_in_plist=false\n'

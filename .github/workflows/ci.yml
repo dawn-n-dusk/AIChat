@@ -118,7 +118,12 @@ jobs:
           bash -n deploy/macos/scripts/install.sh
           bash -n deploy/macos/scripts/check.sh
           bash -n deploy/macos/scripts/rollback.sh
-          python -m py_compile deploy/macos/scripts/launcher.py deploy/macos/scripts/render-plist.py
+          bash -n deploy/macos/scripts/uninstall.sh
+          python -m py_compile \
+            deploy/macos/scripts/launcher.py \
+            deploy/macos/scripts/operation-lock.py \
+            deploy/macos/scripts/render-plist.py \
+            deploy/macos/scripts/staged-package.py
       - name: Run launcher-to-core configuration regression
         run: python -m unittest discover -s deploy/macos/tests -v
 

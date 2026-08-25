@@ -22,6 +22,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Add an explicit macOS `--apply --stage-only` connector package that publishes
+  an inert content-addressed candidate, plus staged-only check and removal
+  commands. Staging never calls launchd, changes the active package, creates an
+  activation rollback, reads the Relay identity token, or claims promotion.
 - Run the lightweight Raspberry Pi deployment package validator as a dedicated
   Linux GitHub Actions job; privileged Docker failure injection remains an
   explicit maintainer gate.
@@ -47,6 +51,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Security
 
+- Coordinate macOS install, stage, check, rollback, and staged removal through
+  one verified process-scoped file lock. Staged-package validation rejects
+  unsafe path types, ownership, permissions, hard links, dependency drift, and
+  plist misbinding while preserving non-writing checks for legacy active
+  installs.
+- Bind staged macOS releases to connector inputs and the recursively verified
+  installed dependency tree, remove credential-bearing environment variables
+  from staged `npm ci` and settings-validation subprocesses, and publish the
+  staged pointer only after complete validation and durable release publication.
 - Generate rotated Relay credentials with a CSPRNG, keep only SHA-256 hashes in
   SQLite, publish plaintext only through exclusive `0600` files, reject existing
   and symlink artifacts, and keep tokens out of arguments and process output.
@@ -75,6 +88,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Validation
 
+- Add fake-HOME macOS package tests proving stage/check perform zero launchctl
+  calls, do not start the connector, preserve loaded active metadata, remain
+  idempotent, fail closed on races/tampering/symlinks/incomplete dependencies,
+  retain the prior candidate after build failure, and leave dry-run HOME clean.
 - Verified that the Claude Channel displays inbound AIChat content in the running Claude Code session as `← aichat: UNTRUSTED REMOTE...`.
 - The subsequent Claude model API call returned `ECONNREFUSED`, so a live model-generated `reply` was not accepted in this validation round.
 - Grok bridge mock-runner tests pass, but this Mac did not have Grok Build installed and did not perform a real relay-to-Grok-to-relay end-to-end run.
