@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { chmod, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -26,6 +26,16 @@ const binding = { channelId: "channel-1", threadId: "thread-1", hostId: null };
 
 test("generic driver loader and receipt validation enforce the contract", async () => {
   assert.throws(() => assertCodexDriver({}), /missing start/);
+  assert.throws(
+    () =>
+      assertCodexDriver({
+        async start() {},
+        async deliver() {},
+        async stop() {},
+        resolveDelivery: true,
+      }),
+    /optional resolveDelivery must be a function/,
+  );
   assert.throws(
     () => validateDriverReceipt({ accepted: true, deliveryId: "other" }, "expected"),
     /does not match/,
@@ -86,6 +96,7 @@ test("AppServerDriver starts a fixed turn, correlates notifications, and emits m
   const receipt = await driver.deliver(deliveryRequest());
   assert.equal(receipt.accepted, true);
   assert.equal(receipt.turnId, "turn-1");
+  await driver.acknowledgeDelivery(receipt.deliveryId);
   await waitFor(() => outbound.length === 1);
   assert.equal(outbound[0].sourceMessageId, "message-1");
   assert.equal(outbound[0].text, "Verified result");
@@ -99,7 +110,7 @@ test("AppServerDriver starts a fixed turn, correlates notifications, and emits m
   assert.equal(turnStart.params.clientUserMessageId, "delivery-1");
   const replyObject = turnStart.params.outputSchema.properties.aichat_reply.anyOf[1];
   assert.deepEqual(replyObject.required, ["text", "message_type", "references"]);
-  assert.deepEqual(replyObject.properties.message_type.enum, ["text", "result", null]);
+  assert.deepEqual(replyObject.properties.message_type.enum, ["result", null]);
 
   const duplicate = await driver.deliver(deliveryRequest());
   assert.equal(duplicate.duplicate, true);
@@ -248,6 +259,7 @@ test("completion save failure exposes no outbound event until recovery persists 
   assert.equal(outbound.length, 0);
   assert.equal(store.state.records[0].phase, "accepted");
   assert.equal(store.state.records[0].outboundEvent, null);
+  await driver.acknowledgeDelivery("delivery-1");
 
   timers.fireFirst(1_000);
   await waitFor(() => outbound.length === 1);
@@ -280,6 +292,7 @@ test("restart reconciles an ambiguous delivery by durable source markers without
     logger: { error() {} },
   });
   await driver.start({ binding, onOutboundReply: async (event) => outbound.push(event) });
+  await driver.acknowledgeDelivery("delivery-1");
   await waitFor(() => outbound.length === 1);
   assert.equal(store.state.records[0].phase, "completed");
   assert.equal(store.state.records[0].turnId, "turn-recovered-1");
@@ -320,6 +333,7 @@ test("restart reconstructs accepted completion, persists one stable outbound eve
       throw new Error("connector unavailable");
     },
   });
+  await firstDriver.acknowledgeDelivery("delivery-1");
   await waitFor(() => firstEvents.length === 1);
   await firstDriver.stop();
   assert.equal(store.state.records[0].phase, "completed");
@@ -345,6 +359,127 @@ test("restart reconstructs accepted completion, persists one stable outbound eve
   assert.equal(secondEvents[0].text, "Durable reply");
   await waitFor(() => store.state.records[0].outboundDelivered === true);
   await secondDriver.stop();
+});
+
+test("driver acknowledgement before completion preserves completed outbound state", async () => {
+  const harness = acknowledgementRaceHarness();
+  await harness.driver.start({
+    binding,
+    onOutboundReply: async (event) => harness.outbound.push(event),
+  });
+  const receipt = await harness.driver.deliver(deliveryRequest());
+  await harness.driver.acknowledgeDelivery(receipt.deliveryId);
+  harness.complete();
+  await waitFor(() => harness.outbound.length === 1);
+  const record = harness.store.state.records[0];
+  assert.equal(record.phase, "completed");
+  assert.equal(record.connectorCheckpointed, true);
+  assert.equal(record.outboundEvent.text, "Race result");
+  await harness.driver.stop();
+});
+
+test("driver completion before acknowledgement never regresses the completed record", async () => {
+  const harness = acknowledgementRaceHarness();
+  await harness.driver.start({
+    binding,
+    onOutboundReply: async (event) => harness.outbound.push(event),
+  });
+  const receipt = await harness.driver.deliver(deliveryRequest());
+  harness.complete();
+  await waitFor(() => harness.store.state.records[0]?.phase === "completed");
+  assert.equal(harness.outbound.length, 0);
+  await harness.driver.acknowledgeDelivery(receipt.deliveryId);
+  await waitFor(() => harness.outbound.length === 1);
+  const record = harness.store.state.records[0];
+  assert.equal(record.phase, "completed");
+  assert.equal(record.connectorCheckpointed, true);
+  assert.equal(record.outboundEvent.text, "Race result");
+  await harness.driver.stop();
+});
+
+test("late turn/start response cannot regress a recovery-completed receipt", async () => {
+  const timers = controllableTimers();
+  let childProcess;
+  let delayedTurnStart;
+  let readCount = 0;
+  const process = fakeAppServer((message, child) => {
+    childProcess = child;
+    if (message.method === "initialize") child.respond(message.id, {});
+    else if (message.method === "thread/resume") {
+      child.respond(message.id, { thread: { id: "thread-1" } });
+    } else if (message.method === "thread/read") {
+      readCount += 1;
+      child.respond(message.id, {
+        thread: {
+          id: "thread-1",
+          turns:
+            readCount >= 2
+              ? [
+                  completedTurn(
+                    "turn-late-response",
+                    deliveryRequest().envelope,
+                    "Recovered before start response",
+                  ),
+                ]
+              : [],
+        },
+      });
+    } else if (message.method === "turn/start") {
+      delayedTurnStart = message;
+    }
+  });
+  const store = memoryReceiptStore({
+    records: [
+      ambiguousRecord({
+        deliveryId: "stale-delivery",
+        sourceMessageId: "stale-message",
+      }),
+    ],
+  });
+  const outbound = [];
+  const driver = new AppServerDriver({
+    binding,
+    env: {
+      CODEX_APP_SERVER_REQUEST_TIMEOUT_MS: "5000",
+      CODEX_APP_SERVER_RECOVERY_INTERVAL_MS: "1000",
+    },
+    spawnImpl: () => process,
+    receiptStore: store,
+    timers,
+    logger: { error() {} },
+  });
+  await driver.start({
+    binding,
+    onOutboundReply: async (event) => outbound.push(event),
+  });
+
+  const delivery = driver.deliver(deliveryRequest());
+  await waitFor(() => delayedTurnStart != null);
+  timers.fireFirst(1_000);
+  await waitFor(
+    () =>
+      store.state.records.find((record) => record.deliveryId === "delivery-1")?.phase ===
+      "completed",
+  );
+
+  childProcess.respond(delayedTurnStart.id, {
+    turn: { id: "turn-late-response", status: "completed" },
+  });
+  const receipt = await delivery;
+  assert.equal(receipt.turnId, "turn-late-response");
+  const completed = store.state.records.find((record) => record.deliveryId === "delivery-1");
+  assert.equal(completed.phase, "completed");
+  assert.equal(completed.outboundEvent.text, "Recovered before start response");
+  assert.equal(outbound.length, 0);
+
+  await driver.acknowledgeDelivery(receipt.deliveryId);
+  await waitFor(() => outbound.length === 1);
+  assert.equal(outbound[0].text, "Recovered before start response");
+  assert.equal(
+    store.state.records.find((record) => record.deliveryId === "delivery-1").phase,
+    "completed",
+  );
+  await driver.stop();
 });
 
 test("app-server child receives a conservative environment without connector secrets", async () => {
@@ -384,6 +519,120 @@ test("app-server child receives a conservative environment without connector sec
   await driver.stop();
 });
 
+test("durable connector quarantine acknowledgement blocks driver replay without retry", async () => {
+  const process = fakeAppServer((message, child) => {
+    if (message.method === "initialize") child.respond(message.id, {});
+    else if (message.method === "thread/resume") {
+      child.respond(message.id, { thread: { id: "thread-1" } });
+    } else if (message.method === "turn/start") {
+      child.respond(message.id, { turn: { id: "turn-policy", status: "inProgress" } });
+      setImmediate(() => {
+        child.notify("item/completed", {
+          threadId: "thread-1",
+          turnId: "turn-policy",
+          item: {
+            type: "agentMessage",
+            text: JSON.stringify({
+              aichat_reply: { text: "Blocked reply", message_type: "result", references: [] },
+            }),
+          },
+        });
+        child.notify("turn/completed", {
+          threadId: "thread-1",
+          turn: { id: "turn-policy", status: "completed" },
+        });
+      });
+    }
+  });
+  const store = memoryReceiptStore();
+  let attempts = 0;
+  const driver = new AppServerDriver({
+    binding,
+    env: { CODEX_OUTBOUND_RETRY_MAX_ATTEMPTS: "2" },
+    spawnImpl: () => process,
+    receiptStore: store,
+    logger: { error() {} },
+  });
+  await driver.start({
+    binding,
+    onOutboundReply: async (event) => {
+      attempts += 1;
+      return { blocked: true, eventId: event.eventId, reasonCode: "AICHAT_EGRESS_DISABLED" };
+    },
+  });
+  const receipt = await driver.deliver(deliveryRequest());
+  await driver.acknowledgeDelivery(receipt.deliveryId);
+  await waitFor(() => store.state.records[0]?.outboundBlocked === true);
+  assert.equal(attempts, 1);
+  const eventId = store.state.records[0].outboundEvent.eventId;
+  await driver.resolveDelivery(receipt.deliveryId, { eventId, outcome: "delivered" });
+  assert.equal(store.state.records[0].outboundDelivered, true);
+  assert.equal(store.state.records[0].outboundBlocked, false);
+  await driver.resolveDelivery(receipt.deliveryId, { eventId, outcome: "evicted" });
+  assert.equal(store.state.records.length, 0);
+  assert.deepEqual(
+    await driver.resolveDelivery(receipt.deliveryId, { eventId, outcome: "evicted" }),
+    { released: true, duplicate: true },
+  );
+  await driver.stop();
+});
+
+test("late quarantine acknowledgement cannot regress an operator-confirmed delivery", async () => {
+  const process = fakeAppServer((message, child) => {
+    if (message.method === "initialize") child.respond(message.id, {});
+    else if (message.method === "thread/resume") {
+      child.respond(message.id, { thread: { id: "thread-1" } });
+    } else if (message.method === "turn/start") {
+      child.respond(message.id, { turn: { id: "turn-late-block", status: "inProgress" } });
+      setImmediate(() => {
+        child.notify("item/completed", {
+          threadId: "thread-1",
+          turnId: "turn-late-block",
+          item: {
+            type: "agentMessage",
+            text: JSON.stringify({
+              aichat_reply: { text: "Eventually delivered", message_type: "result", references: [] },
+            }),
+          },
+        });
+        child.notify("turn/completed", {
+          threadId: "thread-1",
+          turn: { id: "turn-late-block", status: "completed" },
+        });
+      });
+    }
+  });
+  const store = memoryReceiptStore();
+  const callbackGate = deferred();
+  const eventSeen = deferred();
+  const driver = new AppServerDriver({
+    binding,
+    env: {},
+    spawnImpl: () => process,
+    receiptStore: store,
+    logger: { error() {} },
+  });
+  await driver.start({
+    binding,
+    onOutboundReply: async (event) => {
+      eventSeen.resolve(event);
+      await callbackGate.promise;
+      return { blocked: true, eventId: event.eventId, reasonCode: "late-policy" };
+    },
+  });
+  const receipt = await driver.deliver(deliveryRequest());
+  await driver.acknowledgeDelivery(receipt.deliveryId);
+  const event = await eventSeen.promise;
+  await driver.resolveDelivery(receipt.deliveryId, {
+    eventId: event.eventId,
+    outcome: "delivered",
+  });
+  callbackGate.resolve();
+  await driver.stop();
+  assert.equal(store.state.records[0].outboundDelivered, true);
+  assert.equal(store.state.records[0].outboundBlocked, false);
+});
+
 test("built-in Codex drivers reject non-local host bindings", async () => {
   const remoteBinding = { ...binding, hostId: "remote-host" };
   const appServer = new AppServerDriver({
@@ -405,6 +654,126 @@ test("built-in Codex drivers reject non-local host bindings", async () => {
     () => owner.start({ binding: remoteBinding, onOutboundReply: async () => {} }),
     /local-only/,
   );
+});
+
+test("Desktop owner version gate cannot be overridden without a development risk acknowledgement", () => {
+  assert.throws(
+    () =>
+      new DesktopOwnerIpcClient({
+        env: {
+          CODEX_DESKTOP_OWNER_IPC_ENABLED: "true",
+          CODEX_DESKTOP_EXPECTED_VERSION: "99.0.0",
+        },
+      }),
+    /DEVELOPMENT_OVERRIDE_ACK=true/,
+  );
+  assert.equal(
+    new DesktopOwnerIpcClient({
+      env: {
+        CODEX_DESKTOP_OWNER_IPC_ENABLED: "true",
+        CODEX_DESKTOP_EXPECTED_VERSION: "99.0.0",
+        CODEX_DESKTOP_DEVELOPMENT_OVERRIDE_ACK: "true",
+      },
+    }).expectedVersion,
+    "99.0.0",
+  );
+});
+
+test("app-server verifies the dedicated marker and applies fixed low-privilege turn policy", async () => {
+  const marker = "AICHAT_CONNECTOR_TASK_MARKER_TEST";
+  const protocol = [];
+  let childArgs;
+  const process = fakeAppServer((message, child) => {
+    protocol.push(message);
+    if (message.method === "initialize") child.respond(message.id, {});
+    else if (message.method === "thread/read") {
+      child.respond(message.id, {
+        thread: {
+          id: "thread-1",
+          turns: [
+            {
+              id: "setup-turn",
+              status: "completed",
+              items: [{ type: "userMessage", text: marker }],
+            },
+          ],
+        },
+      });
+    } else if (message.method === "thread/resume") {
+      child.respond(message.id, { thread: { id: "thread-1" } });
+    } else if (message.method === "turn/start") {
+      child.respond(message.id, { turn: { id: "turn-safe", status: "inProgress" } });
+    }
+  });
+  const driver = new AppServerDriver({
+    binding,
+    env: {
+      CODEX_CONNECTOR_TASK_MARKER: marker,
+      CODEX_APP_SERVER_CWD: "/tmp",
+      CODEX_APP_SERVER_APPROVAL_POLICY: "never",
+      CODEX_APP_SERVER_SANDBOX_POLICY_JSON: JSON.stringify({
+        type: "readOnly",
+        networkAccess: false,
+      }),
+    },
+    spawnImpl: (_binary, args) => {
+      childArgs = args;
+      return process;
+    },
+    receiptStore: memoryReceiptStore(),
+    logger: { error() {} },
+  });
+  await driver.start({ binding, onOutboundReply: async () => {} });
+  const receipt = await driver.deliver(deliveryRequest());
+  assert.equal(receipt.turnId, "turn-safe");
+  const start = protocol.find((message) => message.method === "turn/start");
+  assert.equal(start.params.cwd, "/tmp");
+  assert.equal(start.params.approvalPolicy, "never");
+  assert.deepEqual(start.params.sandboxPolicy, { type: "readOnly", networkAccess: false });
+  assert.ok(childArgs.includes("mcp_servers={}"));
+  assert.ok(childArgs.includes("plugins={}"));
+  await driver.stop();
+});
+
+test("app-server rejects a task marker embedded inside a larger line", async () => {
+  const marker = "AICHAT_CONNECTOR_TASK_MARKER_EXACT_TEST";
+  const process = fakeAppServer((message, child) => {
+    if (message.method === "initialize") child.respond(message.id, {});
+    else if (message.method === "thread/read") {
+      child.respond(message.id, {
+        thread: {
+          id: "thread-1",
+          turns: [
+            {
+              id: "setup-turn",
+              status: "completed",
+              items: [{ type: "userMessage", text: `prefix ${marker} suffix` }],
+            },
+          ],
+        },
+      });
+    }
+  });
+  const driver = new AppServerDriver({
+    binding,
+    env: {
+      CODEX_CONNECTOR_TASK_MARKER: marker,
+      CODEX_APP_SERVER_CWD: "/tmp",
+      CODEX_APP_SERVER_APPROVAL_POLICY: "never",
+      CODEX_APP_SERVER_SANDBOX_POLICY_JSON: JSON.stringify({
+        type: "readOnly",
+        networkAccess: false,
+      }),
+    },
+    spawnImpl: () => process,
+    receiptStore: memoryReceiptStore(),
+    logger: { error() {} },
+  });
+  await assert.rejects(
+    () => driver.start({ binding, onOutboundReply: async () => {} }),
+    /does not contain.*connector marker/,
+  );
+  await driver.stop();
 });
 
 test("AppServerReceiptStore migrates v1 accepted receipts to durable v2 records", async () => {
@@ -433,6 +802,53 @@ test("AppServerReceiptStore migrates v1 accepted receipts to durable v2 records"
   assert.equal(loaded.records[0].transport, "app-server");
   await store.save(binding, loaded);
   assert.equal(JSON.parse(await readFile(path, "utf8")).version, 2);
+});
+
+test("driver refuses receipt state above capacity instead of evicting incomplete records", async () => {
+  const records = Array.from({ length: 1_001 }, (_, index) =>
+    acceptedRecord({
+      deliveryId: `delivery-${index}`,
+      sourceMessageId: `message-${index}`,
+      turnId: `turn-${index}`,
+    }),
+  );
+  const driver = new AppServerDriver({
+    binding,
+    env: {},
+    spawnImpl: () => {
+      throw new Error("must not spawn");
+    },
+    receiptStore: memoryReceiptStore({ records }),
+  });
+  await assert.rejects(
+    () => driver.start({ binding, onOutboundReply: async () => {} }),
+    /exceeds 1000/,
+  );
+});
+
+test("driver does not evict checkpointed receipts whose outbound event was only blocked", async () => {
+  const records = Array.from({ length: 1_000 }, (_, index) =>
+    blockedCompletedRecord(index),
+  );
+  const process = fakeAppServer((message, child) => {
+    if (message.method === "initialize") child.respond(message.id, {});
+    else if (message.method === "thread/resume") {
+      child.respond(message.id, { thread: { id: "thread-1" } });
+    }
+  });
+  const driver = new AppServerDriver({
+    binding,
+    env: {},
+    spawnImpl: () => process,
+    receiptStore: memoryReceiptStore({ records }),
+    logger: { error() {} },
+  });
+  await driver.start({ binding, onOutboundReply: async () => {} });
+  await assert.rejects(
+    () => driver.deliver(deliveryRequest({ deliveryId: "delivery-over-capacity" })),
+    (error) => error.code === "AICHAT_DRIVER_RECEIPT_CAPACITY",
+  );
+  await driver.stop();
 });
 
 test("Desktop owner wrapper prefers IPC starter and leaves app-server as automatic fallback", async () => {
@@ -581,6 +997,125 @@ test("Desktop owner IPC framing, discovery, stream snapshot, and structured comp
   await new Promise((resolve) => server.close(resolve));
 });
 
+test("Desktop owner IPC revalidates the Desktop build before reconnecting after a runtime upgrade", async (t) => {
+  if (process.platform !== "darwin") return t.skip("Desktop owner IPC is macOS-only");
+  const directory = await mkdtemp(join(tmpdir(), "aichat-owner-upgrade-"));
+  const appPath = join(directory, "ChatGPT.app");
+  const socketPath = join(directory, "ipc.sock");
+  await writeDesktopVersion(appPath, "26.730.61639");
+  let connectionCount = 0;
+  let serverSocket;
+  const server = createServer((socket) => {
+    connectionCount += 1;
+    serverSocket = socket;
+    readOwnerFrames(socket, (message) => {
+      if (message.type === "request" && message.method === "initialize") {
+        writeOwnerFrame(socket, {
+          type: "response",
+          requestId: message.requestId,
+          resultType: "success",
+          method: "initialize",
+          result: { clientId: `client-${connectionCount}` },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  await chmod(socketPath, 0o600);
+  const timers = controllableTimers();
+  const client = new DesktopOwnerIpcClient({
+    env: {
+      CODEX_DESKTOP_OWNER_IPC_ENABLED: "true",
+      CODEX_DESKTOP_APP_PATH: appPath,
+      CODEX_DESKTOP_IPC_SOCKET: socketPath,
+      CODEX_DESKTOP_IPC_RECONNECT_DELAY_MS: "100",
+    },
+    timers,
+    logger: { error() {} },
+  });
+  await client.start({ threadId: "thread-1" });
+  assert.equal(connectionCount, 1);
+
+  serverSocket.destroy();
+  await waitFor(() => client.socket === null);
+  await writeDesktopVersion(appPath, "99.0.0");
+  timers.fireFirst(100);
+  await waitFor(() => client.featureEnabled === false);
+  assert.equal(connectionCount, 1);
+  await assert.rejects(
+    () =>
+      client.startTurn({
+        threadId: "thread-1",
+        envelope: deliveryRequest().envelope,
+        deliveryId: "delivery-after-upgrade",
+      }),
+    /feature is disabled/,
+  );
+
+  await client.stop();
+  await new Promise((resolve) => server.close(resolve));
+});
+
+test("Desktop owner IPC revalidates socket mode on restart before opening a new peer", async (t) => {
+  if (process.platform !== "darwin") return t.skip("Desktop owner IPC is macOS-only");
+  const directory = await mkdtemp(join(tmpdir(), "aichat-owner-restart-"));
+  const appPath = join(directory, "ChatGPT.app");
+  const socketPath = join(directory, "ipc.sock");
+  await writeDesktopVersion(appPath, "26.730.61639");
+  let connectionCount = 0;
+  let serverSocket;
+  const server = createServer((socket) => {
+    connectionCount += 1;
+    serverSocket = socket;
+    readOwnerFrames(socket, (message) => {
+      if (message.type === "request" && message.method === "initialize") {
+        writeOwnerFrame(socket, {
+          type: "response",
+          requestId: message.requestId,
+          resultType: "success",
+          method: "initialize",
+          result: { clientId: `client-${connectionCount}` },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  await chmod(socketPath, 0o600);
+  const timers = controllableTimers();
+  const client = new DesktopOwnerIpcClient({
+    env: {
+      CODEX_DESKTOP_OWNER_IPC_ENABLED: "true",
+      CODEX_DESKTOP_APP_PATH: appPath,
+      CODEX_DESKTOP_IPC_SOCKET: socketPath,
+      CODEX_DESKTOP_IPC_RECONNECT_DELAY_MS: "100",
+    },
+    timers,
+    logger: { error() {} },
+  });
+  await client.start({ threadId: "thread-1" });
+  serverSocket.destroy();
+  await waitFor(() => client.socket === null);
+
+  await chmod(socketPath, 0o666);
+  await assert.rejects(
+    () =>
+      client.startTurn({
+        threadId: "thread-1",
+        envelope: deliveryRequest().envelope,
+        deliveryId: "delivery-insecure-socket",
+      }),
+    (error) => error.outcome === "pre-send",
+  );
+  assert.equal(connectionCount, 1);
+
+  await chmod(socketPath, 0o600);
+  await client.start({ threadId: "thread-1" });
+  assert.equal(connectionCount, 2);
+  await client.stop();
+  serverSocket?.destroy();
+  await new Promise((resolve) => server.close(resolve));
+});
+
 test("Desktop owner IPC classifies a post-write start timeout as ambiguous", async (t) => {
   if (process.platform !== "darwin") return t.skip("Desktop owner IPC is macOS-only");
   const directory = await mkdtemp(join(tmpdir(), "aichat-owner-timeout-"));
@@ -676,9 +1211,9 @@ test("model-declared reply parser and format require deliberate structured outpu
   assert.equal(parseModelDeclaredReply('{"aichat_reply":null}'), null);
   assert.deepEqual(
     parseModelDeclaredReply(
-      '{"aichat_reply":{"text":"ok","message_type":"text","references":[]}}',
+      '{"aichat_reply":{"text":"ok","message_type":"result","references":[]}}',
     ),
-    { text: "ok", messageType: "text", references: [] },
+    { text: "ok", messageType: "result", references: [] },
   );
   assert.match(withReplyContract("remote envelope"), /not an independent authorization boundary/);
 });
@@ -726,6 +1261,34 @@ function acceptedRecord(overrides = {}) {
   });
 }
 
+function blockedCompletedRecord(index) {
+  const suffix = String(index).padStart(4, "0");
+  const deliveryId = `blocked-delivery-${suffix}`;
+  const sourceMessageId = `blocked-message-${suffix}`;
+  const turnId = `blocked-turn-${suffix}`;
+  return acceptedRecord({
+    deliveryId,
+    sourceMessageId,
+    turnId,
+    phase: "completed",
+    completionStatus: "completed",
+    outboundEvent: {
+      systemGenerated: true,
+      eventId: `app-server-status-${createHash("sha256").update(deliveryId).digest("hex")}`,
+      threadId: "thread-1",
+      hostId: null,
+      sourceMessageId,
+      deliveryId,
+      text: JSON.stringify({ status: "blocked" }),
+      messageType: "status",
+      references: [],
+    },
+    outboundDelivered: false,
+    outboundBlocked: true,
+    connectorCheckpointed: true,
+  });
+}
+
 function completedTurn(turnId, envelope, replyText) {
   return {
     id: turnId,
@@ -765,6 +1328,56 @@ function memoryReceiptStore(initial = { records: [] }, options = {}) {
   };
 }
 
+function acknowledgementRaceHarness() {
+  let childProcess;
+  let turnStarted = false;
+  const process = fakeAppServer((message, child) => {
+    childProcess = child;
+    if (message.method === "initialize") child.respond(message.id, {});
+    else if (message.method === "thread/resume") {
+      child.respond(message.id, { thread: { id: "thread-1" } });
+    } else if (message.method === "turn/start") {
+      turnStarted = true;
+      child.respond(message.id, { turn: { id: "turn-race", status: "inProgress" } });
+    }
+  });
+  const store = memoryReceiptStore();
+  const outbound = [];
+  const driver = new AppServerDriver({
+    binding,
+    env: {},
+    spawnImpl: () => process,
+    receiptStore: store,
+    logger: { error() {} },
+  });
+  return {
+    driver,
+    store,
+    outbound,
+    complete() {
+      assert.equal(turnStarted, true);
+      childProcess.notify("item/completed", {
+        threadId: "thread-1",
+        turnId: "turn-race",
+        item: {
+          type: "agentMessage",
+          text: JSON.stringify({
+            aichat_reply: {
+              text: "Race result",
+              message_type: "result",
+              references: [],
+            },
+          }),
+        },
+      });
+      childProcess.notify("turn/completed", {
+        threadId: "thread-1",
+        turn: { id: "turn-race", status: "completed" },
+      });
+    },
+  };
+}
+
 function controllableTimers() {
   let nextId = 1;
   const entries = new Map();
@@ -784,6 +1397,24 @@ function controllableTimers() {
       match[1].fn();
     },
   };
+}
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+async function writeDesktopVersion(appPath, version) {
+  await mkdir(join(appPath, "Contents"), { recursive: true });
+  await writeFile(
+    join(appPath, "Contents", "Info.plist"),
+    `<?xml version="1.0"?><plist><dict><key>CFBundleShortVersionString</key><string>${version}</string></dict></plist>`,
+  );
 }
 
 function fakeAppServer(handler) {

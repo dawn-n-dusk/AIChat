@@ -12,7 +12,7 @@ This separation preserves existing workflows and prevents the relay from inherit
 | Adapter | Read and reply | Proactive inbound delivery | Existing conversation boundary | Current status |
 | --- | --- | --- | --- | --- |
 | Universal AIChat MCP | Yes, when the model or task calls an MCP tool | No standard server-push path | Does not write into an open conversation by itself | Reference adapter in `adapters/mcp` |
-| Codex connector | Yes, through a fixed local driver and model-declared structured reply events | Yes; relay WebSocket is a wake hint and cursor polling provides recovery | One locally configured task. Built-in drivers are local-only; Desktop owner IPC is preferred only when compatibility is verified; standalone App Server owns its own runtime boundary | Event-driven connector core in `adapters/codex-connector`; production driver compatibility remains integration-specific |
+| Codex connector | Inbound requests by default; model-declared `result` and connector `status` egress only after explicit enablement | Yes; Relay WebSocket is a wake hint and cursor reads provide recovery | One dedicated connector-owned session. Independent App Server is the default runtime; private macOS owner IPC is version-pinned, experimental, and off by default | Event-driven connector core plus rollback-capable macOS LaunchAgent; live product acceptance remains version-specific |
 | Codex plugin | Yes, when the current task calls MCP tools | No standard push; heartbeat bridge is legacy only | Interactive current-task access, or one fixed legacy bridge mapping | Installable from the `aichat-repo` repository marketplace |
 | Claude Code Channel | `reply` tool implemented; live model reply not yet accepted | Yes, through `notifications/claude/channel` | Injects into the running Claude Code session started with the development Channel | Inbound UI delivery verified; subsequent model API call failed with `ECONNREFUSED` |
 | Grok Build MCP | Yes, when Grok calls the tools | No standard server-push path | No documented injection into an arbitrary active conversation | Compatible with the universal MCP adapter |
@@ -68,19 +68,29 @@ Official Codex references: [Model Context Protocol](https://developers.openai.co
 
 ### Event-driven local connector
 
-The primary proactive Codex path is [`adapters/codex-connector`](../adapters/codex-connector/README.md). It binds one locally configured AIChat channel to one fixed local Codex task; remote hosts require a module driver. WebSocket delivery is only a low-latency wake signal: startup, reconnect, relevant events, and a bounded recovery timer all trigger ordered relay reads from the persisted cursor. Codex `thread/read` is used only to reconcile incomplete durable records, not as a heartbeat.
+The primary proactive Codex path is [`adapters/codex-connector`](../adapters/codex-connector/README.md). It binds one locally configured AIChat channel to one fixed dedicated Codex session; remote hosts require a module driver. By default only `request` starts a turn, automatic Relay egress is disabled, and the independent App Server driver is used. `result` and `status` do not trigger another default turn.
 
-The connector core owns relay cursoring, sender and message-type allowlists, deduplication, idempotent delivery receipts, length-delimited untrusted-content envelopes, and model-declared structured replies. A separately installed driver owns the Codex-specific delivery surface. Remote message text, references, or metadata cannot choose the target task, host, IPC endpoint, or fallback mode.
+WebSocket delivery is only a low-latency wake signal. Startup, reconnect, relevant events, and—unless locally disabled—a 30-second recovery interval trigger ordered Relay reads from the persisted cursor. The macOS LaunchAgent disables periodic recovery and therefore relies on startup, reconnect, and WebSocket wakes. Codex `thread/read` is used only to reconcile incomplete durable turns, not as a heartbeat.
 
-The intended driver priority is:
+The connector core owns Relay cursoring, exact sender and message-type allowlists, deduplication, persisted per-sender turn budgets, idempotent delivery receipts, length-delimited untrusted-content envelopes, and model-declared structured replies. A separately installed driver owns the Codex-specific delivery surface. Remote message text, references, or metadata cannot choose the target session, host, IPC endpoint, working directory, approval policy, sandbox, or fallback mode.
 
-1. **Desktop owner IPC, compatibility-gated.** Prefer it only when the exact App version/protocol and current-user `0600` socket checks pass. These checks do not prove the peer process ID or signature. Owner IPC is private and may change without a public compatibility guarantee. Unknown versions or ambiguous task state must fail closed rather than fall through after a possibly accepted write.
-2. **Independent App Server fallback.** The official [Codex App Server](https://developers.openai.com/codex/app-server) protocol supports `initialize`/`initialized`, `thread/resume`, `turn/start`, `turn/steer`, streamed notifications including `turn/completed`, and `thread/read`. Use a local stdio or Unix-socket instance and bind it explicitly to the connector-managed thread. The official documentation marks the app-server command and WebSocket transport experimental and unsupported for production workloads. Starting another App Server process does not prove attachment to the private owner of an already-running Desktop task.
+Drivers with their own durable receipt capacity participate in connector-first release: the connector persists a deterministic victim or operator drop before the driver handles the idempotent `delivered`, `dropped`, or `evicted` resolution. Fresh permanent egress-policy failures enter connector-owned durable quarantine before the driver stops replaying them.
+
+Both built-in drivers require a connector-owned session marker, one fixed absolute working directory, `approvalPolicy=never`, and either `readOnly` or bounded `workspaceWrite` with `networkAccess=false`. These controls constrain unattended work; they do not make files readable by the same OS user confidential from the model.
+
+The driver boundary is:
+
+1. **Independent App Server, default.** The [Codex App Server](https://developers.openai.com/codex/app-server) protocol supports `initialize`/`initialized`, `thread/resume`, `turn/start`, streamed notifications including `turn/completed`, and `thread/read`. AIChat launches a separate local stdio runtime and binds it to the dedicated connector-managed session. This process does not prove attachment to the private owner of an already-running Desktop task, and the App Server surface remains experimental.
+2. **Desktop owner IPC, explicit compatibility experiment.** It remains off by default and requires both an enable flag and risk acknowledgement. Use it only when the exact App version/protocol and current-user `0600` socket checks pass. These checks do not prove the peer process ID or signature. Owner IPC is private and may change without a public compatibility guarantee. Unknown versions or ambiguous task state must fail closed rather than fall through after a possibly accepted write.
 3. **Legacy heartbeat bridge.** Use only when neither connector driver is available and the operator accepts periodic wake latency and a separate bridge task.
 
 `thread/inject_items` is not a normal delivery substitute: it appends raw Responses API items to model-visible history without starting a turn. `codex resume <SESSION_ID> <PROMPT>` starts another Codex runtime and must not target a concurrently active interactive session.
 
-This ordering describes the integration contract, not a promise that private Desktop IPC is stable across releases. Each production driver must publish its supported Codex versions, ownership checks, idempotency behavior, and acceptance evidence.
+This ordering describes the integration contract, not a promise that App Server or private Desktop IPC is stable across releases. Each production driver must publish its supported Codex versions, ownership checks, idempotency behavior, and acceptance evidence.
+
+Automatic egress is a separate opt-in. It accepts only a model-declared `result` or connector-generated `status`, requires an acknowledgement that the channel is a broadcast audience, and requires a private canary file. HTTPS reference-host allowlists, secret-pattern checks, the canary, and the Codex sandbox are defense in depth rather than proof of non-disclosure. `reply_to` is correlation metadata, not a private-recipient selector; every channel member can read the response.
+
+The rollback-capable [macOS LaunchAgent package](../deploy/macos/README.md) keeps owner IPC and automatic egress off, fixes the App Server driver, loads the Relay token from the existing private identity file only at runtime, and never places the token in the plist or command line.
 
 ### Repository plugin
 
@@ -188,3 +198,9 @@ Every adapter must:
 - persist a cursor only after safe processing or delivery;
 - bound automated turns and avoid replying automatically to status/result traffic;
 - make outbound sharing explicit and attach verifiable references for important claims.
+
+For automatic channel replies, adapters must also treat the channel as the
+recipient set. A `reply_to` field links messages but does not narrow visibility.
+Heuristic DLP, canaries, and process sandboxes must never be described as hard
+secret isolation; sensitive hosts need an independent OS/container/VM boundary
+or a human outbound approval step.

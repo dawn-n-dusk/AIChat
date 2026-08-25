@@ -20,6 +20,11 @@ export function assertCodexDriver(driver) {
       throw new Error(`Codex driver is missing ${method}()`);
     }
   }
+  for (const method of ["acknowledgeDelivery", "resolveDelivery"]) {
+    if (driver[method] != null && typeof driver[method] !== "function") {
+      throw new Error(`Codex driver optional ${method} must be a function when provided`);
+    }
+  }
   return driver;
 }
 

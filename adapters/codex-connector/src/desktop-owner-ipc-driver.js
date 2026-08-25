@@ -87,13 +87,25 @@ export class DesktopOwnerIpcClient {
     this.logger = logger;
     this.connectImpl = connectImpl ?? connect;
     this.timers = timers;
-    this.featureEnabled = parseBoolean(env.CODEX_DESKTOP_OWNER_IPC_ENABLED, true);
-    this.expectedVersion =
-      env.CODEX_DESKTOP_EXPECTED_VERSION?.trim() || SUPPORTED_DESKTOP_VERSION;
+    this.featureEnabled = parseBoolean(env.CODEX_DESKTOP_OWNER_IPC_ENABLED, false);
+    const expectedVersionOverride = env.CODEX_DESKTOP_EXPECTED_VERSION?.trim() || null;
+    if (
+      expectedVersionOverride &&
+      expectedVersionOverride !== SUPPORTED_DESKTOP_VERSION &&
+      !parseBoolean(env.CODEX_DESKTOP_DEVELOPMENT_OVERRIDE_ACK, false)
+    ) {
+      throw new Error(
+        "CODEX_DESKTOP_EXPECTED_VERSION override requires CODEX_DESKTOP_DEVELOPMENT_OVERRIDE_ACK=true",
+      );
+    }
+    this.expectedVersion = expectedVersionOverride || SUPPORTED_DESKTOP_VERSION;
     this.appPath = env.CODEX_DESKTOP_APP_PATH?.trim() || "/Applications/ChatGPT.app";
     this.socketPath =
       env.CODEX_DESKTOP_IPC_SOCKET?.trim() || join(homedir(), ".codex", "ipc", "ipc.sock");
     this.hostId = env.CODEX_DESKTOP_OWNER_HOST_ID?.trim() || "local";
+    this.cwd = env.CODEX_APP_SERVER_CWD?.trim() || null;
+    this.approvalPolicy = env.CODEX_APP_SERVER_APPROVAL_POLICY?.trim() || null;
+    this.sandboxPolicy = parseOptionalJson(env.CODEX_APP_SERVER_SANDBOX_POLICY_JSON);
     this.maxFrameBytes = integerSetting(
       env.CODEX_DESKTOP_IPC_MAX_FRAME_BYTES,
       DEFAULT_MAX_FRAME_BYTES,
@@ -147,7 +159,6 @@ export class DesktopOwnerIpcClient {
       return;
     }
     try {
-      await this.#verifyDesktopBuild();
       await this.#ensureConnected();
     } catch {
       this.logger.error(
@@ -181,6 +192,9 @@ export class DesktopOwnerIpcClient {
             clientUserMessageId: deliveryId,
             outputSchema: REPLY_OUTPUT_SCHEMA,
             responsesapiClientMetadata: { aichat_delivery_id: deliveryId },
+            cwd: this.cwd,
+            approvalPolicy: this.approvalPolicy,
+            sandboxPolicy: this.sandboxPolicy,
           },
         },
         { version: START_TURN_VERSION, timeoutMs: this.requestTimeoutMs },
@@ -236,6 +250,7 @@ export class DesktopOwnerIpcClient {
   }
 
   async #connectAndInitialize() {
+    await this.#verifyDesktopBuild();
     await validateSocket(this.socketPath);
     const socket = await new Promise((resolve, reject) => {
       let settled = false;
@@ -258,6 +273,15 @@ export class DesktopOwnerIpcClient {
       this.#dropConnection("Desktop owner IPC connection closed");
       this.#scheduleReconnect();
     });
+    try {
+      // Re-check after connect to close the path-replacement and in-place upgrade window
+      // before any private-protocol frame is sent to the new peer.
+      await this.#verifyDesktopBuild();
+      await validateSocket(this.socketPath);
+    } catch (error) {
+      this.#dropConnection("Desktop owner IPC connection prerequisites changed");
+      throw error;
+    }
     let response;
     try {
       response = await this.#request(
@@ -534,6 +558,7 @@ export class DesktopOwnerIpcClient {
     if (this.stopped || !this.featureEnabled || this.reconnectTimer) return;
     this.reconnectTimer = this.timers.setTimeout(() => {
       this.reconnectTimer = null;
+      if (this.stopped || !this.featureEnabled) return;
       this.#ensureConnected().catch(() => this.#scheduleReconnect());
     }, this.reconnectDelayMs);
   }
@@ -599,6 +624,19 @@ function parseBoolean(value, fallback) {
   if (normalized === "true") return true;
   if (normalized === "false") return false;
   throw new Error("CODEX_DESKTOP_OWNER_IPC_ENABLED must be true or false");
+}
+
+function parseOptionalJson(value) {
+  if (value == null || value.trim() === "") return null;
+  try {
+    const parsed = JSON.parse(value);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error("policy must be an object");
+    }
+    return parsed;
+  } catch {
+    throw new Error("CODEX_APP_SERVER_SANDBOX_POLICY_JSON must be valid object JSON");
+  }
 }
 
 function integerSetting(value, fallback, minimum, maximum, name) {

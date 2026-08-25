@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { EventEmitter } from "node:events";
+import { PassThrough, Writable } from "node:stream";
 import test from "node:test";
 
+import { AppServerDriver } from "../src/app-server-driver.js";
 import { AIChatCodexConnector, toCodexEnvelope } from "../src/connector.js";
 import { MockCodexDriver } from "../src/mock-driver.js";
 
@@ -26,6 +30,9 @@ function emptyState(overrides = {}) {
     outboundSeenIds: [],
     receipts: [],
     pendingOutbound: null,
+    pendingStatuses: [],
+    blockedOutbound: [],
+    turnBudget: [],
     ...overrides,
   };
 }
@@ -49,6 +56,7 @@ function harness(items, options = {}) {
       sendCalls += 1;
       sent.push(structuredClone(payload));
       if (options.failSendCalls?.includes(sendCalls)) throw new Error(`relay send ${sendCalls}`);
+      if (options.sendGate) await options.sendGate.promise;
       return { id: options.outboundId ?? "outbound-1" };
     },
   };
@@ -71,6 +79,14 @@ function harness(items, options = {}) {
     allowedSenderIds: new Set(["agent-remote"]),
     deliverTypes: new Set(["text", "request"]),
     pageLimit: options.pageLimit ?? 50,
+    maxDeliveriesPerRecovery: options.maxDeliveriesPerRecovery ?? 20,
+    maxTurnsPerSenderPerHour: options.maxTurnsPerSenderPerHour ?? 10,
+    autoReplyEnabled: options.autoReplyEnabled ?? true,
+    lifecycleStatusEnabled: options.lifecycleStatusEnabled ?? false,
+    egressAudienceAcknowledged: true,
+    egressAllowedReferenceHosts: new Set(["github.com", "example.test"]),
+    egressMaxTextBytes: 8_192,
+    egressCanary: options.egressCanary ?? "connector-test-canary-value",
   };
   const connector = new AIChatCodexConnector({
     config,
@@ -128,13 +144,13 @@ test("driver rejection leaves the deliverable cursor unchanged", async () => {
   await ctx.connector.initialize();
   await assert.rejects(() => ctx.connector.recoverPage(), /target unavailable/);
   assert.equal(ctx.connector.status().cursor, null);
-  assert.equal(ctx.saves.length, 0);
+  assert.equal(ctx.saves.length, 1);
 });
 
 test("stable delivery ID lets a driver deduplicate retry after checkpoint failure", async () => {
-  const ctx = harness([relayMessage()], { failSaveCalls: [1] });
+  const ctx = harness([relayMessage()], { failSaveCalls: [2] });
   await ctx.connector.initialize();
-  await assert.rejects(() => ctx.connector.recoverPage(), /state save 1/);
+  await assert.rejects(() => ctx.connector.recoverPage(), /state save 2/);
   assert.equal(ctx.driver.deliveries.length, 1);
   assert.equal(ctx.connector.status().cursor, null);
 
@@ -213,11 +229,11 @@ test("relay failure persists pending outbound and retries without another driver
 });
 
 test("post-send checkpoint failure repeats only the stable relay send", async () => {
-  const ctx = harness([relayMessage()], { failSaveCalls: [3] });
+  const ctx = harness([relayMessage()], { failSaveCalls: [4] });
   await ctx.connector.initialize();
   await ctx.connector.recoverPage();
   const event = outboundEvent(ctx.connector.getDeliveryReceipt("message-1"));
-  await assert.rejects(() => ctx.connector.handleOutboundReply(event), /state save 3/);
+  await assert.rejects(() => ctx.connector.handleOutboundReply(event), /state save 4/);
   assert.equal(ctx.sent.length, 1);
   assert.equal(ctx.connector.status().pendingOutboundEventId, event.eventId);
 
@@ -227,32 +243,53 @@ test("post-send checkpoint failure repeats only the stable relay send", async ()
   assert.equal(ctx.connector.getDeliveryReceipt("message-1").replied, true);
 });
 
-test("outbound DLP blocks the exact relay token in text or references before relay send", async () => {
-  const token = "relay-secret-value";
-  const ctx = harness([relayMessage()], { token });
+test("receipt event identity deduplicates replay after outboundSeenIds eviction", async () => {
+  const receipt = {
+    sourceMessageId: "message-1",
+    deliveryId: "delivery-1",
+    senderId: "agent-remote",
+    hopCount: 0,
+    replied: true,
+    outboundMessageId: "outbound-stable",
+    acceptedAt: "2026-08-24T00:00:00Z",
+    outboundEventId: "driver-event-1",
+    driverReleasePending: null,
+  };
+  const ctx = harness([], {
+    initialState: {
+      receipts: [receipt],
+      outboundSeenIds: Array.from({ length: 1_000 }, (_, index) => `newer-event-${index}`),
+    },
+  });
   await ctx.connector.initialize();
-  await ctx.connector.recoverPage();
-  const receipt = ctx.connector.getDeliveryReceipt("message-1");
-
-  await assert.rejects(
-    () => ctx.connector.handleOutboundReply(outboundEvent(receipt, { text: `leak ${token}` })),
-    (error) => error.code === "AICHAT_OUTBOUND_DLP" && !error.message.includes(token),
-  );
-  await assert.rejects(
-    () =>
-      ctx.connector.handleOutboundReply(
-        outboundEvent(receipt, {
-          eventId: "driver-event-2",
-          references: [`https://example.test/?credential=${token}`],
-        }),
-      ),
-    (error) => error.code === "AICHAT_OUTBOUND_DLP" && !error.message.includes(token),
-  );
+  const result = await ctx.connector.handleOutboundReply(outboundEvent(receipt));
+  assert.deepEqual(result, { duplicate: true, outboundMessageId: "outbound-stable" });
   assert.equal(ctx.sent.length, 0);
-  assert.equal(ctx.connector.status().pendingOutboundEventId, null);
 });
 
-test("outbound DLP also blocks a persisted pending reply from an older connector run", async () => {
+test("outbound DLP blocks the exact relay token in text or references before relay send", async () => {
+  const token = "relay-secret-value";
+  for (const overrides of [
+    { text: `leak ${token}` },
+    {
+      references: [`https://example.test/?credential=${token}`],
+    },
+  ]) {
+    const ctx = harness([relayMessage()], { token });
+    await ctx.connector.initialize();
+    await ctx.connector.recoverPage();
+    const receipt = ctx.connector.getDeliveryReceipt("message-1");
+    const result = await ctx.connector.handleOutboundReply(outboundEvent(receipt, overrides));
+    assert.equal(result.blocked, true);
+    assert.equal(result.eventId, "driver-event-1");
+    assert.equal(ctx.sent.length, 0);
+    assert.equal(ctx.connector.status().pendingOutboundEventId, null);
+    assert.equal(ctx.connector.status().blockedOutboundCount, 1);
+    assert.equal(ctx.connector.listBlockedOutbound()[0].reasonCode, "AICHAT_OUTBOUND_DLP");
+  }
+});
+
+test("outbound DLP quarantines a persisted pending reply without wedging recovery", async () => {
   const token = "persisted-relay-secret";
   const pendingOutbound = {
     eventId: "old-event",
@@ -260,18 +297,106 @@ test("outbound DLP also blocks a persisted pending reply from an older connector
     deliveryId: "delivery-1",
     channelId: "channel-1",
     text: `must not send ${token}`,
-    messageType: "text",
+    messageType: "result",
     references: [],
     hopCount: 1,
     idempotencyKey: "old-key",
   };
-  const ctx = harness([], { token, initialState: { pendingOutbound } });
+  const receipt = {
+    sourceMessageId: "message-1",
+    deliveryId: "delivery-1",
+    senderId: "agent-remote",
+    hopCount: 0,
+    replied: false,
+    outboundMessageId: null,
+    acceptedAt: "2026-08-24T00:00:00Z",
+  };
+  const ctx = harness([relayMessage({ id: "message-2" })], {
+    token,
+    initialState: { pendingOutbound, receipts: [receipt] },
+  });
   await ctx.connector.initialize();
-  await assert.rejects(
-    () => ctx.connector.flushPendingOutbound(),
-    (error) => error.code === "AICHAT_OUTBOUND_DLP" && !error.message.includes(token),
-  );
+  const result = await ctx.connector.requestRecovery();
+  assert.equal(result, 1);
   assert.equal(ctx.sent.length, 0);
+  assert.equal(ctx.connector.status().pendingOutboundEventId, null);
+  assert.equal(ctx.connector.status().blockedOutboundCount, 1);
+  assert.equal(ctx.connector.listBlockedOutbound()[0].reasonCode, "AICHAT_OUTBOUND_DLP");
+  assert.equal(ctx.driver.deliveries.length, 1);
+  assert.equal(ctx.driver.deliveries[0].sourceMessageId, "message-2");
+
+  ctx.connector.config.token = "rotated-relay-secret";
+  await assert.rejects(
+    () => ctx.connector.retryBlockedOutbound("old-event"),
+    /acknowledgeRelease=true/,
+  );
+  await ctx.connector.retryBlockedOutbound("old-event", { acknowledgeRelease: true });
+  assert.equal(ctx.sent.length, 1);
+  assert.equal(ctx.connector.status().blockedOutboundCount, 0);
+  assert.equal(ctx.connector.getDeliveryReceipt("message-1").replied, true);
+});
+
+test("operator drop of a quarantined result is explicit and releases its receipt", async () => {
+  const pendingOutbound = {
+    eventId: "disabled-event",
+    sourceMessageId: "message-1",
+    deliveryId: "delivery-1",
+    channelId: "channel-1",
+    text: "safe but disabled",
+    messageType: "result",
+    references: [],
+    hopCount: 1,
+    idempotencyKey: "disabled-key",
+  };
+  const receipt = {
+    sourceMessageId: "message-1",
+    deliveryId: "delivery-1",
+    senderId: "agent-remote",
+    hopCount: 0,
+    replied: false,
+    outboundMessageId: null,
+    acceptedAt: "2026-08-24T00:00:00Z",
+  };
+  const ctx = harness([], {
+    autoReplyEnabled: false,
+    initialState: { pendingOutbound, receipts: [receipt] },
+  });
+  await ctx.connector.initialize();
+  await ctx.connector.flushPendingOutbound();
+  await assert.rejects(
+    () => ctx.connector.dropBlockedOutbound("disabled-event"),
+    /acknowledgeLoss=true/,
+  );
+  assert.equal(
+    await ctx.connector.dropBlockedOutbound("disabled-event", { acknowledgeLoss: true }),
+    true,
+  );
+  assert.equal(ctx.connector.status().blockedOutboundCount, 0);
+  assert.equal(ctx.connector.getDeliveryReceipt("message-1"), null);
+});
+
+test("persisted lifecycle status is quarantined independently and does not block inbound work", async () => {
+  const pendingStatus = {
+    eventId: "old-status",
+    sourceMessageId: "old-message",
+    deliveryId: "old-delivery",
+    channelId: "channel-1",
+    text: JSON.stringify({ status: "running" }),
+    messageType: "status",
+    references: [],
+    hopCount: 1,
+    idempotencyKey: "old-status-key",
+  };
+  const ctx = harness([relayMessage({ id: "new-message" })], {
+    autoReplyEnabled: false,
+    initialState: { pendingStatuses: [pendingStatus] },
+  });
+  await ctx.connector.initialize();
+  assert.equal(await ctx.connector.requestRecovery(), 1);
+  assert.equal(ctx.connector.status().pendingStatusCount, 0);
+  assert.equal(ctx.connector.status().blockedOutboundCount, 1);
+  assert.equal(ctx.connector.listBlockedOutbound()[0].eventId, "old-status");
+  assert.equal(ctx.driver.deliveries.length, 1);
 });
 
 test("toCodexEnvelope length-delimits one-line JSON so remote marker text cannot escape", () => {
@@ -299,6 +424,335 @@ test("toCodexEnvelope length-delimits one-line JSON so remote marker text cannot
   assert.equal(Buffer.byteLength(lines[start + 1], "utf8"), declaredBytes);
 });
 
+test("concurrent inbound checkpoint and outbound completion preserve both transitions", async () => {
+  const gate = deferred();
+  const initialReceipt = {
+    sourceMessageId: "message-1",
+    deliveryId: "delivery-existing",
+    senderId: "agent-remote",
+    hopCount: 0,
+    replied: false,
+    outboundMessageId: null,
+    acceptedAt: "2026-08-24T00:00:00Z",
+  };
+  const ctx = harness([relayMessage({ id: "message-2", type: "status" })], {
+    sendGate: gate,
+    initialState: {
+      cursor: "message-1",
+      seenIds: ["message-1"],
+      receipts: [initialReceipt],
+    },
+    respectCursor: false,
+  });
+  await ctx.connector.initialize();
+  const outbound = ctx.connector.handleOutboundReply(
+    outboundEvent(initialReceipt, { deliveryId: "delivery-existing" }),
+  );
+  await waitFor(() => ctx.sent.length === 1);
+  await ctx.connector.recoverPage();
+  gate.resolve();
+  await outbound;
+  assert.equal(ctx.connector.status().cursor, "message-2");
+  assert.equal(ctx.connector.getDeliveryReceipt("message-1").replied, true);
+});
+
+test("default request-result exchange produces no second automatic turn", async () => {
+  const first = harness([relayMessage()]);
+  await first.connector.initialize();
+  await first.connector.recoverPage();
+  const receipt = first.connector.getDeliveryReceipt("message-1");
+  await first.connector.handleOutboundReply(outboundEvent(receipt));
+  const resultMessage = relayMessage({
+    id: "result-1",
+    sender_id: "agent-remote",
+    type: "result",
+    text: first.sent.at(-1).text,
+    reply_to: "message-1",
+    hop_count: 1,
+  });
+  const peer = harness([resultMessage]);
+  peer.connector.config.deliverTypes = new Set(["request"]);
+  await peer.connector.initialize();
+  await peer.connector.recoverPage();
+  assert.equal(first.driver.deliveries.length, 1);
+  assert.equal(peer.driver.deliveries.length, 0);
+});
+
+test("startup re-acknowledges connector receipts after a commit-before-driver-ack crash", async () => {
+  const driver = new MockCodexDriver();
+  const acknowledged = [];
+  driver.acknowledgeDelivery = async (deliveryId) => acknowledged.push(deliveryId);
+  const receipt = {
+    sourceMessageId: "message-1",
+    deliveryId: "delivery-after-crash",
+    senderId: "agent-remote",
+    hopCount: 0,
+    replied: false,
+    outboundMessageId: null,
+    acceptedAt: "2026-08-24T00:00:00Z",
+  };
+  const ctx = harness([], {
+    driver,
+    initialState: {
+      cursor: "message-1",
+      seenIds: ["message-1"],
+      receipts: [receipt],
+    },
+  });
+  await ctx.connector.initialize();
+  assert.deepEqual(acknowledged, ["delivery-after-crash"]);
+});
+
+test("receipt capacity backpressures before starting a new turn when nothing is safely replied", async () => {
+  const receipts = Array.from({ length: 1_000 }, (_, index) => ({
+    sourceMessageId: `old-${index}`,
+    deliveryId: `delivery-${index}`,
+    senderId: "agent-remote",
+    hopCount: 0,
+    replied: false,
+    outboundMessageId: null,
+    acceptedAt: "2026-08-24T00:00:00Z",
+  }));
+  const ctx = harness([relayMessage({ id: "new-message" })], {
+    initialState: { receipts },
+  });
+  await ctx.connector.initialize();
+  await assert.rejects(
+    () => ctx.connector.recoverPage(),
+    (error) => error.code === "AICHAT_RECEIPT_CAPACITY",
+  );
+  assert.equal(ctx.driver.deliveries.length, 0);
+  assert.equal(ctx.connector.status().cursor, null);
+});
+
+test("1000 out-of-order completed receipts evict the same identity across connector and driver", async () => {
+  const driverRecords = Array.from({ length: 1_000 }, (_, index) =>
+    completedDriverRecord(index),
+  );
+  const connectorReceipts = driverRecords.map((record) => ({
+    sourceMessageId: record.sourceMessageId,
+    deliveryId: record.deliveryId,
+    senderId: "agent-remote",
+    hopCount: 0,
+    replied: true,
+    outboundMessageId: `outbound-${record.deliveryId}`,
+    acceptedAt: record.acceptedAt,
+    outboundEventId: record.outboundEvent.eventId,
+    driverReleasePending: null,
+  }));
+  [connectorReceipts[0], connectorReceipts[1]] = [connectorReceipts[1], connectorReceipts[0]];
+
+  const process = fakeAppServer((message, child) => {
+    if (message.method === "initialize") child.respond(message.id, {});
+    else if (message.method === "thread/resume") {
+      child.respond(message.id, { thread: { id: "thread-1" } });
+    } else if (message.method === "turn/start") {
+      child.respond(message.id, { turn: { id: "turn-new-capacity", status: "inProgress" } });
+    }
+  });
+  const driverStore = memoryDriverReceiptStore({ records: driverRecords });
+  const driver = new AppServerDriver({
+    binding: { channelId: "channel-1", threadId: "thread-1", hostId: null },
+    env: {},
+    spawnImpl: () => process,
+    receiptStore: driverStore,
+    logger: { error() {} },
+  });
+  const ctx = harness([relayMessage({ id: "new-capacity-message" })], {
+    driver,
+    initialState: { receipts: connectorReceipts },
+  });
+
+  await ctx.connector.initialize();
+  await ctx.connector.recoverPage();
+  await ctx.connector.requestRecovery();
+
+  const evictedSource = "legacy-message-0000";
+  const retainedSource = "legacy-message-0001";
+  assert.equal(ctx.connector.getDeliveryReceipt(evictedSource), null);
+  assert.ok(ctx.connector.getDeliveryReceipt(retainedSource));
+  assert.equal(
+    driverStore.state.records.some((record) => record.sourceMessageId === evictedSource),
+    false,
+  );
+  assert.equal(
+    driverStore.state.records.some((record) => record.sourceMessageId === retainedSource),
+    true,
+  );
+  assert.equal(ctx.connector.status().deliveryReceiptCount, 1_000);
+  assert.equal(driverStore.state.records.length, 1_000);
+  await ctx.connector.stop();
+});
+
+for (const failureMode of ["before_driver_resolve", "after_driver_resolve"]) {
+  test(`capacity release survives restart ${failureMode}`, async () => {
+    const receipts = capacityReceipts(1_000, { replied: true });
+    const durableDriverIds = new Set(receipts.map((receipt) => receipt.deliveryId));
+    const firstDriver = new CapacityHandshakeDriver(durableDriverIds, {
+      failEvictOnce: failureMode === "before_driver_resolve",
+    });
+    const first = harness([relayMessage({ id: "capacity-crash-message" })], {
+      driver: firstDriver,
+      initialState: { receipts },
+      ...(failureMode === "after_driver_resolve" ? { failSaveCalls: [2] } : {}),
+    });
+    await first.connector.initialize();
+    await assert.rejects(() => first.connector.recoverPage());
+    const crashState = first.saves.at(-1);
+    assert.ok(crashState);
+    assert.equal(
+      crashState.receipts.find((receipt) => receipt.sourceMessageId === "capacity-message-0000")
+        ?.driverReleasePending,
+      "evicted",
+    );
+    await first.connector.stop();
+
+    const secondDriver = new CapacityHandshakeDriver(durableDriverIds);
+    const second = harness([relayMessage({ id: "capacity-crash-message" })], {
+      driver: secondDriver,
+      initialState: crashState,
+    });
+    await second.connector.initialize();
+    await second.connector.requestRecovery();
+    assert.equal(second.connector.getDeliveryReceipt("capacity-message-0000"), null);
+    assert.ok(second.connector.getDeliveryReceipt("capacity-crash-message"));
+    assert.equal(second.connector.status().deliveryReceiptCount, 1_000);
+    assert.equal(durableDriverIds.size, 1_000);
+    await second.connector.stop();
+  });
+}
+
+test("dropping one of 1000 visible quarantines releases driver capacity for message 1001", async () => {
+  const receipts = capacityReceipts(1_000, { replied: false });
+  const blockedOutbound = receipts.map((receipt, index) => ({
+    eventId: receipt.outboundEventId,
+    sourceMessageId: receipt.sourceMessageId,
+    deliveryId: receipt.deliveryId,
+    channelId: "channel-1",
+    text: `blocked result ${index}`,
+    messageType: "result",
+    references: [],
+    hopCount: 1,
+    idempotencyKey: `blocked-key-${index}`,
+    blockedAt: "2026-08-24T00:00:00.000Z",
+    reasonCode: "AICHAT_OUTBOUND_DLP",
+  }));
+  const durableDriverIds = new Set(receipts.map((receipt) => receipt.deliveryId));
+  const driver = new CapacityHandshakeDriver(durableDriverIds);
+  const ctx = harness([relayMessage({ id: "message-1001" })], {
+    driver,
+    initialState: { receipts, blockedOutbound },
+  });
+  await ctx.connector.initialize();
+  await ctx.connector.dropBlockedOutbound("capacity-event-0000", {
+    acknowledgeLoss: true,
+  });
+  await ctx.connector.requestRecovery();
+  assert.equal(ctx.connector.status().blockedOutboundCount, 999);
+  assert.equal(ctx.connector.status().deliveryReceiptCount, 1_000);
+  assert.ok(ctx.connector.getDeliveryReceipt("message-1001"));
+  assert.equal(durableDriverIds.size, 1_000);
+  await ctx.connector.stop();
+});
+
+test("lifecycle statuses are structured, correlated, and never delivered as a new default turn", async () => {
+  const ctx = harness([relayMessage()], { lifecycleStatusEnabled: true });
+  await ctx.connector.initialize();
+  await ctx.connector.recoverPage();
+  assert.deepEqual(ctx.sent.map((item) => item.messageType), ["status", "status"]);
+  assert.deepEqual(
+    ctx.sent.map((item) => JSON.parse(item.text).status),
+    ["accepted", "running"],
+  );
+  assert.ok(ctx.sent.every((item) => item.replyTo === "message-1"));
+  assert.ok(
+    ctx.sent.every(
+      (item) => JSON.parse(item.text).correlation.source_message_id === "message-1",
+    ),
+  );
+});
+
+test("retryable driver rejection emits blocked status without advancing the cursor", async () => {
+  const driver = new MockCodexDriver();
+  driver.deliver = async () => {
+    const error = new Error("target unavailable");
+    error.outcome = "rejected";
+    throw error;
+  };
+  const ctx = harness([relayMessage()], { driver, lifecycleStatusEnabled: true });
+  await ctx.connector.initialize();
+  await assert.rejects(() => ctx.connector.recoverPage(), /target unavailable/);
+  assert.equal(ctx.sent.length, 1);
+  assert.equal(ctx.sent[0].messageType, "status");
+  assert.equal(JSON.parse(ctx.sent[0].text).status, "blocked");
+  assert.equal(ctx.connector.status().cursor, null);
+});
+
+test("persisted per-sender hourly budget blocks the next turn after restart", async () => {
+  const recent = new Date().toISOString();
+  const ctx = harness([relayMessage({ id: "over-budget" })], {
+    maxTurnsPerSenderPerHour: 2,
+    lifecycleStatusEnabled: true,
+    initialState: {
+      turnBudget: [
+        { messageId: "old-1", senderId: "agent-remote", startedAt: recent },
+        { messageId: "old-2", senderId: "agent-remote", startedAt: recent },
+      ],
+    },
+  });
+  await ctx.connector.initialize();
+  await ctx.connector.recoverPage();
+  assert.equal(ctx.driver.deliveries.length, 0);
+  assert.equal(ctx.connector.status().cursor, "over-budget");
+  assert.equal(ctx.sent.length, 1);
+  assert.equal(JSON.parse(ctx.sent[0].text).status, "blocked");
+  assert.equal(JSON.parse(ctx.sent[0].text).reason, "sender_turn_budget");
+});
+
+test("lifecycle status retries the same relay idempotency key after checkpoint failure", async () => {
+  const ctx = harness([relayMessage()], {
+    lifecycleStatusEnabled: true,
+    failSaveCalls: [4],
+  });
+  await ctx.connector.initialize();
+  await assert.rejects(() => ctx.connector.recoverPage(), /state save 4/);
+  assert.equal(ctx.sent.length, 1);
+  await ctx.connector.flushPendingOutbound();
+  assert.deepEqual(ctx.sent.map(outboundKind), ["accepted", "accepted", "running"]);
+  assert.equal(ctx.sent[0].idempotencyKey, ctx.sent[1].idempotencyKey);
+  assert.equal(ctx.connector.status().pendingStatusCount, 0);
+});
+
+test("fast completion cannot overtake durable accepted and running lifecycle events", async () => {
+  const driver = new MockCodexDriver();
+  driver.acknowledgeDelivery = async (deliveryId) =>
+    driver.emitOutboundReply({
+      modelDeclared: true,
+      eventId: "fast-terminal-result",
+      threadId: "thread-1",
+      hostId: null,
+      sourceMessageId: "message-1",
+      deliveryId,
+      text: "fast result",
+      messageType: "result",
+      references: [],
+    });
+  const ctx = harness([relayMessage()], {
+    driver,
+    lifecycleStatusEnabled: true,
+    failSaveCalls: [4],
+  });
+  await ctx.connector.initialize();
+  await assert.rejects(() => ctx.connector.recoverPage(), /state save 4/);
+  assert.deepEqual(ctx.sent.map(outboundKind), ["accepted"]);
+
+  await ctx.connector.requestRecovery();
+  assert.deepEqual(ctx.sent.map(outboundKind), ["accepted", "accepted", "running", "result"]);
+  assert.equal(ctx.sent[0].idempotencyKey, ctx.sent[1].idempotencyKey);
+  assert.equal(ctx.connector.status().pendingStatusCount, 0);
+  assert.equal(ctx.connector.getDeliveryReceipt("message-1").replied, true);
+});
+
 function outboundEvent(receipt, overrides = {}) {
   return {
     modelDeclared: true,
@@ -321,5 +775,179 @@ function snapshotState(value) {
     outboundSeenIds: [...value.outboundSeenIds],
     receipts: [...value.receipts.values()].map((receipt) => ({ ...receipt })),
     pendingOutbound: value.pendingOutbound ? structuredClone(value.pendingOutbound) : null,
+    pendingStatuses: value.pendingStatuses.map((entry) => structuredClone(entry)),
+    blockedOutbound: value.blockedOutbound.map((entry) => structuredClone(entry)),
+    turnBudget: value.turnBudget.map((entry) => ({ ...entry })),
   };
+}
+
+function outboundKind(value) {
+  return value.messageType === "status" ? JSON.parse(value.text).status : value.messageType;
+}
+
+function completedDriverRecord(index) {
+  const suffix = String(index).padStart(4, "0");
+  const deliveryId = `legacy-delivery-${suffix}`;
+  const sourceMessageId = `legacy-message-${suffix}`;
+  const turnId = `legacy-turn-${suffix}`;
+  return {
+    deliveryId,
+    sourceMessageId,
+    threadId: "thread-1",
+    hostId: null,
+    phase: "completed",
+    transport: "app-server",
+    turnId,
+    acceptedAt: `2026-08-24T00:${String(index % 60).padStart(2, "0")}:00.000Z`,
+    completionStatus: "completed",
+    outboundEvent: {
+      modelDeclared: true,
+      eventId: `app-server-event-${createHash("sha256")
+        .update(`${deliveryId}\0${turnId}`)
+        .digest("hex")}`,
+      threadId: "thread-1",
+      hostId: null,
+      sourceMessageId,
+      deliveryId,
+      text: `completed ${suffix}`,
+      messageType: "result",
+      references: [],
+    },
+    outboundDelivered: true,
+    outboundBlocked: false,
+    connectorCheckpointed: true,
+  };
+}
+
+function capacityReceipts(count, { replied }) {
+  return Array.from({ length: count }, (_, index) => {
+    const suffix = String(index).padStart(4, "0");
+    return {
+      sourceMessageId: `capacity-message-${suffix}`,
+      deliveryId: `capacity-delivery-${suffix}`,
+      senderId: "agent-remote",
+      hopCount: 0,
+      replied,
+      outboundMessageId: replied ? `capacity-outbound-${suffix}` : null,
+      acceptedAt: "2026-08-24T00:00:00.000Z",
+      outboundEventId: `capacity-event-${suffix}`,
+      driverReleasePending: null,
+    };
+  });
+}
+
+class CapacityHandshakeDriver {
+  constructor(durableIds, { failEvictOnce = false } = {}) {
+    this.durableIds = durableIds;
+    this.failEvictOnce = failEvictOnce;
+    this.deliveries = [];
+    this.binding = null;
+    this.stopped = false;
+  }
+
+  async start({ binding }) {
+    this.binding = { ...binding };
+  }
+
+  async deliver(request) {
+    if (this.durableIds.has(request.deliveryId)) {
+      return {
+        accepted: true,
+        duplicate: true,
+        deliveryId: request.deliveryId,
+        threadId: request.threadId,
+        hostId: request.hostId,
+        acceptedAt: "2026-08-24T00:00:00.000Z",
+      };
+    }
+    if (this.durableIds.size >= 1_000) {
+      const error = new Error("driver capacity");
+      error.code = "AICHAT_DRIVER_RECEIPT_CAPACITY";
+      throw error;
+    }
+    this.durableIds.add(request.deliveryId);
+    this.deliveries.push(structuredClone(request));
+    return {
+      accepted: true,
+      deliveryId: request.deliveryId,
+      threadId: request.threadId,
+      hostId: request.hostId,
+      acceptedAt: "2026-08-24T00:00:00.000Z",
+    };
+  }
+
+  async acknowledgeDelivery(deliveryId) {
+    if (!this.durableIds.has(deliveryId)) throw new Error("driver receipt missing");
+  }
+
+  async resolveDelivery(deliveryId, { outcome }) {
+    if (outcome === "delivered") {
+      if (!this.durableIds.has(deliveryId)) throw new Error("driver receipt missing");
+      return { delivered: true };
+    }
+    if (this.failEvictOnce && outcome === "evicted") {
+      this.failEvictOnce = false;
+      throw new Error("injected release failure");
+    }
+    this.durableIds.delete(deliveryId);
+    return { released: true };
+  }
+
+  async stop() {
+    this.stopped = true;
+  }
+}
+
+function memoryDriverReceiptStore(initial) {
+  return {
+    state: structuredClone(initial),
+    async load() {
+      return structuredClone(this.state);
+    },
+    async save(_binding, state) {
+      this.state = structuredClone(state);
+    },
+  };
+}
+
+function fakeAppServer(handler) {
+  const child = new EventEmitter();
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  let input = "";
+  child.stdin = new Writable({
+    write(chunk, _encoding, callback) {
+      input += chunk.toString("utf8");
+      while (input.includes("\n")) {
+        const index = input.indexOf("\n");
+        const line = input.slice(0, index).trim();
+        input = input.slice(index + 1);
+        if (line) handler(JSON.parse(line), child);
+      }
+      callback();
+    },
+  });
+  child.respond = (id, result) =>
+    child.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id, result })}\n`);
+  child.kill = () => {
+    setImmediate(() => child.emit("exit", 0, null));
+    return true;
+  };
+  return child;
+}
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
+
+async function waitFor(predicate, timeoutMs = 2_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error("Timed out waiting for connector test condition");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
 }

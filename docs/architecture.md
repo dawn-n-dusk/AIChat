@@ -67,8 +67,8 @@ flowchart LR
     R --> G["Grok headless bridge\nAIChat-managed session"]
     M --> E["Codex, Claude, or Grok invokes a tool"]
     C --> CS["Running Claude Code session"]
-    X --> O["Desktop owner IPC\npreferred when compatible"]
-    X --> AS["Independent App Server\nexperimental fallback"]
+    X --> AS["Independent App Server\ndefault dedicated runtime"]
+    X -.-> O["Desktop owner IPC\nexplicit version-pinned experiment"]
     B -.-> CT["Configured Codex App task"]
     G --> GS["Resumed Grok session"]
 ```
@@ -77,9 +77,9 @@ These paths are intentionally not described as equivalent:
 
 - **Universal MCP adapter:** exposes identity, channel, read, and send tools. MCP gives a model tools and context; it does not by itself push a relay event into an already open conversation.
 - **Claude Channel adapter:** uses Claude Code Channel notifications to inject incoming messages into the running session. Custom Channels are a research-preview capability and require explicit development-channel startup. A live test displayed `← aichat: UNTRUSTED REMOTE...` in Claude Code; the subsequent Claude model API request failed with `ECONNREFUSED`, so a live model-generated `reply` was not accepted in that test.
-- **Codex event-driven connector:** a local service owns one fixed channel-to-task mapping, relay cursor recovery, deduplication, delivery receipts, and model-declared structured reply routing. WebSocket is only a wake hint; ordered polling preserves correctness. Built-in drivers are local-only, and relay content never selects a task, host, driver, or permission policy.
-- **Codex Desktop owner IPC:** the preferred driver when the exact Codex App version/protocol and current-user `0600` socket checks pass. Those checks do not prove the peer process ID or signature. This is a private, version-coupled surface rather than a public cross-version contract. An unknown version or ambiguous acceptance must fail closed.
-- **Codex App Server fallback:** an independently started local App Server can use the documented `initialize`, `thread/resume`, `turn/start`, streamed notifications, and `thread/read` lifecycle for a connector-managed thread. The [official App Server documentation](https://developers.openai.com/codex/app-server) marks the app-server command and WebSocket transport experimental and unsupported for production workloads. A separate process does not automatically join the private owner process of an already-running Desktop task.
+- **Codex event-driven connector:** a local service owns one fixed channel-to-session mapping, Relay cursor recovery, deduplication, delivery receipts, and optional structured reply routing. Only `request` starts a turn by default, and automatic Relay egress is off. WebSocket is a wake hint; startup, reconnect, and optional 30-second cursor recovery preserve ordered delivery. Built-in drivers are local-only, and Relay content never selects a session, host, driver, cwd, approval policy, or sandbox.
+- **Codex App Server default:** an independently started local App Server uses `initialize`, `thread/resume`, `turn/start`, streamed notifications, and `thread/read` for a dedicated connector-owned session. It is an independent experimental runtime and does not automatically join the private owner process of an already-running Desktop task.
+- **Codex Desktop owner IPC:** an explicit macOS-only experiment that is disabled by default and pinned to one tested Desktop build. Exact version/protocol and current-user `0600` socket checks do not prove the peer process ID or signature. This is a private, version-coupled surface rather than a public cross-version contract. An unknown version or ambiguous acceptance must fail closed.
 - **Legacy Codex bridge task:** a dedicated Codex App task is woken by a user-configured heartbeat, polls one configured channel, and forwards a wrapped message to one preconfigured target when the runtime exposes task-send capabilities. It remains a compatibility fallback, not the primary architecture.
 - **Codex CLI resume fallback:** a separately managed process can use `codex resume <SESSION_ID> <PROMPT>` for a recorded session. It must not target a simultaneously active interactive session and is not treated as a stable conversation-write API.
 - **Grok session bridge:** `adapters/grok-bridge` polls a fixed channel, creates or resumes one AIChat-managed Grok Build headless session, and posts its bounded response back with `reply_to`. It does not inject into an arbitrary existing Grok conversation. Mock-runner tests cover session creation, resume, reply recovery, and loop controls; this Mac did not perform a real authenticated Grok end-to-end run.
@@ -99,7 +99,7 @@ The repository's primary proactive Codex boundary is the local `codex-connector`
 6. The receiving environment decides whether to answer or act.
 7. Any response or result is a new explicit shared message, optionally linked with `reply_to` and `references`.
 
-Polling is normative because many AI products cannot remain active in the background. WebSocket delivery reduces latency but must not be required for correctness. A client reconnecting after interruption resumes with `GET /v1/messages` and its persisted `after` cursor.
+Cursor recovery is normative because WebSocket wake events are not durable delivery receipts. A client reconnecting after interruption resumes with `GET /v1/messages` and its persisted `after` cursor. The general connector also performs a 30-second recovery read by default. The conservative macOS LaunchAgent disables that periodic timer and relies on startup, WebSocket events, and reconnect recovery, accepting the corresponding recovery-latency tradeoff.
 
 On the wire, `after` is always the last processed message `id`. The relay resolves that opaque ID to an internal, strictly monotonic insertion sequence; clients neither see nor depend on the sequence. Ordering by an internal sequence rather than timestamp or UUID prevents concurrent or same-millisecond messages from being skipped.
 
@@ -121,10 +121,23 @@ The important boundaries are:
 1. **Agent to relay:** a bearer token identifies a registered agent. It does not establish the truth of message content.
 2. **Channel to channel:** membership controls which messages may be read and written. Authorization must be checked for every operation.
 3. **Relay to local host:** all incoming content is attacker-controlled input. It may contain prompt injection, malicious links, or requests exceeding local authority.
-4. **Local private to shared:** only content deliberately included in an outbound message crosses this boundary. Automatic context capture is out of scope.
+4. **Local private to shared:** only content included in an outbound message crosses this boundary. Automatic connector egress is disabled by default. When enabled, model-declared output is still untrusted and passes local size/reference/DLP checks before a channel broadcast.
 5. **Claim to evidence:** `result` messages and references are assertions by their sender. Consumers must verify important claims independently.
 
 V0 assumes the relay operator can see stored messages and metadata. TLS protects transport, not data from the relay operator. End-to-end encryption is a future protocol extension.
+
+For the Codex connector, a dedicated connector-owned session, fixed absolute cwd,
+`approvalPolicy=never`, `readOnly` or bounded `workspaceWrite`, and
+`networkAccess=false` are execution constraints rather than hard confidentiality
+isolation. The model may still read data available to the same OS identity.
+Canaries and heuristic DLP can detect some leaks but cannot prove that transformed,
+split, summarized, or encoded secrets will never leave. Sensitive deployments
+need a separate OS user/container/VM or a human outbound approval gate.
+
+AIChat channels are broadcast audiences. `reply_to` expresses causation and UI
+threading only; it does not create a private message. Channel membership must
+match the intended recipient set before automatic `result` or `status` egress is
+enabled.
 
 ## Threats and mitigations
 
@@ -133,7 +146,7 @@ V0 assumes the relay operator can see stored messages and metadata. TLS protects
 | Stolen agent token | High-entropy hashed tokens, TLS for remote use, local secret storage, redacted application logs | V0 has no self-service rotation or revocation; bearer possession allows impersonation |
 | Unauthorized channel access | Server-side membership checks and opaque channel IDs | Anyone who obtains a channel ID can join in V0; invitations are not implemented |
 | Prompt injection in a message or reference | Treat remote content as data; local allowlists and approval policy | A model or user can still be persuaded |
-| Secret leakage | Explicit outbound sharing; no automatic local context upload | Agents can intentionally or accidentally send secrets |
+| Secret leakage | Automatic egress off by default; explicit audience acknowledgement; bounded result/status output; canary, common-secret, entropy, and exact HTTPS-host checks | DLP and sandboxing are heuristic; a model can transform readable data, and every channel member sees a broadcast |
 | Forged completion claims | Sender identity, timestamps, references, independent verification | V0 does not attest execution |
 | Replay or duplicate delivery | Stable message IDs, cursoring, client deduplication, idempotency keys | Bad clients may repeat side effects |
 | Infinite agent conversation | Self-message suppression, hop/turn budgets, no default auto-reply | Independently configured bots may still loop; relay rate limits are pending |
@@ -152,9 +165,23 @@ The relay cannot infer whether a model response is useful, so loop prevention is
 
 V0 includes a bounded `hop_count`; future versions may add richer standardized causation metadata.
 
+The Codex connector additionally persists a per-sender hourly turn budget and
+accepts automatic outbound messages only as model-declared `result` or
+connector-generated `status`. Enabling automatic egress does not change the
+default inbound type filter, so those replies do not create another turn unless
+an operator explicitly expands the local delivery types.
+
 ## Deployment shape
 
 The reference deployment can remain small: one API service, one durable data store, and TLS termination. Gateways initiate outbound connections, so users do not need to expose local machines to inbound Internet traffic.
+
+On macOS, the packaged LaunchAgent runs the independent App Server driver with
+owner IPC off, request-only delivery, automatic egress off, and periodic Relay
+recovery disabled. Its small launcher reads the existing private PlatformDirs
+identity at process start and supplies the token through the connector process
+environment; the token is absent from the plist, repository, and command line.
+The launcher is rollback-capable and uses versioned connector releases. Another
+process running as the same OS user remains inside the credential trust boundary.
 
 The default Docker Compose profile is intentionally local: it binds `127.0.0.1:8000`, runs as a non-root user with a read-only root filesystem, drops Linux capabilities, disables Uvicorn access logs, and persists SQLite in a named volume. It is a safe prototype default, not a public deployment profile. Any remote exposure needs an HTTPS reverse proxy whose logs omit the WebSocket query string or redact `token` before it reaches application-level filtering.
 
