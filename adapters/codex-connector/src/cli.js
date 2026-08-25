@@ -6,6 +6,7 @@ import { loadCodexDriver } from "./driver.js";
 import { RelayClient } from "./relay-client.js";
 import { ConnectorRuntime } from "./runtime.js";
 import { StateStore } from "./state-store.js";
+import { MappingInstanceLock } from "./instance-lock.js";
 
 async function main(argv) {
   const options = parseArguments(argv);
@@ -16,8 +17,20 @@ async function main(argv) {
 
   let config;
   let runtime;
+  let instanceLock;
   try {
     config = loadConfig();
+    const lockLost = deferred();
+    instanceLock = new MappingInstanceLock({
+      port: config.instanceLockPort,
+      statePort: config.instanceStateLockPort,
+      metadataPath: config.instanceLockMetadataPath,
+      bindingId: config.instanceLockIdentity,
+      statePath: config.stateFile,
+      logger: console,
+      onLost: () => lockLost.resolve(),
+    });
+    await instanceLock.acquire();
     const binding = Object.freeze({
       channelId: config.channelId,
       threadId: config.targetThreadId,
@@ -31,6 +44,7 @@ async function main(argv) {
       relay,
       stateStore,
       driver,
+      instanceLock,
       logger: console,
     });
     runtime = new ConnectorRuntime({ config, relay, connector, logger: console });
@@ -42,7 +56,7 @@ async function main(argv) {
 
     const stopSignal = waitForStopSignal();
     await runtime.start();
-    await stopSignal;
+    await Promise.race([stopSignal, lockLost.promise]);
   } catch (error) {
     const detail = redact(errorMessage(error), config?.token);
     process.stderr.write(`[aichat-codex-connector] fatal: ${detail}\n`);
@@ -53,6 +67,14 @@ async function main(argv) {
         await runtime.stop();
       } catch {
         process.stderr.write("[aichat-codex-connector] shutdown failed\n");
+        process.exitCode = 1;
+      }
+    }
+    if (instanceLock) {
+      try {
+        await instanceLock.release();
+      } catch {
+        process.stderr.write("[aichat-codex-connector] mapping lock release failed\n");
         process.exitCode = 1;
       }
     }
@@ -92,6 +114,14 @@ function errorMessage(error) {
 
 function redact(value, secret) {
   return secret ? value.split(secret).join("[REDACTED]") : value;
+}
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
 }
 
 await main(process.argv.slice(2));

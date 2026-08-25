@@ -15,6 +15,9 @@ Goal: two independently operated agents can exchange project context without cha
 - [x] Universal stdio MCP adapter for Codex, Claude, Grok, and other MCP hosts
 - [x] Repository Codex plugin with MCP wiring and an untrusted-message collaboration skill
 - [x] Event-driven Codex connector core with fixed mapping, relay recovery, deduplication, driver receipts, and explicit replies
+- [x] Codex connector safe defaults: independent App Server, request-only delivery, automatic egress off, dedicated-session marker, fixed cwd, no-approval sandbox, and persisted sender turn budget
+- [x] Durable Codex ambiguous-start, receipt-acknowledgement, outbound-idempotency, multi-process lock, and crash-recovery tests
+- [x] Token-free rollback-capable macOS LaunchAgent package with owner IPC, periodic polling, and automatic egress disabled
 - [x] Claude Code Channel research-preview adapter with fixed-channel and sender allowlists
 - [x] Grok Build headless bridge for one explicitly AIChat-managed session
 - [x] Adapter CI for MCP tests/builds and Claude/Grok locked Node test jobs
@@ -26,7 +29,7 @@ Goal: two independently operated agents can exchange project context without cha
 
 Exit signal: a Mac agent asks a Windows agent to inspect or test a shared GitHub revision; the Windows side responds later with a linked result; both sides recover correctly after being offline.
 
-Adapter validation status: the Codex connector core is testable independently of a product driver, but live Desktop owner IPC and independent App Server delivery still require explicit version-scoped acceptance. Claude Channel delivery into the running UI was observed live, but the following Claude model request failed with `ECONNREFUSED`, so live model reply remains pending. Grok bridge unit tests use a mock runner; no authenticated real-Grok end-to-end run was performed on this Mac.
+Adapter validation status: the Codex connector core has automated coverage for fixed routing, request-only loop prevention, WebSocket wake plus cursor recovery, persisted turn budgets, atomic state, cross-process locking, ambiguous start reconciliation, acknowledgement races, and bounded structured egress. Live macOS delivery through the independent App Server and the private Desktop owner IPC still require exact-version, real-Relay acceptance. The packaged macOS profile intentionally keeps automatic egress off, so bidirectional Relay results are not yet an accepted deployment claim. Claude Channel delivery into the running UI was observed live, but the following Claude model request failed with `ECONNREFUSED`, so live model reply remains pending. Grok bridge unit tests use a mock runner; no authenticated real-Grok end-to-end run was performed on this Mac.
 
 ## V0.x — make small-group trials trustworthy
 
@@ -40,9 +43,13 @@ Goal: support an invited laboratory or open-source project cohort without asking
 - adapter SDK and conformance test suite;
 - observability that excludes tokens and private message bodies;
 - abuse reporting and operational runbooks;
-- live macOS and Windows acceptance of the Codex connector against an exact, compatibility-gated Desktop owner IPC driver;
-- isolated App Server fallback acceptance over local stdio or Unix socket, without claiming attachment to an arbitrary active Desktop task;
+- live macOS and Windows acceptance of the default independent App Server driver against dedicated connector-owned sessions, without claiming attachment to an arbitrary active Desktop task;
+- exact-build macOS owner-IPC acceptance as a separately enabled experiment, including version-gate fallback after a Desktop update;
+- public-Relay `request -> accepted/running -> result` acceptance only in a non-sensitive isolated environment with explicit channel-audience acknowledgement and automatic egress enabled;
+- field validation of the rollback-capable macOS LaunchAgent, including token absence from plist/arguments, startup/reconnect cursor recovery with periodic polling disabled, and rollback to the previous release;
 - a Codex App/CLI compatibility matrix, fail-closed upgrade tests, and ambiguous-delivery recovery evidence;
+- an operator recovery path for outbound messages quarantined after an egress-policy change;
+- adversarial egress tests covering encoded/split canaries and documentation that DLP/sandboxing are not hard secret isolation;
 - regression coverage for the legacy heartbeat bridge without restoring it as the primary path;
 - live bidirectional Claude Channel acceptance through a successful model `reply` tool call;
 - a real relay-to-Grok-to-relay end-to-end run on an authenticated Grok Build host;

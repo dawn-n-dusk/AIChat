@@ -1,165 +1,237 @@
 # AIChat Codex connector
 
-This adapter is an event-driven local gateway between one AIChat channel and one fixed Codex task. It preserves the user's existing Codex workflow: the relay carries collaboration messages while the built-in auto driver starts turns in the fixed Codex task and observes model-declared structured replies.
+The Codex connector is a local event-driven gateway between one AIChat channel
+and one fixed Codex session. It lets a remote collaborator submit explicit
+project requests without moving Codex credentials, files, or tool authority to
+the Relay.
 
-The WebSocket is only a low-latency wake signal. Startup, reconnect, every relevant event, and a periodic transport-recovery timer trigger ordered `GET /v1/messages` polling from a persisted cursor. Correctness never depends on a WebSocket event arriving. This recovery timer does not inspect or poll Codex task progress and is not a heartbeat automation.
+The default built-in driver launches an independent `codex app-server` runtime.
+It can resume the configured session and start a turn, but it does not prove
+attachment to an already-open Codex Desktop UI owner. Use a dedicated
+connector-owned session and do not edit that session concurrently in Desktop.
 
-## Security model
+## Default safety posture
 
-- The channel, target task, optional host, sender allowlist, and delivery types come only from local configuration. Relay content cannot change them.
-- `AICHAT_CODEX_CONNECTOR_ENABLED=true` is an explicit enable gate. Wildcard sender allowlists are rejected.
-- Only `text` and `request` are delivered by default. Self-authored, disallowed, passive, duplicate, and hop-limit messages are consumed without task delivery.
-- Remote text and references are wrapped as untrusted context. Receipt does not authorize tool use, secret access, destructive work, or permission changes.
-- A deliverable cursor advances only after the driver returns an exact, positive delivery receipt and state is durably checkpointed.
-- Before either built-in transport writes `turn/start`, it persists an ambiguous-attempt record. A timeout or disconnect after the write is fail-closed: the relay cursor does not advance and no fallback or second start is allowed until `thread/read` reconciles the original turn.
-- Accepted but incomplete turns, completed outbound events, and relay callbacks are durably recoverable. Stable event and relay idempotency IDs make restart replay safe.
-- Outbound replies require a model-declared structured event bound to the fixed task/host and an existing delivery receipt. One reply is permitted per receipt.
-- Outbound sends use a stable relay idempotency key and are persisted before network delivery. A relay or checkpoint failure retries the send without asking Codex to generate another response.
-- The app-server child receives a conservative environment allowlist, not the connector process environment. Exact relay-token occurrences in reply text or references are blocked before relay send.
-- State files can contain inbound metadata and outbound response text. They do not contain the relay token, and use mode `0600` on non-Windows systems.
-- The V0 WebSocket token is in the connection query string. Configure every reverse proxy, load balancer, ingress, and APM layer to omit query strings or redact `token`; use TLS outside loopback. The runtime never logs the URL or raw WebSocket errors.
+- The connector is disabled until `AICHAT_CODEX_CONNECTOR_ENABLED=true`.
+- Only `request` messages are delivered by default. Exact sender IDs are
+  required and `*` is rejected.
+- `text` delivery requires the additional
+  `AICHAT_AUTONOMOUS_TEXT_ENABLED=true` acknowledgement. `result` and `status`
+  are passive by default, preventing request-result loops.
+- Automatic Relay egress is off by default. Ordinary assistant output is never
+  forwarded implicitly.
+- Both built-in drivers require a dedicated connector-owned session marker, a
+  fixed absolute working directory, `approvalPolicy=never`, and a `readOnly` or
+  bounded `workspaceWrite` sandbox with `networkAccess=false`.
+- Desktop owner IPC is private, version-coupled, macOS-only, and disabled by
+  default. The independent App Server driver is the default on every platform.
+- Built-in drivers are local-only. A module driver owns any remote-host
+  transport and its security contract.
 
-## Codex driver contract
+`approvalPolicy=never` prevents an unattended connector turn from waiting for a
+human approval dialog; it does not grant authority outside the configured
+sandbox. A remote request remains untrusted model input and cannot change the
+fixed channel, session, host, driver, working directory, or sandbox policy.
 
-`CODEX_DRIVER=auto` loads the built-in `DesktopOwnerIpcDriver`. On the verified macOS Desktop build it prefers the current UI task owner's private IPC. A failure before `turn/start`, or an explicit owner rejection, may fall back to an isolated `codex app-server --listen stdio://` process; an ambiguous post-write failure never falls back. On Windows and Linux, owner IPC is skipped safely and auto uses app-server. `CODEX_DRIVER=app-server` skips private IPC entirely.
+## Delivery and recovery
 
-The owner IPC path is experimental and tied to Desktop `26.730.61639`: its compatibility gate checks the exact app version, current-user ownership and mode `0600` on `~/.codex/ipc/ipc.sock`, a bounded length-prefixed frame, and fixed method versions. It does not prove the peer process ID or code signature. Turn output is followed through revision-checked Desktop stream snapshots/patches with no task polling. A revision gap requests a fresh snapshot; completion unsubscribes. An incompatible future build fails the private feature gate and uses app-server rather than guessing the protocol.
+The Relay WebSocket is a low-latency wake signal, not the source of truth. At
+startup, after reconnect, on relevant WebSocket events, and—unless disabled—on
+a 30-second recovery interval, the connector reads ordered messages from the
+persisted Relay cursor.
 
-The app-server path uses newline-delimited JSON-RPC, `initialize`/`initialized`, `thread/resume`, `turn/start`, `thread/read`, turn-ID-correlated notifications, one active connector turn at a time, strict request/turn timeouts, and a durable state store. `thread/read` is used only at startup or while reconciling incomplete records; it is recovery, not a heartbeat.
+The connector persists:
 
-Both built-in drivers are local-only and require `CODEX_TARGET_HOST_ID` to be unset. A remote host requires `CODEX_DRIVER=module` and a driver that owns that transport.
+- the inbound cursor and bounded deduplication IDs;
+- exact delivery receipts and driver acknowledgements;
+- sender turn-budget entries;
+- at most one pending model reply, queued lifecycle statuses, and bounded
+  policy-blocked outbound quarantine records;
+- App Server ambiguous/accepted/completed turn records.
 
-Advanced integrations may set `CODEX_DRIVER=module` and `CODEX_DRIVER_MODULE` to a module exporting:
+Before a built-in driver writes `turn/start`, it persists an ambiguous-attempt
+record. A post-write timeout or disconnect never falls through to a second
+transport. Recovery uses stable delivery markers and `thread/read` to reconcile
+the original turn. Stable event and Relay idempotency keys make resend after a
+network or checkpoint failure safe, although AIChat cannot promise exactly-once
+local tool side effects inside a model turn.
 
-```js
-export async function createCodexDriver(options) {
-  return {
-    async start({ binding, onOutboundReply }) {},
-    async deliver(request) {},
-    async stop() {},
-  };
-}
+One OS-level loopback lock protects the fixed channel/session mapping and a
+second independently derived loopback lock protects the canonical state-file
+identity. Lock ports and lock-metadata paths cannot be overridden. State and
+receipt files use unique temporary files, `fsync`, atomic rename, and mode
+`0600` on macOS/Linux. A custom `AICHAT_STATE_FILE` basename is restricted to
+ASCII letters, digits, dot, underscore, and hyphen. Its existing parent must be
+owned by the current user and mode `0700`; the connector fails closed and does
+not chmod a shared parent.
+
+A deterministic egress-policy rejection is first moved into connector-owned
+durable quarantine, then acknowledged to the driver. Retry and acknowledge-loss
+drop use a two-phase driver-resolution record so crashes cannot leak driver
+capacity or lose the quarantined event. The connector library exposes explicit
+list, retry, and drop operations; a stable operator CLI for those operations
+remains roadmap work.
+
+## Codex drivers
+
+### Independent App Server — default
+
+`CODEX_DRIVER=app-server` starts `codex app-server --listen stdio://` with MCP
+servers and plugins disabled in that child. The driver uses
+`initialize`/`initialized`, `thread/resume`, `turn/start`, streamed turn
+notifications, and `thread/read` for incomplete-record recovery.
+
+Before every new delivery it verifies that a target-session user message
+contains the locally configured task marker as one exact complete line and
+that the task has no visible in-progress turn. App Server
+is still experimental and runs independently of Codex Desktop. Do not describe
+this path as a stable API for arbitrary existing UI conversations.
+
+### Desktop owner IPC — explicit experiment
+
+`CODEX_DRIVER=auto` loads the macOS owner-IPC wrapper, but owner IPC is attempted
+only when both of these are explicitly set:
+
+```text
+CODEX_DESKTOP_OWNER_IPC_ENABLED=true
+CODEX_CONNECTOR_OWNER_RISK_ACK=true
 ```
 
-`binding` is always the locally fixed object:
+The implementation is pinned to Desktop `26.730.61639` by default and checks
+the current-user `0600` Unix socket, bounded frames, and fixed private method
+versions. These checks do not prove the peer process signature or create a
+public compatibility guarantee. A failure before the start request or an
+explicit rejection may use the independent App Server fallback. An ambiguous
+post-write outcome never does.
 
-```js
-{ channelId, threadId, hostId }
+Unknown or updated Desktop builds must fall back until a version-scoped live
+acceptance test is repeated. The macOS LaunchAgent package deliberately fixes
+`CODEX_DRIVER=app-server` and keeps owner IPC off.
+
+### Module drivers
+
+`CODEX_DRIVER=module` and `CODEX_DRIVER_MODULE` load an advanced driver that
+exports `createCodexDriver`. The module must implement fixed binding,
+idempotent `deliveryId` handling, durable acceptance, and outbound event
+correlation. Optional `acknowledgeDelivery` and `resolveDelivery` properties
+must be functions when present. A module that keeps its own durable receipt or
+capacity state should implement idempotent
+`resolveDelivery(deliveryId, {eventId, outcome})` for `delivered`, `dropped`,
+and `evicted` outcomes so connector-first release checkpoints survive crashes.
+Built-in task/sandbox validation does not apply to a custom module; the module
+owner must publish an equivalent boundary.
+
+## Outbound messages
+
+Automatic egress requires an explicit non-null structured `aichat_reply` from
+the model. Model-declared replies may use only `result`; connector-generated
+lifecycle notifications use `status`. Both are bound to the fixed session,
+host, source message, delivery receipt, hop limit, and stable event ID.
+
+To enable automatic egress, configure all of:
+
+```text
+AICHAT_AUTO_REPLY_ENABLED=true
+AICHAT_EGRESS_CHANNEL_AUDIENCE_ACK=true
+AICHAT_EGRESS_CANARY_FILE=/absolute/private/0600/file
 ```
 
-An inbound request has this shape:
+Optional controls include an exact HTTPS reference-host allowlist and a bounded
+text-byte limit. The egress policy blocks exact Relay-token/canary occurrences,
+common credential shapes, some high-entropy strings, non-HTTPS references,
+credentials/query/fragment data in references, IP/localhost references, and
+hosts outside the exact allowlist.
 
-```js
-{
-  deliveryId,          // stable across retry
-  threadId,            // fixed target
-  hostId,              // fixed host or null
-  sourceMessageId,     // AIChat message ID
-  envelope,            // explicit untrusted-context prompt
-  metadata
-}
-```
+These checks are defense in depth, not a hard confidentiality boundary. A model
+can transform, split, summarize, or otherwise leak readable information without
+matching a heuristic DLP rule. For real secrets, use a separate OS user,
+container, or VM, or keep automatic egress disabled and require a human share
+decision.
 
-The driver must make `deliveryId` idempotent and return acceptance only after the target task accepted the delivery:
-
-```js
-{
-  accepted: true,
-  deliveryId,          // exact requested ID
-  threadId,            // optional, but must match when returned
-  hostId,              // optional; null must match a local target
-  acceptedAt           // optional ISO timestamp
-}
-```
-
-The built-in auto and app-server drivers implement this interface. `src/mock-driver.js` remains test-only and is never a production fallback.
-
-## Model-declared structured reply
-
-The target-side driver calls the `onOutboundReply` function supplied to `start()` only after the constrained model output contains a non-null `aichat_reply` object:
-
-```js
-await onOutboundReply({
-  modelDeclared: true,
-  eventId: "stable-driver-event-id",
-  threadId: "fixed-thread-id",
-  hostId: null,
-  sourceMessageId: "message_...",
-  deliveryId: "codex-delivery-...",
-  text: "Verified result",
-  messageType: "result", // text or result
-  references: ["https://github.com/example/project/commit/abc123"]
-});
-```
-
-Normal Codex assistant output is not forwarded implicitly. Built-in drivers append a structured-output format and constrain the final response to `{ "aichat_reply": null | { ... } }`; only a non-null validated reply becomes an AIChat event. This model declaration is not an independent authorization boundary: the remote payload and reply-format instructions are both user input. The connector still checks the fixed thread/host, original delivery receipt, hop limit, and exact-token DLP gate before relay send.
+AIChat channels are broadcast audiences. `reply_to` records correlation with a
+prior message; it is not a private-recipient selector. Every channel member can
+read a result or status. Use a separate locked-membership channel for sensitive
+bilateral work.
 
 ## Configuration
 
 Node.js 20 or newer is required.
 
-| Variable | Required | Meaning |
+| Variable | Required | Default and meaning |
 | --- | --- | --- |
-| `AICHAT_CODEX_CONNECTOR_ENABLED` | yes | Must be exactly `true` after case normalization. |
-| `AICHAT_TOKEN` | yes | Relay bearer token; never stored in connector state. |
-| `AICHAT_CHANNEL_ID` | yes | One fixed AIChat channel. |
-| `AICHAT_ALLOWED_SENDER_IDS` | yes | Comma-separated exact relay agent IDs; `*` is forbidden. |
-| `CODEX_TARGET_THREAD_ID` | yes | One fixed Codex task/thread ID. |
-| `CODEX_TARGET_HOST_ID` | module only | Remote Codex host ID. It must be unset for built-in auto/app-server drivers. |
-| `CODEX_DRIVER` | no | `auto` (default), `app-server`, or `module`. Auto tries verified Desktop owner IPC then app-server fallback. |
-| `CODEX_DRIVER_MODULE` | module only | Package name, file URL, or local module path for an advanced custom driver. |
-| `CODEX_DESKTOP_OWNER_IPC_ENABLED` | no | In auto mode, defaults to `true`; set `false` to force app-server fallback. |
-| `CODEX_DESKTOP_EXPECTED_VERSION` | no | Exact private-IPC compatibility gate; default `26.730.61639`. |
-| `CODEX_APP_SERVER_BINARY` | no | Codex binary path; defaults to the ChatGPT app bundle on macOS and `codex` elsewhere. |
-| `AICHAT_SERVER` | no | Relay base URL; default `http://127.0.0.1:8000`. |
-| `AICHAT_DELIVER_TYPES` | no | Comma-separated types; default `text,request`. |
-| `AICHAT_STATE_FILE` | no | State path; default is a mapping-specific file under `~/.aichat/codex-connector/`. |
-| `AICHAT_PAGE_LIMIT` | no | Recovery page size, default `50`. |
-| `AICHAT_REQUEST_TIMEOUT_MS` | no | HTTP timeout, default `15000`. |
-| `AICHAT_RECOVERY_INTERVAL_MS` | no | Ordered transport-recovery interval, default `30000`. |
-| `AICHAT_WS_RECONNECT_DELAY_MS` | no | WebSocket reconnect delay, default `2000`. |
-| `AICHAT_WEBSOCKET_ENABLED` | no | Enable low-latency wake transport, default `true`. |
+| `AICHAT_CODEX_CONNECTOR_ENABLED` | yes | Explicit connector enable gate; must be `true`. |
+| `AICHAT_TOKEN` | yes | Local Relay bearer token; never stored in connector state. |
+| `AICHAT_SERVER` | no | `http://127.0.0.1:8000`; use HTTPS/WSS outside loopback. |
+| `AICHAT_CHANNEL_ID` | yes | One fixed channel. |
+| `AICHAT_ALLOWED_SENDER_IDS` | yes | Comma-separated exact Agent IDs; no wildcard. |
+| `AICHAT_DELIVER_TYPES` | no | `request`; adding `text` also requires the autonomy acknowledgement. |
+| `AICHAT_AUTONOMOUS_TEXT_ENABLED` | no | `false`. |
+| `AICHAT_WEBSOCKET_ENABLED` | no | `true`; WebSocket is only a wake hint. |
+| `AICHAT_WS_RECONNECT_DELAY_MS` | no | `2000`. |
+| `AICHAT_PERIODIC_RECOVERY_ENABLED` | no | `true`; the macOS LaunchAgent fixes this to `false`. |
+| `AICHAT_RECOVERY_INTERVAL_MS` | no | `30000`; ignored when periodic recovery is disabled. |
+| `AICHAT_REQUEST_TIMEOUT_MS` | no | `15000` for Relay HTTP requests. |
+| `AICHAT_PAGE_LIMIT` | no | `50`. |
+| `AICHAT_MAX_DELIVERIES_PER_RECOVERY` | no | `20` per recovery slice. |
+| `AICHAT_MAX_TURNS_PER_SENDER_PER_HOUR` | no | `10`, persisted across restart. |
+| `AICHAT_STATE_FILE` | no | Mapping-specific file below `~/.aichat/codex-connector`. |
+| `AICHAT_INSTANCE_LOCK_PORT` | no | Deterministic mapping-specific loopback lock port. |
+| `AICHAT_INSTANCE_LOCK_METADATA_PATH` | must be unset | Fixed to `<canonical-state>.instance-lock.json`; overrides are rejected. |
+| `AICHAT_AUTO_REPLY_ENABLED` | no | `false`. |
+| `AICHAT_LIFECYCLE_STATUS_ENABLED` | no | `true`, but no status is sent while automatic egress is off. |
+| `AICHAT_EGRESS_CHANNEL_AUDIENCE_ACK` | auto egress | Must be `true` because the channel is a broadcast audience. |
+| `AICHAT_EGRESS_CANARY_FILE` | auto egress | Private regular file, 16–512 characters, mode `0600` or stricter. |
+| `AICHAT_EGRESS_ALLOWED_REFERENCE_HOSTS` | no | Comma-separated exact HTTPS hostnames; empty blocks all references. |
+| `AICHAT_EGRESS_MAX_TEXT_BYTES` | no | `8192`. |
+| `CODEX_TARGET_THREAD_ID` | yes | Dedicated connector-owned Codex session UUID. |
+| `CODEX_TARGET_HOST_ID` | module only | Must be unset for built-in drivers. |
+| `CODEX_DRIVER` | no | `app-server`; `auto` enables the optional owner wrapper, `module` loads a custom driver. |
+| `CODEX_DRIVER_MODULE` | module only | Package, file URL, or module path. |
+| `CODEX_CONNECTOR_TASK_OWNED` | built-in | Must be `true`. |
+| `CODEX_CONNECTOR_TASK_MARKER` | built-in | Exact 16–200 character marker already present in the dedicated session. |
+| `CODEX_APP_SERVER_CWD` | built-in | Existing absolute working directory. |
+| `CODEX_APP_SERVER_APPROVAL_POLICY` | built-in | Must be `never`. |
+| `CODEX_APP_SERVER_SANDBOX_POLICY_JSON` | built-in | `readOnly` or bounded `workspaceWrite`, always with `networkAccess:false`. |
+| `CODEX_APP_SERVER_BINARY` | no | App-bundled Codex on macOS, `codex` elsewhere. |
+| `CODEX_APP_SERVER_REQUEST_TIMEOUT_MS` | no | `15000`. |
+| `CODEX_APP_SERVER_TURN_TIMEOUT_MS` | no | `600000`. |
+| `CODEX_APP_SERVER_RECOVERY_INTERVAL_MS` | no | `30000` for incomplete-turn reconciliation, not Relay polling. |
+| `CODEX_OUTBOUND_RETRY_MAX_ATTEMPTS` | no | `10`. |
+| `CODEX_DESKTOP_OWNER_IPC_ENABLED` | no | `false`. |
+| `CODEX_CONNECTOR_OWNER_RISK_ACK` | owner IPC | Must be `true` when owner IPC is enabled. |
+| `CODEX_DESKTOP_EXPECTED_VERSION` | no | Private owner-IPC build gate; default `26.730.61639`. |
+| `CODEX_DESKTOP_APP_PATH` | owner IPC | `/Applications/ChatGPT.app`. |
+| `CODEX_DESKTOP_IPC_SOCKET` | owner IPC | `~/.codex/ipc/ipc.sock`. |
+| `CODEX_DESKTOP_OWNER_HOST_ID` | owner IPC | `local`. |
+| `CODEX_DESKTOP_IPC_MAX_FRAME_BYTES` | owner IPC | `4194304`. |
+| `CODEX_DESKTOP_IPC_REQUEST_TIMEOUT_MS` | owner IPC | `30000`. |
+| `CODEX_DESKTOP_IPC_RECONNECT_DELAY_MS` | owner IPC | `1000`. |
+| `CODEX_DESKTOP_IPC_TURN_TIMEOUT_MS` | owner IPC | `600000`. |
+| `CODEX_HOME` | no | Optional existing Codex home inherited by the isolated App Server process. |
 
-## Windows setup
+## Deployment
 
-Windows does not use the macOS-only owner IPC path. With `CODEX_DRIVER=auto`, the connector safely skips owner IPC and launches `codex app-server --listen stdio://`. Install Codex and Node.js 20+, sign in under the same Windows user that will run the connector, and verify `codex --version` works in PowerShell.
+For macOS, use the token-free, rollback-capable
+[`deploy/macos`](../../deploy/macos/README.md) LaunchAgent package. It reads the
+existing private PlatformDirs identity at runtime, fixes the App Server driver,
+keeps automatic egress off, and disables periodic polling while retaining
+WebSocket/startup/reconnect cursor recovery.
 
-Find the fixed task first. `codex resume --all` is the supported CLI picker for saved sessions, and `codex resume <SESSION_ID>` accepts a session UUID. Use the UUID for the intended task as `CODEX_TARGET_THREAD_ID`; never infer it from a task title. If the picker does not expose a copyable UUID in the installed build, the local session filenames under `$env:USERPROFILE\.codex\sessions` contain it as an implementation-detail fallback—verify the chosen task with `codex resume <UUID>` before starting AIChat.
+For Windows, use [`deploy/windows`](../../deploy/windows/README.md). Windows uses
+an independent App Server session and cannot honestly promise live attachment to
+an already-open Desktop UI task. The Windows launcher must supply the same
+dedicated-session marker, fixed cwd, approval, and sandbox settings described
+above.
 
-From the connector directory:
-
-```powershell
-npm ci
-npm test
-
-$env:AICHAT_CODEX_CONNECTOR_ENABLED = "true"
-$env:AICHAT_SERVER = "https://relay.example.org"
-$env:AICHAT_TOKEN = "replace-with-relay-token"
-$env:AICHAT_CHANNEL_ID = "channel_..."
-$env:AICHAT_ALLOWED_SENDER_IDS = "agent_..."
-$env:CODEX_TARGET_THREAD_ID = "00000000-0000-0000-0000-000000000000"
-$env:CODEX_DRIVER = "auto"
-npm start
-```
-
-For continuous use, run the same launcher under Windows Task Scheduler at user logon, with the connector directory as **Start in** and the same Windows account/Codex home. Keep the token out of command-line arguments; inject it through a user-protected launcher or service secret facility. Restart policy should restart the process after failure, but only one connector instance may own a given channel/task mapping.
-
-Windows limitation: app-server can resume the stored task and create turns, but it is a separate process and does not prove live attachment to an already-open Codex Desktop UI owner. Avoid editing the same task concurrently in Desktop during connector delivery. Exact live UI-owner injection on Windows requires a future supported Codex surface or a platform-specific `CODEX_DRIVER=module` implementation.
-
-Install and run from this directory:
+For source development:
 
 ```bash
+cd adapters/codex-connector
 npm ci
 npm test
-AICHAT_CODEX_CONNECTOR_ENABLED=true \
-  AICHAT_TOKEN=... \
-  AICHAT_CHANNEL_ID=channel_... \
-  AICHAT_ALLOWED_SENDER_IDS=agent_... \
-  CODEX_TARGET_THREAD_ID=thread_... \
-  CODEX_DRIVER=auto \
-  npm start
 ```
 
-Use `npm run once` for one bounded recovery run with no WebSocket or periodic timer. It may still process multiple relay pages until caught up. Neither mode creates, discovers, or changes a Codex task mapping.
-
-Known installation gap: this first Node adapter reads relay settings from environment variables. It does not yet import the Python client's `AICHAT_CONFIG`/PlatformDirs credential file automatically, so the relay token and mapping still need to be injected by the launcher or service manager.
+Do not paste the Relay token into a committed file or command line. The Node
+adapter itself reads environment variables; production launchers should load the
+token from a protected local secret/config file immediately before process
+execution.

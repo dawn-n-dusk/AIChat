@@ -22,7 +22,10 @@ export class ConnectorRuntime {
     this.stopped = false;
   }
 
-  async start({ websocketEnabled = this.config.websocketEnabled, periodicRecovery = true } = {}) {
+  async start({
+    websocketEnabled = this.config.websocketEnabled,
+    periodicRecovery = this.config.periodicRecoveryEnabled !== false,
+  } = {}) {
     if (this.started) throw new Error("Codex connector runtime is already started");
     this.started = true;
     await this.connector.initialize();

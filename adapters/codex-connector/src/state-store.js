@@ -1,12 +1,19 @@
-import { chmod, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { readFile } from "node:fs/promises";
+
+import { atomicWritePrivateFile, SerializedSaveQueue } from "./atomic-file.js";
+import {
+  MAX_DELIVERY_RECEIPTS,
+} from "./receipt-retention.js";
 
 const MAX_SEEN_IDS = 1_000;
-const MAX_RECEIPTS = 1_000;
+const MAX_PENDING_STATUSES = 1_000;
+const MAX_BLOCKED_OUTBOUND = 1_000;
+const MAX_TURN_BUDGET = 10_000;
 
 export class StateStore {
   constructor(path) {
     this.path = path;
+    this.saveQueue = new SerializedSaveQueue();
   }
 
   async load() {
@@ -15,12 +22,25 @@ export class StateStore {
       if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
         throw new Error("state must be a JSON object");
       }
+      if (!Number.isInteger(parsed.version) || parsed.version < 1 || parsed.version > 4) {
+        throw new Error("unsupported connector state version");
+      }
+      const receipts = boundReceipts(parseReceipts(parsed.delivery_receipts));
+      const pendingStatuses = parsePendingStatuses(parsed.pending_statuses);
+      const blockedOutbound = parseBlockedOutbound(parsed.blocked_outbound);
+      const turnBudget = parseTurnBudget(parsed.turn_budget);
+      assertCapacity(pendingStatuses, MAX_PENDING_STATUSES, "pending_statuses");
+      assertCapacity(blockedOutbound, MAX_BLOCKED_OUTBOUND, "blocked_outbound");
+      assertCapacity(turnBudget, MAX_TURN_BUDGET, "turn_budget");
       return {
         cursor: optionalString(parsed.cursor),
         seenIds: parseStringArray(parsed.seen_ids).slice(-MAX_SEEN_IDS),
         outboundSeenIds: parseStringArray(parsed.outbound_seen_ids).slice(-MAX_SEEN_IDS),
-        receipts: parseReceipts(parsed.delivery_receipts).slice(-MAX_RECEIPTS),
+        receipts,
         pendingOutbound: parsePendingOutbound(parsed.pending_outbound),
+        pendingStatuses,
+        blockedOutbound,
+        turnBudget,
       };
     } catch (error) {
       if (error?.code === "ENOENT") return emptyState();
@@ -28,30 +48,50 @@ export class StateStore {
     }
   }
 
-  async save({ cursor, seenIds, outboundSeenIds, receipts, pendingOutbound }) {
-    const directory = dirname(this.path);
-    const temporary = `${this.path}.${process.pid}.tmp`;
-    await mkdir(directory, { recursive: true, mode: 0o700 });
-    const payload = `${JSON.stringify(
-      {
-        version: 1,
-        cursor,
-        seen_ids: [...seenIds].slice(-MAX_SEEN_IDS),
-        outbound_seen_ids: [...outboundSeenIds].slice(-MAX_SEEN_IDS),
-        delivery_receipts: [...receipts.values()].slice(-MAX_RECEIPTS).map(toStoredReceipt),
-        pending_outbound: pendingOutbound ? toStoredPending(pendingOutbound) : null,
-      },
-      null,
-      2,
-    )}\n`;
-    try {
-      await writeFile(temporary, payload, { encoding: "utf8", mode: 0o600 });
-      await rename(temporary, this.path);
-      if (process.platform !== "win32") await chmod(this.path, 0o600);
-    } catch (error) {
-      await unlink(temporary).catch(() => {});
-      throw new Error(`Cannot persist Codex connector state at ${this.path}: ${error.message}`);
-    }
+  async save({
+    cursor,
+    seenIds,
+    outboundSeenIds,
+    receipts,
+    pendingOutbound,
+    pendingStatuses = [],
+    blockedOutbound = [],
+    turnBudget = [],
+  }) {
+    return this.saveQueue.run(async () => {
+      try {
+        const boundedReceipts = boundReceipts([...receipts.values()]);
+        assertCapacity(pendingStatuses, MAX_PENDING_STATUSES, "pending_statuses");
+        assertCapacity(blockedOutbound, MAX_BLOCKED_OUTBOUND, "blocked_outbound");
+        assertCapacity(turnBudget, MAX_TURN_BUDGET, "turn_budget");
+        const payload = `${JSON.stringify(
+          {
+            version: 4,
+            cursor,
+            seen_ids: [...seenIds].slice(-MAX_SEEN_IDS),
+            outbound_seen_ids: [...outboundSeenIds].slice(-MAX_SEEN_IDS),
+            delivery_receipts: boundedReceipts.map(toStoredReceipt),
+            pending_outbound: pendingOutbound ? toStoredPending(pendingOutbound) : null,
+            pending_statuses: pendingStatuses.map(toStoredPending),
+            blocked_outbound: blockedOutbound.map(toStoredBlocked),
+            turn_budget: turnBudget.map((entry) => ({
+              message_id: entry.messageId,
+              sender_id: entry.senderId,
+              started_at: entry.startedAt,
+            })),
+          },
+          null,
+          2,
+        )}\n`;
+        await atomicWritePrivateFile(this.path, payload);
+      } catch (error) {
+        const wrapped = new Error(
+          `Cannot persist Codex connector state at ${this.path}: ${error.message}`,
+        );
+        if (typeof error?.code === "string") wrapped.code = error.code;
+        throw wrapped;
+      }
+    });
   }
 }
 
@@ -62,6 +102,9 @@ export function emptyState() {
     outboundSeenIds: [],
     receipts: [],
     pendingOutbound: null,
+    pendingStatuses: [],
+    blockedOutbound: [],
+    turnBudget: [],
   };
 }
 
@@ -78,9 +121,14 @@ function parseReceipts(value) {
       replied: item.replied === true,
       outboundMessageId: optionalString(item.outbound_message_id),
       acceptedAt: optionalString(item.accepted_at),
+      outboundEventId: optionalString(item.outbound_event_id),
+      driverReleasePending: optionalReleaseOutcome(item.driver_release_pending),
     };
     if (receipt.replied && !receipt.outboundMessageId) {
       throw new Error("replied delivery receipt must contain outbound_message_id");
+    }
+    if (receipt.driverReleasePending && !receipt.outboundEventId) {
+      throw new Error("driver release pending receipt must contain outbound_event_id");
     }
     return receipt;
   });
@@ -103,6 +151,35 @@ function parsePendingOutbound(value) {
   };
 }
 
+function parsePendingStatuses(value) {
+  if (value == null) return [];
+  if (!Array.isArray(value)) throw new Error("pending_statuses must be an array");
+  return value.map(parsePendingOutbound);
+}
+
+function parseBlockedOutbound(value) {
+  if (value == null) return [];
+  if (!Array.isArray(value)) throw new Error("blocked_outbound must be an array");
+  return value.map((item) => ({
+    ...parsePendingOutbound(item),
+    blockedAt: requiredString(item.blocked_at, "blocked_outbound blocked_at"),
+    reasonCode: requiredString(item.reason_code, "blocked_outbound reason_code"),
+  }));
+}
+
+function parseTurnBudget(value) {
+  if (value == null) return [];
+  if (!Array.isArray(value)) throw new Error("turn_budget must be an array");
+  return value.map((entry) => {
+    assertObject(entry, "turn budget entry");
+    return {
+      messageId: requiredString(entry.message_id, "turn budget message_id"),
+      senderId: requiredString(entry.sender_id, "turn budget sender_id"),
+      startedAt: requiredString(entry.started_at, "turn budget started_at"),
+    };
+  });
+}
+
 function toStoredReceipt(receipt) {
   return {
     source_message_id: receipt.sourceMessageId,
@@ -112,6 +189,8 @@ function toStoredReceipt(receipt) {
     replied: receipt.replied,
     outbound_message_id: receipt.outboundMessageId,
     accepted_at: receipt.acceptedAt,
+    outbound_event_id: receipt.outboundEventId ?? null,
+    driver_release_pending: receipt.driverReleasePending ?? null,
   };
 }
 
@@ -127,6 +206,47 @@ function toStoredPending(pending) {
     hop_count: pending.hopCount,
     idempotency_key: pending.idempotencyKey,
   };
+}
+
+function toStoredBlocked(pending) {
+  return {
+    ...toStoredPending(pending),
+    blocked_at: pending.blockedAt,
+    reason_code: pending.reasonCode,
+  };
+}
+
+function boundReceipts(receipts) {
+  const sourceIds = new Set();
+  for (const receipt of receipts) {
+    if (sourceIds.has(receipt.sourceMessageId)) {
+      throw new Error("delivery_receipts contains duplicate source_message_id values");
+    }
+    sourceIds.add(receipt.sourceMessageId);
+  }
+  if (receipts.length > MAX_DELIVERY_RECEIPTS) {
+    const error = new Error(
+      "delivery_receipts exceeds capacity; refusing eviction without a durable driver release",
+    );
+    error.code = "AICHAT_RECEIPT_CAPACITY";
+    throw error;
+  }
+  return [...receipts];
+}
+
+function optionalReleaseOutcome(value) {
+  if (value == null) return null;
+  if (value !== "dropped" && value !== "evicted") {
+    throw new Error("delivery receipt driver_release_pending is invalid");
+  }
+  return value;
+}
+
+function assertCapacity(value, maximum, name) {
+  if (value.length <= maximum) return;
+  const error = new Error(`${name} exceeds the durable state capacity of ${maximum}`);
+  error.code = "AICHAT_STATE_CAPACITY";
+  throw error;
 }
 
 function parseStringArray(value) {

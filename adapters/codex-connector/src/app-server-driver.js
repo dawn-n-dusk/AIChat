@@ -1,16 +1,20 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmod, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 
 import { assertCodexDriver } from "./driver.js";
+import { atomicWritePrivateFile, SerializedSaveQueue } from "./atomic-file.js";
+import {
+  MAX_DELIVERY_RECEIPTS,
+} from "./receipt-retention.js";
 
 const DEFAULT_MAC_BINARY = "/Applications/ChatGPT.app/Contents/Resources/codex";
 const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
 const DEFAULT_TURN_TIMEOUT_MS = 10 * 60_000;
 const DEFAULT_RECOVERY_INTERVAL_MS = 30_000;
-const MAX_RECEIPTS = 1_000;
+const DEFAULT_OUTBOUND_RETRY_MAX_ATTEMPTS = 10;
 const MAX_ORPHAN_TURNS = 20;
 const MAX_STDOUT_BUFFER = 4 * 1024 * 1024;
 const TERMINAL_TURN_STATUSES = new Set(["completed", "failed", "interrupted", "cancelled"]);
@@ -31,7 +35,7 @@ export const REPLY_OUTPUT_SCHEMA = Object.freeze({
             text: { type: "string", minLength: 1, maxLength: 100_000 },
             message_type: {
               type: ["string", "null"],
-              enum: ["text", "result", null],
+              enum: ["result", null],
             },
             references: {
               anyOf: [
@@ -81,6 +85,7 @@ export class AppServerDriver {
     this.contexts = new Map();
     this.orphanTurns = new Map();
     this.pendingAcceptance = new Map();
+    this.mutationQueue = new SerializedSaveQueue();
     this.deliveryQueue = Promise.resolve();
     this.outboundTasks = new Set();
     this.outboundInFlight = new Set();
@@ -105,12 +110,19 @@ export class AppServerDriver {
       1_000,
       "CODEX_APP_SERVER_RECOVERY_INTERVAL_MS",
     );
+    this.outboundRetryMaxAttempts = integerSetting(
+      env.CODEX_OUTBOUND_RETRY_MAX_ATTEMPTS,
+      DEFAULT_OUTBOUND_RETRY_MAX_ATTEMPTS,
+      1,
+      "CODEX_OUTBOUND_RETRY_MAX_ATTEMPTS",
+    );
     this.cwd = env.CODEX_APP_SERVER_CWD?.trim() || null;
     this.approvalPolicy = env.CODEX_APP_SERVER_APPROVAL_POLICY?.trim() || null;
     this.sandboxPolicy = parseOptionalJson(
       env.CODEX_APP_SERVER_SANDBOX_POLICY_JSON,
       "CODEX_APP_SERVER_SANDBOX_POLICY_JSON",
     );
+    this.taskMarker = env.CODEX_CONNECTOR_TASK_MARKER?.trim() || null;
   }
 
   async start({ binding, onOutboundReply }) {
@@ -130,6 +142,7 @@ export class AppServerDriver {
     this.receipts = new Map(stored.records.map((record) => [record.deliveryId, record]));
 
     await this.#ensureClient();
+    if (this.taskMarker) await this.#verifyDedicatedTask();
     this.started = true;
     try {
       await this.#recoverDurableRecords();
@@ -156,7 +169,15 @@ export class AppServerDriver {
       (process.platform === "darwin" ? DEFAULT_MAC_BINARY : "codex");
     const client = new JsonRpcStdioClient({
       binary,
-      args: ["app-server", "--listen", "stdio://"],
+      args: [
+        "app-server",
+        "-c",
+        "mcp_servers={}",
+        "-c",
+        "plugins={}",
+        "--listen",
+        "stdio://",
+      ],
       requestTimeoutMs: this.requestTimeoutMs,
       spawnImpl: this.spawnImpl,
       logger: this.logger,
@@ -204,6 +225,63 @@ export class AppServerDriver {
     return acceptance.promise;
   }
 
+  async acknowledgeDelivery(deliveryId) {
+    this.#assertRunning();
+    const record = this.receipts.get(deliveryId);
+    if (!record) throw new Error("Codex delivery acknowledgement has no durable driver record");
+    const committed = record.connectorCheckpointed
+      ? record
+      : await this.#replaceRecordAfterPersist(record.deliveryId, (live) => ({
+          ...live,
+          connectorCheckpointed: true,
+        }));
+    this.#startOutboundReplay(committed);
+  }
+
+  async resolveDelivery(deliveryId, { eventId, outcome } = {}) {
+    this.#assertRunning();
+    if (typeof eventId !== "string" || !eventId) {
+      throw new Error("Codex delivery resolution requires eventId");
+    }
+    if (!new Set(["delivered", "dropped", "evicted"]).has(outcome)) {
+      throw new Error("Codex delivery resolution outcome is invalid");
+    }
+    return this.mutationQueue.run(async () => {
+      const live = this.receipts.get(deliveryId);
+      if (!live) {
+        if (outcome === "dropped" || outcome === "evicted") {
+          return { released: true, duplicate: true };
+        }
+        throw new Error("Codex delivered resolution has no durable driver record");
+      }
+      if (live.outboundEvent?.eventId !== eventId) {
+        throw new Error("Codex delivery resolution eventId does not match its durable record");
+      }
+      if (outcome === "delivered") {
+        if (live.outboundDelivered && !live.outboundBlocked) {
+          return { released: false, delivered: true, duplicate: true };
+        }
+        const nextRecord = {
+          ...live,
+          outboundDelivered: true,
+          outboundBlocked: false,
+        };
+        const records = [...this.receipts.values()].map((record) =>
+          record.deliveryId === deliveryId ? nextRecord : record,
+        );
+        await this.receiptStore.save(this.binding, { records });
+        this.receipts.set(deliveryId, nextRecord);
+        return { released: false, delivered: true };
+      }
+      const records = [...this.receipts.values()].filter(
+        (record) => record.deliveryId !== deliveryId,
+      );
+      await this.receiptStore.save(this.binding, { records });
+      this.receipts.delete(deliveryId);
+      return { released: true };
+    });
+  }
+
   async stop() {
     if (this.stopped) return;
     this.stopped = true;
@@ -220,6 +298,7 @@ export class AppServerDriver {
 
   async #startQueuedDelivery(request, externalStarter) {
     await this.#ensureClient();
+    if (this.taskMarker) await this.#verifyDedicatedTask();
     let turnId;
     let externalCompletion = null;
     if (externalStarter) {
@@ -247,7 +326,13 @@ export class AppServerDriver {
           this.#scheduleRecovery();
           throw new Error("Codex delivery start outcome is ambiguous and requires reconciliation");
         }
-        await this.#clearDeliveryRecord(request.deliveryId);
+        const cleared = await this.#clearDeliveryRecord(request.deliveryId);
+        if (!cleared) {
+          this.#scheduleRecovery();
+          throw new Error(
+            "Codex delivery changed during owner fallback and requires reconciliation",
+          );
+        }
         this.logger.error(
           "[aichat-codex-driver] Desktop owner IPC unavailable; using isolated app-server fallback",
         );
@@ -258,12 +343,22 @@ export class AppServerDriver {
       turnId = await this.#startViaAppServer(request);
     }
 
-    const record = this.receipts.get(request.deliveryId);
-    record.phase = "accepted";
-    record.turnId = turnId;
-    record.acceptedAt = record.acceptedAt ?? new Date().toISOString();
-    await this.#persistRecords();
-    const context = this.#registerTurn(record, Boolean(externalCompletion));
+    const record = await this.#replaceRecordAfterPersist(request.deliveryId, (live) => {
+      if (live.turnId && live.turnId !== turnId) {
+        throw new Error("Codex delivery start response conflicts with the recovered turn");
+      }
+      if (live.phase === "completed") return live;
+      return {
+        ...live,
+        phase: "accepted",
+        turnId,
+        acceptedAt: live.acceptedAt ?? new Date().toISOString(),
+      };
+    });
+    const context =
+      record.phase === "completed"
+        ? completedDeliveryContext(record)
+        : this.#registerTurn(record, Boolean(externalCompletion));
 
     if (externalCompletion) {
       externalCompletion
@@ -320,7 +415,13 @@ export class AppServerDriver {
         this.#scheduleRecovery();
         throw new Error("Codex app-server turn start is ambiguous and requires reconciliation");
       }
-      await this.#clearDeliveryRecord(request.deliveryId);
+      const cleared = await this.#clearDeliveryRecord(request.deliveryId);
+      if (!cleared) {
+        this.#scheduleRecovery();
+        throw new Error(
+          "Codex delivery changed during pre-send failure and requires reconciliation",
+        );
+      }
       throw error;
     }
     try {
@@ -336,6 +437,7 @@ export class AppServerDriver {
   }
 
   async #prepareAmbiguousAttempt(request, transport) {
+    await this.#makeReceiptCapacity();
     const record = {
       deliveryId: request.deliveryId,
       sourceMessageId: request.sourceMessageId,
@@ -349,31 +451,47 @@ export class AppServerDriver {
       outboundEvent: null,
       outboundDelivered: false,
       outboundBlocked: false,
+      connectorCheckpointed: false,
     };
-    this.receipts.delete(request.deliveryId);
-    this.receipts.set(request.deliveryId, record);
-    trimMap(this.receipts, MAX_RECEIPTS);
-    await this.#persistRecords();
-    return record;
+    return this.mutationQueue.run(async () => {
+      if (this.receipts.has(request.deliveryId)) {
+        throw new Error("Codex delivery record appeared before ambiguous attempt persistence");
+      }
+      await this.receiptStore.save(this.binding, {
+        records: [...this.receipts.values(), record],
+      });
+      this.receipts.set(request.deliveryId, record);
+      return record;
+    });
   }
 
   async #clearDeliveryRecord(deliveryId) {
-    this.receipts.delete(deliveryId);
-    await this.#persistRecords();
+    return this.mutationQueue.run(async () => {
+      const live = this.receipts.get(deliveryId);
+      if (!live) return true;
+      if (live.phase !== "ambiguous" || live.turnId || live.outboundEvent) return false;
+      const records = [...this.receipts.values()].filter(
+        (record) => record.deliveryId !== deliveryId,
+      );
+      await this.receiptStore.save(this.binding, { records });
+      this.receipts.delete(deliveryId);
+      return true;
+    });
   }
 
   async #returnExistingDelivery(record) {
-    await this.#persistRecords();
-    if (record.phase === "ambiguous") {
-      await this.#recoverRecord(record);
-      if (record.phase === "ambiguous") {
+    let live = this.receipts.get(record.deliveryId) ?? record;
+    if (live.phase === "ambiguous") {
+      await this.#recoverRecord(live);
+      live = this.receipts.get(record.deliveryId) ?? live;
+      if (live.phase === "ambiguous") {
         throw new Error("Codex delivery remains ambiguous; refusing to create a duplicate turn");
       }
     }
-    if (!record.turnId || !record.acceptedAt) {
+    if (!live.turnId || !live.acceptedAt) {
       throw new Error("Codex delivery record is incomplete and cannot be acknowledged");
     }
-    return toDriverReceipt(record, true);
+    return toDriverReceipt(live, true);
   }
 
   #registerTurn(record, external = false) {
@@ -487,15 +605,29 @@ export class AppServerDriver {
           messageType: structuredReply.messageType,
           references: structuredReply.references,
         };
+      } else {
+        nextRecord.outboundEvent = systemStatusEvent(record, "completed");
       }
+    } else if (!nextRecord.outboundEvent && typeof status === "string") {
+      nextRecord.outboundEvent = systemStatusEvent(
+        record,
+        status === "failed" ? "failed" : "blocked",
+        status,
+      );
     }
-    const committed = await this.#replaceRecordAfterPersist(record, nextRecord);
+    const committed = await this.#replaceRecordAfterPersist(record.deliveryId, (live) => ({
+      ...live,
+      phase: nextRecord.phase,
+      completionStatus: nextRecord.completionStatus,
+      outboundEvent: live.outboundEvent ?? nextRecord.outboundEvent,
+    }));
     this.#startOutboundReplay(committed);
   }
 
   #startOutboundReplay(record) {
     if (
       !record.outboundEvent ||
+      !record.connectorCheckpointed ||
       record.outboundDelivered ||
       record.outboundBlocked ||
       this.outboundInFlight.has(record.deliveryId) ||
@@ -513,23 +645,38 @@ export class AppServerDriver {
 
   async #emitOutboundUntilAccepted(record) {
     let delayMs = 100;
+    let attempts = 0;
     while (!this.stopped) {
       try {
-        await this.onOutboundReply(record.outboundEvent);
-        record = await this.#replaceRecordAfterPersist(record, {
-          ...record,
+        const disposition = await this.onOutboundReply(record.outboundEvent);
+        if (disposition?.blocked === true) {
+          if (disposition.eventId !== record.outboundEvent.eventId) {
+            throw new Error("Connector quarantine acknowledgement changed outbound event identity");
+          }
+          record = await this.#replaceRecordAfterPersist(record.deliveryId, (live) =>
+            live.outboundDelivered
+              ? live
+              : {
+                  ...live,
+                  outboundBlocked: true,
+                },
+          );
+          return;
+        }
+        record = await this.#replaceRecordAfterPersist(record.deliveryId, (live) => ({
+          ...live,
           outboundDelivered: true,
-        });
+          outboundBlocked: false,
+        }));
         return;
-      } catch (error) {
-        if (error?.code === "AICHAT_OUTBOUND_DLP") {
-          try {
-            record = await this.#replaceRecordAfterPersist(record, {
-              ...record,
-              outboundBlocked: true,
-            });
-            return;
-          } catch {}
+      } catch {
+        attempts += 1;
+        if (attempts >= this.outboundRetryMaxAttempts) {
+          this.logger.error(
+            "[aichat-codex-driver] outbound replay attempt budget exhausted; durable recovery scheduled",
+          );
+          this.#scheduleRecovery();
+          return;
         }
         await delay(delayMs, this.timers);
         delayMs = Math.min(delayMs * 2, 5_000);
@@ -590,29 +737,30 @@ export class AppServerDriver {
   async #reconcileRecordFromTurns(record, turns) {
     const turn = findDeliveryTurn(turns, record);
     if (!turn) return false;
-    let changed = false;
-    if (!record.turnId) {
-      record.turnId = turn.id;
-      changed = true;
-    }
-    if (!record.acceptedAt) {
-      record.acceptedAt = new Date().toISOString();
-      changed = true;
-    }
-    if (record.phase === "ambiguous") {
-      record.phase = "accepted";
-      changed = true;
+    const reconciled = await this.#replaceRecordAfterPersist(record.deliveryId, (live) => {
+      if (live.turnId && live.turnId !== turn.id) {
+        throw new Error("Codex recovered turn conflicts with the durable delivery record");
+      }
+      if (live.phase === "completed") return live;
+      return {
+        ...live,
+        turnId: turn.id,
+        acceptedAt: live.acceptedAt ?? new Date().toISOString(),
+        phase: live.phase === "ambiguous" ? "accepted" : live.phase,
+      };
+    });
+    if (reconciled.phase === "completed") {
+      this.#startOutboundReplay(reconciled);
+      return false;
     }
     if (turn.status === "inProgress") {
-      if (changed) await this.#persistRecords();
-      this.#registerTurn(record, false);
+      this.#registerTurn(reconciled, false);
       return true;
     }
     if (!TERMINAL_TURN_STATUSES.has(turn.status)) {
-      if (changed) await this.#persistRecords();
       return false;
     }
-    await this.#finishRecord(record, turn.status, finalAgentMessage(turn));
+    await this.#finishRecord(reconciled, turn.status, finalAgentMessage(turn));
     return false;
   }
 
@@ -626,21 +774,32 @@ export class AppServerDriver {
     }, delayMs);
   }
 
-  async #persistRecords() {
-    await this.receiptStore.save(this.binding, {
-      records: [...this.receipts.values()].slice(-MAX_RECEIPTS),
+  async #makeReceiptCapacity() {
+    return this.mutationQueue.run(async () => {
+      if (this.receipts.size < MAX_DELIVERY_RECEIPTS) return;
+      const error = new Error(
+        "Codex driver receipt capacity is full; connector must durably release one receipt first",
+      );
+      error.code = "AICHAT_DRIVER_RECEIPT_CAPACITY";
+      throw error;
     });
   }
 
-  async #replaceRecordAfterPersist(currentRecord, nextRecord) {
-    const records = [...this.receipts.values()]
-      .map((record) =>
-        record.deliveryId === currentRecord.deliveryId ? nextRecord : record,
-      )
-      .slice(-MAX_RECEIPTS);
-    await this.receiptStore.save(this.binding, { records });
-    this.receipts.set(nextRecord.deliveryId, nextRecord);
-    return nextRecord;
+  async #replaceRecordAfterPersist(deliveryId, transition) {
+    return this.mutationQueue.run(async () => {
+      const live = this.receipts.get(deliveryId);
+      if (!live) throw new Error("Codex delivery record disappeared before persistence");
+      const nextRecord = transition({ ...live });
+      if (!nextRecord || nextRecord.deliveryId !== deliveryId) {
+        throw new Error("Codex delivery record transition changed its identity");
+      }
+      const records = [...this.receipts.values()].map((record) =>
+        record.deliveryId === deliveryId ? nextRecord : record,
+      );
+      await this.receiptStore.save(this.binding, { records });
+      this.receipts.set(nextRecord.deliveryId, nextRecord);
+      return nextRecord;
+    });
   }
 
   #handleServerRequest(method) {
@@ -656,6 +815,33 @@ export class AppServerDriver {
         message: "Interactive client action is unavailable in the AIChat connector",
       },
     };
+  }
+
+  async #verifyDedicatedTask() {
+    if (!this.taskMarker) return;
+    assertSafeConnectorTurnPolicy({
+      cwd: this.cwd,
+      approvalPolicy: this.approvalPolicy,
+      sandboxPolicy: this.sandboxPolicy,
+    });
+    const result = await this.client.request("thread/read", {
+      threadId: this.binding.threadId,
+      includeTurns: true,
+    });
+    const turns = Array.isArray(result?.thread?.turns) ? result.thread.turns : [];
+    const markerPresent = turns.some((turn) =>
+      (Array.isArray(turn?.items) ? turn.items : []).some(
+        (item) => item?.type === "userMessage" &&
+          typeof item.text === "string" &&
+          item.text.split(/\r?\n/).some((line) => line === this.taskMarker),
+      ),
+    );
+    if (!markerPresent) {
+      throw new Error("Target Codex task does not contain the locally configured connector marker");
+    }
+    if (turns.some((turn) => turn?.status === "inProgress")) {
+      throw new Error("Connector-owned Codex task is busy; refusing concurrent manual delivery");
+    }
   }
 
   #handleClientExit() {
@@ -891,6 +1077,7 @@ export class JsonRpcStdioClient {
 export class AppServerReceiptStore {
   constructor(path) {
     this.path = path;
+    this.saveQueue = new SerializedSaveQueue();
   }
 
   async load(binding) {
@@ -902,16 +1089,12 @@ export class AppServerReceiptStore {
       if (!sameBinding(parsed.binding, binding)) throw new Error("receipt state mapping mismatch");
       if (parsed.version === 1) {
         if (!Array.isArray(parsed.receipts)) throw new Error("invalid receipt list");
-        return {
-          records: parsed.receipts.map(migrateStoredReceipt).slice(-MAX_RECEIPTS),
-        };
+        return boundedStoredRecords(parsed.receipts.map(migrateStoredReceipt));
       }
       if (parsed.version !== 2 || !Array.isArray(parsed.records)) {
         throw new Error("invalid receipt state version");
       }
-      return {
-        records: parsed.records.map(parseStoredRecord).slice(-MAX_RECEIPTS),
-      };
+      return boundedStoredRecords(parsed.records.map(parseStoredRecord));
     } catch (error) {
       if (error?.code === "ENOENT") return { records: [] };
       throw new Error(`Cannot read Codex app-server receipt state: ${error.message}`);
@@ -920,22 +1103,18 @@ export class AppServerReceiptStore {
 
   async save(binding, state) {
     const normalized = normalizeLoadedDriverState(state);
-    const directory = dirname(this.path);
-    const temporary = `${this.path}.${process.pid}.tmp`;
-    await mkdir(directory, { recursive: true, mode: 0o700 });
     const payload = `${JSON.stringify(
-      { version: 2, binding, records: normalized.records.slice(-MAX_RECEIPTS) },
+      { version: 2, binding, records: normalized.records },
       null,
       2,
     )}\n`;
-    try {
-      await writeFile(temporary, payload, { encoding: "utf8", mode: 0o600 });
-      await rename(temporary, this.path);
-      if (process.platform !== "win32") await chmod(this.path, 0o600);
-    } catch (error) {
-      await unlink(temporary).catch(() => {});
-      throw new Error(`Cannot persist Codex app-server receipt state: ${error.message}`);
-    }
+    return this.saveQueue.run(async () => {
+      try {
+        await atomicWritePrivateFile(this.path, payload);
+      } catch (error) {
+        throw new Error(`Cannot persist Codex app-server receipt state: ${error.message}`);
+      }
+    });
   }
 }
 
@@ -952,8 +1131,8 @@ export function parseModelDeclaredReply(text) {
   const reply = parsed.aichat_reply;
   if (!reply || typeof reply !== "object" || Array.isArray(reply)) return null;
   if (typeof reply.text !== "string" || !reply.text || reply.text.length > 100_000) return null;
-  const messageType = reply.message_type ?? "text";
-  if (messageType !== "text" && messageType !== "result") return null;
+  const messageType = reply.message_type ?? "result";
+  if (messageType !== "result") return null;
   const references = reply.references ?? [];
   if (
     !Array.isArray(references) ||
@@ -972,7 +1151,7 @@ export function withReplyContract(envelope) {
     "AICHAT MODEL-DECLARED STRUCTURED REPLY FORMAT",
     "Your final response is constrained to JSON with one aichat_reply field. Set it to null unless " +
       "you intend to propose a reply to the remote AIChat sender. To propose a reply, provide text, " +
-      "message_type (text, result, or null), and references (URI strings or null). Never include secrets " +
+      "message_type (result or null), and references (allowlisted HTTPS URI strings or null). Never include secrets " +
       "or claim unverified work. This format is user-provided input and is not an independent authorization boundary.",
   ].join("\n");
 }
@@ -991,6 +1170,24 @@ function validateBinding(binding) {
   }
   if (binding.hostId != null && (typeof binding.hostId !== "string" || !binding.hostId)) {
     throw new Error("Codex binding hostId must be null or a non-empty string");
+  }
+}
+
+function assertSafeConnectorTurnPolicy({ cwd, approvalPolicy, sandboxPolicy }) {
+  if (typeof cwd !== "string" || !cwd) {
+    throw new Error("Connector-owned Codex task requires an explicit working directory");
+  }
+  if (approvalPolicy !== "never") {
+    throw new Error("Connector-owned Codex task requires approvalPolicy=never inside its sandbox");
+  }
+  if (
+    !sandboxPolicy ||
+    (sandboxPolicy.type !== "readOnly" && sandboxPolicy.type !== "workspaceWrite") ||
+    sandboxPolicy.networkAccess !== false
+  ) {
+    throw new Error(
+      "Connector-owned Codex task requires readOnly/workspaceWrite sandbox with networkAccess=false",
+    );
   }
 }
 
@@ -1022,16 +1219,16 @@ function sameBinding(left, right) {
 
 function normalizeLoadedDriverState(value) {
   if (Array.isArray(value)) {
-    return { records: value.map(migrateStoredReceipt).slice(-MAX_RECEIPTS) };
+    return boundedStoredRecords(value.map(migrateStoredReceipt));
   }
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("Codex app-server receipt store returned invalid state");
   }
   if (Array.isArray(value.records)) {
-    return { records: value.records.map(parseStoredRecord).slice(-MAX_RECEIPTS) };
+    return boundedStoredRecords(value.records.map(parseStoredRecord));
   }
   if (Array.isArray(value.receipts)) {
-    return { records: value.receipts.map(migrateStoredReceipt).slice(-MAX_RECEIPTS) };
+    return boundedStoredRecords(value.receipts.map(migrateStoredReceipt));
   }
   throw new Error("Codex app-server receipt store returned no records");
 }
@@ -1142,6 +1339,7 @@ function migrateStoredReceipt(value) {
     outboundEvent: null,
     outboundDelivered: false,
     outboundBlocked: false,
+    connectorCheckpointed: false,
   };
 }
 
@@ -1188,6 +1386,7 @@ function parseStoredRecord(value) {
     outboundEvent: null,
     outboundDelivered: value.outboundDelivered,
     outboundBlocked: value.outboundBlocked,
+    connectorCheckpointed: value.connectorCheckpointed === true,
   };
   if (value.outboundEvent != null) record.outboundEvent = parseStoredOutboundEvent(value.outboundEvent, record);
   if ((record.outboundDelivered || record.outboundBlocked) && !record.outboundEvent) {
@@ -1200,14 +1399,18 @@ function parseStoredOutboundEvent(value, record) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("invalid stored outbound event");
   }
-  if (value.modelDeclared !== true) throw new Error("invalid stored outbound event declaration");
+  const modelDeclared = value.modelDeclared === true;
+  const systemGenerated = value.systemGenerated === true;
+  if (modelDeclared === systemGenerated) throw new Error("invalid stored outbound event declaration");
   for (const field of ["eventId", "threadId", "sourceMessageId", "deliveryId", "text"]) {
     if (typeof value[field] !== "string" || !value[field]) {
       throw new Error(`invalid stored outbound event ${field}`);
     }
   }
   if (
-    value.eventId !== outboundEventId(record.deliveryId, record.turnId) ||
+    (modelDeclared
+      ? value.eventId !== outboundEventId(record.deliveryId, record.turnId)
+      : !/^app-server-status-[a-f0-9]{64}$/.test(value.eventId)) ||
     value.threadId !== record.threadId ||
     (value.hostId ?? null) !== record.hostId ||
     value.sourceMessageId !== record.sourceMessageId ||
@@ -1216,7 +1419,10 @@ function parseStoredOutboundEvent(value, record) {
     throw new Error("stored outbound event does not match its delivery record");
   }
   if (value.text.length > 100_000) throw new Error("stored outbound event text is too long");
-  if (value.messageType !== "text" && value.messageType !== "result") {
+  if (
+    (modelDeclared && value.messageType !== "result") ||
+    (systemGenerated && value.messageType !== "status")
+  ) {
     throw new Error("invalid stored outbound event messageType");
   }
   if (
@@ -1227,7 +1433,7 @@ function parseStoredOutboundEvent(value, record) {
     throw new Error("invalid stored outbound event references");
   }
   return {
-    modelDeclared: true,
+    ...(modelDeclared ? { modelDeclared: true } : { systemGenerated: true }),
     eventId: value.eventId,
     threadId: value.threadId,
     hostId: value.hostId ?? null,
@@ -1247,10 +1453,43 @@ function defaultReceiptPath(binding) {
   return join(homedir(), ".aichat", "codex-connector", `app-server-${digest}.json`);
 }
 
+function boundedStoredRecords(records) {
+  if (records.length > MAX_DELIVERY_RECEIPTS) {
+    throw new Error(
+      `Codex app-server receipt state exceeds ${MAX_DELIVERY_RECEIPTS} records; refusing silent eviction`,
+    );
+  }
+  return { records };
+}
+
 function outboundEventId(deliveryId, turnId) {
   return `app-server-event-${createHash("sha256")
     .update(`${deliveryId}\0${turnId}`)
     .digest("hex")}`;
+}
+
+function systemStatusEvent(record, status, reason = null) {
+  return {
+    systemGenerated: true,
+    eventId: `app-server-status-${createHash("sha256")
+      .update(`${record.deliveryId}\0${record.turnId ?? ""}\0${status}\0${reason ?? ""}`)
+      .digest("hex")}`,
+    threadId: record.threadId,
+    hostId: record.hostId,
+    sourceMessageId: record.sourceMessageId,
+    deliveryId: record.deliveryId,
+    text: JSON.stringify({
+      status,
+      correlation: {
+        source_message_id: record.sourceMessageId,
+        delivery_id: record.deliveryId,
+        turn_id: record.turnId,
+      },
+      ...(reason ? { reason } : {}),
+    }),
+    messageType: "status",
+    references: [],
+  };
 }
 
 export function sanitizedCodexEnvironment(source = process.env) {
@@ -1346,6 +1585,21 @@ function deferred() {
     reject = rej;
   });
   return { promise, resolve, reject };
+}
+
+function completedDeliveryContext(record) {
+  const completion = deferred();
+  completion.resolve();
+  return {
+    record,
+    turnId: record.turnId,
+    finalText: null,
+    deltaText: "",
+    completion,
+    external: false,
+    receipt: record,
+    timeout: null,
+  };
 }
 
 function delay(milliseconds, timers) {

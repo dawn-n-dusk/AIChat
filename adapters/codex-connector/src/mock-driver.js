@@ -36,6 +36,24 @@ export class MockCodexDriver {
     return this.onOutboundReply(structuredClone(event));
   }
 
+  async resolveDelivery(deliveryId, { eventId, outcome } = {}) {
+    if (!this.binding || this.stopped) throw new Error("MockCodexDriver is not running");
+    const receipt = this.receipts.get(deliveryId);
+    if (!receipt) {
+      return outcome === "delivered"
+        ? { delivered: true, duplicate: true }
+        : { released: true, duplicate: true };
+    }
+    if (typeof eventId !== "string" || !eventId) throw new Error("Mock resolution requires eventId");
+    if (outcome === "dropped" || outcome === "evicted") {
+      this.receipts.delete(deliveryId);
+      return { released: true };
+    }
+    if (outcome !== "delivered") throw new Error("Mock resolution outcome is invalid");
+    this.receipts.set(deliveryId, { ...receipt, outboundEventId: eventId, delivered: true });
+    return { delivered: true };
+  }
+
   async stop() {
     this.stopped = true;
   }
