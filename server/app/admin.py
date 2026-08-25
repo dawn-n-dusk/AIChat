@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
+from uuid import uuid4
 
 
 BOOTSTRAP_KIND = "aichat-agent-bootstrap"
@@ -21,6 +22,16 @@ TOKEN_BYTES = 48
 
 class AdminError(RuntimeError):
     """An operator-safe error that never contains a bearer token."""
+
+
+class ChannelConflict(AdminError):
+    """An immutable existing channel prevents the requested ensure operation."""
+
+    def __init__(self, summary: ChannelSummary):
+        super().__init__(
+            f"channel definition conflicts with existing state ({summary.conflict_reason})"
+        )
+        self.summary = summary
 
 
 @dataclass(frozen=True)
@@ -38,6 +49,30 @@ class BootstrapSummary:
             "artifact_path": self.artifact_path,
             "token_written": True,
         }
+
+
+@dataclass(frozen=True)
+class ChannelSummary:
+    action: str
+    channel_id: str | None
+    name: str
+    created_by_agent_id: str
+    member_count: int
+    dry_run: bool
+    conflict_reason: str | None = None
+
+    def as_dict(self) -> dict[str, object]:
+        summary: dict[str, object] = {
+            "action": self.action,
+            "channel_id": self.channel_id,
+            "name": self.name,
+            "created_by_agent_id": self.created_by_agent_id,
+            "member_count": self.member_count,
+            "dry_run": self.dry_run,
+        }
+        if self.conflict_reason is not None:
+            summary["conflict_reason"] = self.conflict_reason
+        return summary
 
 
 def utc_now() -> str:
@@ -161,6 +196,36 @@ def write_bootstrap_exclusive(path: Path, artifact: dict[str, object]) -> None:
 
 def _commit_connection(connection: sqlite3.Connection) -> None:
     connection.execute("COMMIT")
+
+
+def _insert_channel(
+    connection: sqlite3.Connection,
+    *,
+    channel_id: str,
+    name: str,
+    description: str,
+    created_by: str,
+    created_at: str,
+) -> None:
+    connection.execute(
+        """INSERT INTO channels (id, name, description, created_by, created_at)
+           VALUES (?, ?, ?, ?, ?)""",
+        (channel_id, name, description, created_by, created_at),
+    )
+
+
+def _insert_channel_members(
+    connection: sqlite3.Connection,
+    *,
+    channel_id: str,
+    member_agent_ids: list[str],
+    joined_at: str,
+) -> None:
+    connection.executemany(
+        """INSERT INTO channel_members (channel_id, agent_id, joined_at)
+           VALUES (?, ?, ?)""",
+        [(channel_id, agent_id, joined_at) for agent_id in member_agent_ids],
+    )
 
 
 def _remove_artifact(path: Path) -> None:
@@ -349,6 +414,214 @@ def provision_bootstrap(
         connection.close()
 
 
+def _normalize_channel_request(
+    *,
+    name: str,
+    description: str,
+    created_by_agent_id: str,
+    member_agent_ids: list[str] | None,
+) -> tuple[str, str, str, list[str]]:
+    clean_name = name.strip()
+    if not clean_name or len(clean_name) > 160:
+        raise AdminError("--name must contain between 1 and 160 characters")
+    if not isinstance(description, str):
+        raise AdminError("--description is required")
+    if len(description) > 2000:
+        raise AdminError("--description must not exceed 2000 characters")
+    if not member_agent_ids:
+        raise AdminError("at least one --member-agent-id is required")
+    if len(member_agent_ids) > 100:
+        raise AdminError("no more than 100 --member-agent-id values are supported")
+
+    clean_members: list[str] = []
+    seen: set[str] = set()
+    for value in member_agent_ids:
+        agent_id = value.strip()
+        if not agent_id or len(agent_id) > 200:
+            raise AdminError(
+                "each --member-agent-id must contain between 1 and 200 characters"
+            )
+        if agent_id in seen:
+            raise AdminError("duplicate --member-agent-id values are not allowed")
+        seen.add(agent_id)
+        clean_members.append(agent_id)
+    clean_created_by = created_by_agent_id.strip()
+    if not clean_created_by or len(clean_created_by) > 200:
+        raise AdminError(
+            "--created-by-agent-id must contain between 1 and 200 characters"
+        )
+    if clean_created_by not in seen:
+        raise AdminError(
+            "--created-by-agent-id must also be listed as a --member-agent-id"
+        )
+    return clean_name, description, clean_created_by, clean_members
+
+
+def ensure_channel(
+    *,
+    database: Path,
+    name: str,
+    description: str,
+    created_by_agent_id: str,
+    member_agent_ids: list[str] | None,
+    dry_run: bool = False,
+) -> ChannelSummary:
+    """Create one immutable channel definition or reuse its exact name match."""
+
+    database = require_database(database)
+    (
+        clean_name,
+        clean_description,
+        clean_created_by,
+        clean_members,
+    ) = _normalize_channel_request(
+        name=name,
+        description=description,
+        created_by_agent_id=created_by_agent_id,
+        member_agent_ids=member_agent_ids,
+    )
+    requested_members = set(clean_members)
+
+    connection = sqlite3.connect(database, timeout=10, isolation_level=None)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA foreign_keys = ON")
+    transaction_active = False
+    try:
+        # Dry runs intentionally acquire the same write reservation as a real
+        # ensure so their validation view cannot race a concurrent provisioner.
+        connection.execute("BEGIN IMMEDIATE")
+        transaction_active = True
+
+        placeholders = ",".join("?" for _ in clean_members)
+        existing_agents = {
+            row["id"]
+            for row in connection.execute(
+                f"SELECT id FROM agents WHERE id IN ({placeholders})", clean_members
+            ).fetchall()
+        }
+        if existing_agents != requested_members:
+            missing_count = len(requested_members - existing_agents)
+            raise AdminError(
+                f"{missing_count} requested member Agent(s) do not exist; no channel was created"
+            )
+
+        matches = connection.execute(
+            "SELECT id, description, created_by FROM channels WHERE name = ? ORDER BY id",
+            (clean_name,),
+        ).fetchall()
+        if len(matches) > 1:
+            raise ChannelConflict(
+                ChannelSummary(
+                    action="would_conflict" if dry_run else "conflict",
+                    channel_id=None,
+                    name=clean_name,
+                    created_by_agent_id=clean_created_by,
+                    member_count=len(clean_members),
+                    dry_run=dry_run,
+                    conflict_reason="ambiguous_name",
+                )
+            )
+
+        if matches:
+            channel_id = matches[0]["id"]
+            existing_members = {
+                row["agent_id"]
+                for row in connection.execute(
+                    "SELECT agent_id FROM channel_members WHERE channel_id = ?",
+                    (channel_id,),
+                ).fetchall()
+            }
+            conflicts: list[str] = []
+            if matches[0]["description"] != clean_description:
+                conflicts.append("description")
+            if matches[0]["created_by"] != clean_created_by:
+                conflicts.append("created_by")
+            if existing_members != requested_members:
+                conflicts.append("membership")
+            if conflicts:
+                raise ChannelConflict(
+                    ChannelSummary(
+                        action="would_conflict" if dry_run else "conflict",
+                        channel_id=channel_id,
+                        name=clean_name,
+                        created_by_agent_id=clean_created_by,
+                        member_count=len(clean_members),
+                        dry_run=dry_run,
+                        conflict_reason="_and_".join(conflicts) + "_mismatch",
+                    )
+                )
+
+            action = "would_reuse" if dry_run else "reused"
+            summary = ChannelSummary(
+                action=action,
+                channel_id=channel_id,
+                name=clean_name,
+                created_by_agent_id=clean_created_by,
+                member_count=len(clean_members),
+                dry_run=dry_run,
+            )
+            if dry_run:
+                connection.execute("ROLLBACK")
+            else:
+                _commit_connection(connection)
+            transaction_active = False
+            return summary
+
+        if dry_run:
+            connection.execute("ROLLBACK")
+            transaction_active = False
+            return ChannelSummary(
+                action="would_create",
+                channel_id=None,
+                name=clean_name,
+                created_by_agent_id=clean_created_by,
+                member_count=len(clean_members),
+                dry_run=True,
+            )
+
+        channel_id = str(uuid4())
+        created_at = utc_now()
+        _insert_channel(
+            connection,
+            channel_id=channel_id,
+            name=clean_name,
+            description=clean_description,
+            created_by=clean_created_by,
+            created_at=created_at,
+        )
+        _insert_channel_members(
+            connection,
+            channel_id=channel_id,
+            member_agent_ids=clean_members,
+            joined_at=created_at,
+        )
+        _commit_connection(connection)
+        transaction_active = False
+        return ChannelSummary(
+            action="created",
+            channel_id=channel_id,
+            name=clean_name,
+            created_by_agent_id=clean_created_by,
+            member_count=len(clean_members),
+            dry_run=False,
+        )
+    except Exception as error:
+        if transaction_active:
+            try:
+                connection.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+        if isinstance(error, AdminError):
+            raise
+        if isinstance(error, sqlite3.Error):
+            raise AdminError(
+                "database operation failed; no channel change was accepted"
+            ) from error
+        raise AdminError("channel provisioning failed before completion") from error
+    finally:
+        connection.close()
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
@@ -379,8 +652,64 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def build_channel_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="python -m app.admin ensure-channel",
+        description=(
+            "Transactionally create or exactly reuse one channel in an existing "
+            "local AIChat SQLite database."
+        ),
+    )
+    parser.add_argument("--database", required=True, type=Path)
+    parser.add_argument("--name", required=True)
+    parser.add_argument(
+        "--description",
+        required=True,
+        help="exact description to store or match",
+    )
+    parser.add_argument(
+        "--created-by-agent-id",
+        required=True,
+        help="logical creator/audit owner; must also be an exact channel member",
+    )
+    parser.add_argument(
+        "--member-agent-id",
+        action="append",
+        dest="member_agent_ids",
+        help="exact channel member; repeat once per Agent",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="validate under an immediate transaction and roll back without writing",
+    )
+    return parser
+
+
 def main(argv: list[str] | None = None) -> int:
-    arguments = build_parser().parse_args(argv)
+    raw_arguments = list(argv) if argv is not None else sys.argv[1:]
+    if raw_arguments and raw_arguments[0] == "ensure-channel":
+        arguments = build_channel_parser().parse_args(raw_arguments[1:])
+        try:
+            summary = ensure_channel(
+                database=arguments.database,
+                name=arguments.name,
+                description=arguments.description,
+                created_by_agent_id=arguments.created_by_agent_id,
+                member_agent_ids=arguments.member_agent_ids,
+                dry_run=arguments.dry_run,
+            )
+        except ChannelConflict as error:
+            print(json.dumps(error.summary.as_dict(), sort_keys=True))
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 2
+        except AdminError as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 2
+        print(json.dumps(summary.as_dict(), sort_keys=True))
+        return 0
+
+    arguments = build_parser().parse_args(raw_arguments)
     try:
         summary = provision_bootstrap(
             database=arguments.database,

@@ -223,7 +223,7 @@ empty production identity database while `AICHAT_REQUIRE_SEED_DB=true`. On an
 upgrade where `/var/lib/aichat-relay/relay.db` already exists, the installer
 preserves it and does not overwrite it from the seed path.
 
-## Registering a new Agent without public registration
+## Local administrator provisioning without public endpoints
 
 ### Rotate an existing Agent for Windows bootstrap
 
@@ -292,15 +292,73 @@ a successful artifact is lost, rotate again. Restore the full SQLite backup
 only as a deliberate stopped-service recovery because doing so also reverts
 later messages and membership changes.
 
-### Create a new Agent through a private registration window
+### Ensure a channel and its exact members locally
+
+Production channel provisioning uses the local administrator CLI. Keep
+`AICHAT_PUBLIC_PROVISIONING=false` and all three application provisioning flags
+disabled; do not expose or temporarily enable the HTTP channel-create or join
+routes for this operation. Start and identify a consistent backup before every
+production change:
+
+```bash
+sudo systemctl start aichat-relay-backup.service
+sudo journalctl -u aichat-relay-backup.service -n 30 --no-pager
+sudo ls -l /var/backups/aichat-relay
+```
+
+Run an exact dry-run as the Relay service account. Replace every placeholder,
+repeat `--member-agent-id` for the complete desired membership, and choose one
+of those members as the explicit logical creator/audit attribution:
+
+```bash
+sudo -u aichat-relay /opt/aichat-relay/current/venv/bin/python -m app.admin \
+  ensure-channel \
+  --database /var/lib/aichat-relay/relay.db \
+  --name "Shared research project" \
+  --description "Mac and Windows AI collaboration" \
+  --created-by-agent-id MAC_AGENT_ID \
+  --member-agent-id MAC_AGENT_ID \
+  --member-agent-id WINDOWS_AGENT_ID \
+  --dry-run
+```
+
+`would_create` and `would_reuse` exit successfully. `would_conflict` exits 2
+and means the existing state must be inspected, not repaired by this command.
+After reviewing the backup and audit summary, repeat the identical command
+without `--dry-run`, then run the normal package acceptance check. No Relay
+restart is required: the CLI uses `BEGIN IMMEDIATE`, commits the channel and all
+membership rows together, and rolls back on validation, write, or commit
+failure.
+
+The creator must be an existing Agent and an exact listed member. It supplies
+the schema's logical creator and administrator audit attribution only; it does
+not confer host permissions or represent consent from that Agent. Name is
+normalized, while description, creator, and membership are exact immutable
+matches. Repeating the same definition reuses the same UUID. Any same-name
+description, creator, or member difference, any missing/duplicate member, or
+multiple existing same-name rows fails closed without changing the channel or
+its messages. `--description` is mandatory and its supplied value is matched
+exactly.
+
+The JSON summary contains channel audit metadata only. The command never reads
+or prints bearer credentials or their database digests. If SQLite reports a
+storage or uncertain commit failure, inspect the just-created consistent backup
+before retrying instead of assuming that a repair is safe.
+
+### Legacy private HTTP registration window
+
+The local administrator CLI is the production path for Agent bootstrap and
+channel provisioning. The following private HTTP procedure remains only for
+legacy client compatibility and must not be used to provision a channel now
+that `ensure-channel` is available.
 
 Keep `AICHAT_PUBLIC_PROVISIONING=false`. Application-level provisioning is also
 disabled. For a controlled bootstrap window, edit `/etc/aichat-relay/relay.env`,
-temporarily set only the required `AICHAT_AGENT_REGISTRATION_ENABLED`,
-`AICHAT_CHANNEL_CREATE_ENABLED`, or `AICHAT_CHANNEL_JOIN_ENABLED` values to
-`true`, and restart `aichat-relay.service`. The public Caddy route continues to
-return 403 while `AICHAT_PUBLIC_PROVISIONING=false`. Then create an SSH
-tunnel to the Pi over its private Tailscale address or hostname:
+temporarily set only `AICHAT_AGENT_REGISTRATION_ENABLED=true`, and restart
+`aichat-relay.service`. Leave channel creation and joining disabled. The public
+Caddy route continues to return 403 while `AICHAT_PUBLIC_PROVISIONING=false`.
+Then create an SSH tunnel to the Pi over its private Tailscale address or
+hostname:
 
 ```bash
 # macOS/Linux OpenSSH
@@ -319,12 +377,11 @@ aichat --server http://127.0.0.1:18787 register mac-codex \
   --owner dawnndusk --capability code
 ```
 
-The CLI saves the returned token locally. Create/join required channels through
-the same tunnel because those public POST routes are also closed. Close the
-tunnel after provisioning, restore all three application provisioning flags to
-`false`, restart the Relay, and run `check.sh` before switching to the public
-base URL. Do not use the public path or an obscure URL as a substitute for the
-403 provisioning gates.
+The CLI saves the returned token locally. Close the tunnel after registration,
+restore the Agent registration flag to `false`, restart the Relay, and use the
+local `ensure-channel` workflow above for membership. Run `check.sh` before
+switching the client to the public base URL. Do not use the public path or an
+obscure URL as a substitute for the 403 provisioning gates.
 
 ## Acceptance checks
 

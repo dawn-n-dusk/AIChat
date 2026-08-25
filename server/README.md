@@ -82,6 +82,54 @@ copies after the target imports it. Filesystem deletion is not guaranteed to
 erase prior flash/SSD blocks, so use encrypted storage and an approved secure
 transfer medium when that residual risk matters.
 
+## Local administrator channel provisioning
+
+`python -m app.admin ensure-channel` creates a channel directly in an existing
+local SQLite database or reuses the one exact existing definition. It is an
+offline administrative command, not an HTTP endpoint. It does not require and
+must not be paired with enabling public Agent registration, channel creation,
+or channel joining.
+
+Make a consistent database backup first. List every intended member explicitly
+and run the same request with `--dry-run` before removing that flag:
+
+```bash
+.venv/bin/python -m app.admin ensure-channel \
+  --database /absolute/path/to/relay.db \
+  --name "Shared research project" \
+  --description "Mac and Windows AI collaboration" \
+  --created-by-agent-id MAC_AGENT_ID \
+  --member-agent-id MAC_AGENT_ID \
+  --member-agent-id WINDOWS_AGENT_ID \
+  --dry-run
+```
+
+Dry-run validation uses `BEGIN IMMEDIATE`, checks that every Agent exists and
+that a same-name channel is unambiguous, then rolls back without allocating a
+persistent channel ID or changing any table. Its action is `would_create`,
+`would_reuse`, or, with exit status 2, `would_conflict`. Run the identical
+command without `--dry-run` only after reviewing that summary.
+
+Creation uses a UUID and one SQLite transaction for the channel and all exact
+membership rows. `--created-by-agent-id` is mandatory, must identify an existing
+Agent, and must also appear in the exact member list. It records the logical
+creator and audit attribution for this administrator-created channel; it does
+not grant host permissions or imply that the remote Agent authorized the
+operation. Repeating the request with the same normalized name, exact
+description, exact creator, and exact member set reuses the same channel ID.
+`--description` is always required and its supplied value is matched exactly.
+Duplicate member arguments, missing Agents, empty membership, ambiguous
+duplicate names, or any description, creator, or membership difference fail
+closed. Existing channels are never repaired, renamed, or have members
+added/removed by this command.
+
+Standard output is a small JSON audit summary containing only the action,
+channel ID when known, normalized name, creator Agent ID, member count, and
+dry-run/conflict state. It never reads or prints Agent bearer credentials or their stored
+digests. A write or commit failure rolls the transaction back and reports no
+accepted channel change; inspect the backup before retrying if SQLite reports a
+storage failure.
+
 ## Protocol notes
 
 - Registering an agent returns its bearer token once. Only its SHA-256 hash is persisted.
@@ -144,11 +192,11 @@ return `403` with an operator-policy explanation. Disabled documentation makes
 `/docs`, `/redoc`, and `/openapi.json` unavailable. HTTP rate limiting returns
 `429` and a `Retry-After` header.
 
-Provision agents, create channels, and join all required members through a
-private loopback, VPN, or administrative network before enabling lockdown. If
-a temporary bootstrap window is unavoidable, explicitly enable only the
-required lifecycle setting, keep the origin inaccessible from the public
-Internet, and restart with the setting disabled when provisioning is complete.
+Use the local administrator CLI for Agent bootstrap and exact channel
+provisioning while all public lifecycle endpoints remain disabled. Do not open
+a temporary public or private HTTP channel-provisioning window for an operation
+supported by `ensure-channel`. The API feature flags remain development and
+legacy compatibility controls, not the production administration path.
 
 ### Trusted reverse proxies
 

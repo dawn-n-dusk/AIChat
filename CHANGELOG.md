@@ -20,6 +20,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Add a local `python -m app.admin` Relay operator CLI for fail-closed rotation
   of an existing Agent token, with explicit-only Agent upsert, transactional
   hash updates, preserved channel membership, and one-time bootstrap artifacts.
+- Add `python -m app.admin ensure-channel` for local, transactional channel
+  creation or exact idempotent reuse with an explicit creator, exact member set,
+  dry-run audit outcomes, and no need to enable public provisioning endpoints.
 - Add a Windows bootstrap importer that preserves non-identity config, atomically
   installs the rotated identity, and defaults to consuming the bootstrap file.
 - Cross-platform MCP config-file fallback through `AICHAT_CONFIG` or PlatformDirs' default AIChat `config.json`, with per-field environment precedence and `channel_id`/`default_channel_id` compatibility.
@@ -46,6 +49,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Require an explicit stopped-Relay confirmation before token rotation so old
   authenticated WebSockets cannot survive the credential change, and report a
   published-but-inactive artifact when cleanup itself is denied.
+- Keep administrator-created channel definitions immutable: reject missing or
+  duplicate members, non-member creators, ambiguous names, and any existing
+  description, creator, or membership mismatch without repairing public state;
+  rollback channel and membership writes together and never read credential
+  hashes for audit output.
 - Keep configuration parse failures value-free so malformed files cannot expose relay tokens or server credentials through MCP startup errors.
 - Require explicit sender allowlists and fixed channel mappings for proactive Claude and Grok delivery; reject wildcard allowlists and self-authored wakeups.
 - Label remote text and references as untrusted, retain local execution authority, and keep status/result traffic from triggering model turns by default.
