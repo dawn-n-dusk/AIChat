@@ -342,7 +342,12 @@ public static class Program {
     }
     $checkOutput = & $checker *>&1 | Out-String
     Add-CapturedOutput $checkOutput
-    if ($LASTEXITCODE -ne 0) { throw "Connector service check failed after first install" }
+    if ($LASTEXITCODE -ne 0) {
+        if ($checkOutput.Contains($token)) {
+            throw "Connector service check exposed the synthetic Relay token"
+        }
+        throw "Connector service check failed after first install:`n$checkOutput"
+    }
 
     New-Item -ItemType HardLink -Path $hardlinkAlias -Target $paths.SettingsPath | Out-Null
     Invoke-ExpectedFailure `
