@@ -88,9 +88,9 @@ The driver boundary is:
 
 This ordering describes the integration contract, not a promise that App Server or private Desktop IPC is stable across releases. Each production driver must publish its supported Codex versions, ownership checks, idempotency behavior, and acceptance evidence.
 
-Automatic egress is a separate opt-in. It accepts only a model-declared `result` or connector-generated `status`, requires an acknowledgement that the channel is a broadcast audience, and requires a private canary file. HTTPS reference-host allowlists, secret-pattern checks, the canary, and the Codex sandbox are defense in depth rather than proof of non-disclosure. `reply_to` is correlation metadata, not a private-recipient selector; every channel member can read the response.
+Automatic egress is a separate opt-in. It accepts only a model-declared `result` or connector-generated `status` from a durably reply-eligible `request` receipt, requires an acknowledgement that the channel is a broadcast audience, and requires a private canary file. Pre-upgrade receipts without a persisted source type migrate as reply-ineligible. Permanent result quarantine produces a fixed redacted terminal `blocked` status with stable restart-safe idempotency, independent of ordinary accepted/running lifecycle notifications. HTTPS reference-host allowlists, secret-pattern checks, the canary, and the Codex sandbox are defense in depth rather than proof of non-disclosure. `reply_to` is correlation metadata, not a private-recipient selector; every channel member can read the response.
 
-The rollback-capable [macOS LaunchAgent package](../deploy/macos/README.md) keeps owner IPC and automatic egress off, fixes the App Server driver, loads the Relay token from the existing private identity file only at runtime, and never places the token in the plist or command line.
+The rollback-capable [macOS LaunchAgent package](../deploy/macos/README.md) keeps owner IPC off and automatic egress off by default, exposes a complete channel/canary/reference/size opt-in, fixes the App Server driver, loads the Relay token from the existing private identity file only at runtime, and never places the token in the plist or command line.
 
 ### Repository plugin
 

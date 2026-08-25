@@ -35,8 +35,43 @@ backup_dir="${STATE_ROOT}/backups/${backup_id}"
   exit 1
 }
 
+restored_automatic_egress="absent"
+if [[ -f "${backup_dir}/previous-current" ]]; then
+  previous_target="$(<"${backup_dir}/previous-current")"
+  [[ "$previous_target" == "${STATE_ROOT}/releases/"* && -f "${previous_target}/runtime/src/cli.js" ]] || {
+    printf 'ERROR: previous release target is invalid\n' >&2
+    exit 1
+  }
+  if [[ -f "${backup_dir}/settings" && -f "${backup_dir}/launcher" ]]; then
+    node_binary="$(command -v node || true)"
+    python_binary="$(command -v python3 || true)"
+    [[ -n "$node_binary" && "$node_binary" == /* && -n "$python_binary" && "$python_binary" == /* ]] || {
+      printf 'ERROR: Node.js and Python 3 are required to validate the rollback snapshot\n' >&2
+      exit 1
+    }
+    settings_summary="$(
+      "$python_binary" "${backup_dir}/launcher" \
+        --settings "${backup_dir}/settings" \
+        --connector "${previous_target}/runtime/src/cli.js" \
+        --node "$node_binary" \
+        --check-settings
+    )"
+    restored_automatic_egress="$(
+      awk -F= '$1 == "automatic_egress" { print $2 }' <<<"$settings_summary"
+    )"
+    if [[ -z "$restored_automatic_egress" ]]; then
+      restored_automatic_egress=false
+    fi
+    [[ "$restored_automatic_egress" == true || "$restored_automatic_egress" == false ]] || {
+      printf 'ERROR: rollback settings summary is invalid\n' >&2
+      exit 1
+    }
+  fi
+fi
+
 printf 'rollback_snapshot=%s\n' "$backup_id"
 printf 'current_release_preserved=true\n'
+printf 'restored_automatic_egress=%s\n' "$restored_automatic_egress"
 if [[ "$apply" != true ]]; then
   printf 'dry_run=true\n'
   exit 0
@@ -44,11 +79,6 @@ fi
 
 launchctl bootout "gui/${UID}/${LABEL}" >/dev/null 2>&1 || true
 if [[ -f "${backup_dir}/previous-current" ]]; then
-  previous_target="$(<"${backup_dir}/previous-current")"
-  [[ "$previous_target" == "${STATE_ROOT}/releases/"* && -d "$previous_target" ]] || {
-    printf 'ERROR: previous release target is invalid\n' >&2
-    exit 1
-  }
   ln -sfn -- "$previous_target" "$CURRENT_LINK"
 else
   rm -f -- "$CURRENT_LINK"
