@@ -274,7 +274,7 @@ public static class Program {
     Add-CapturedOutput $whatIfOutput
     $env:PATH = $oldPath
     $env:AICHAT_CI_CODEX_EXEC_CANARY = $null
-    if (Test-Path -LiteralPath $paths.StateRoot -or
+    if ((Test-Path -LiteralPath $paths.StateRoot) -or
         $null -ne (Get-AIChatConnectorTask) -or
         (Get-Acl -LiteralPath $protectedRoot).Sddl -ne $rootSddl -or
         (Get-FileHash -LiteralPath $settingsPath -Algorithm SHA256).Hash -ne $settingsHash -or
