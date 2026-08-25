@@ -9,6 +9,7 @@ const MAX_SEEN_IDS = 1_000;
 const MAX_PENDING_STATUSES = 1_000;
 const MAX_BLOCKED_OUTBOUND = 1_000;
 const MAX_TURN_BUDGET = 10_000;
+const VALID_SOURCE_MESSAGE_TYPES = new Set(["text", "request", "result", "status"]);
 
 export class StateStore {
   constructor(path) {
@@ -124,7 +125,10 @@ function parseReceipts(value, stateVersion) {
               "delivery receipt source_message_type",
             )
           : null,
-      replyEligible: stateVersion >= 5 ? item.reply_eligible === true : false,
+      replyEligible:
+        stateVersion >= 5
+          ? requiredBoolean(item.reply_eligible, "delivery receipt reply_eligible")
+          : false,
       hopCount: boundedInteger(item.hop_count, 0, 8, "delivery receipt hop_count"),
       replied: item.replied === true,
       outboundMessageId: optionalString(item.outbound_message_id),
@@ -192,12 +196,20 @@ function parseTurnBudget(value) {
 }
 
 function toStoredReceipt(receipt) {
+  const sourceMessageType = optionalSourceMessageType(
+    receipt.sourceMessageType,
+    "delivery receipt sourceMessageType",
+  );
+  const replyEligible = receipt.replyEligible === true;
+  if (replyEligible !== (sourceMessageType === "request")) {
+    throw new Error("delivery receipt reply eligibility does not match sourceMessageType");
+  }
   return {
     source_message_id: receipt.sourceMessageId,
     delivery_id: receipt.deliveryId,
     sender_id: receipt.senderId,
-    source_message_type: receipt.sourceMessageType,
-    reply_eligible: receipt.replyEligible === true,
+    source_message_type: sourceMessageType,
+    reply_eligible: replyEligible,
     hop_count: receipt.hopCount,
     replied: receipt.replied,
     outbound_message_id: receipt.outboundMessageId,
@@ -277,9 +289,14 @@ function requiredString(value, name) {
 
 function optionalSourceMessageType(value, name) {
   if (value == null) return null;
-  if (!new Set(["text", "request", "result", "status"]).has(value)) {
+  if (!VALID_SOURCE_MESSAGE_TYPES.has(value)) {
     throw new Error(`${name} is invalid`);
   }
+  return value;
+}
+
+function requiredBoolean(value, name) {
+  if (typeof value !== "boolean") throw new Error(`${name} must be true or false`);
   return value;
 }
 

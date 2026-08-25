@@ -174,6 +174,7 @@ test("lifecycle-off request completion and failure emit only local suppression e
   for (const [status, finalText] of [
     ["completed", JSON.stringify({ aichat_reply: null })],
     ["failed", null],
+    ["interrupted", null],
   ]) {
     const turnId = `turn-lifecycle-off-${status}`;
     const process = fakeAppServer((message, child) => {

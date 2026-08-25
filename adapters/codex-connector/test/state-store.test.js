@@ -138,6 +138,25 @@ test("StateStore loads pre-v5 receipts as reply-ineligible and persists that fai
   assert.equal(persisted.delivery_receipts[0].reply_eligible, false);
 });
 
+test("StateStore rejects malformed v5 reply eligibility instead of upgrading it", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "aichat-codex-state-v5-bad-"));
+  const path = join(directory, "state.json");
+  await writeFile(
+    path,
+    JSON.stringify({
+      version: 5,
+      delivery_receipts: [
+        {
+          ...storedReceipt(1, false),
+          source_message_type: "result",
+          reply_eligible: "false",
+        },
+      ],
+    }),
+  );
+  await assert.rejects(() => new StateStore(path).load(), /reply_eligible must be true or false/);
+});
+
 test("StateStore atomic writes preserve an existing parent directory mode", async (t) => {
   if (process.platform === "win32") return t.skip("POSIX mode check is not available");
   const directory = await mkdtemp(join(tmpdir(), "aichat-codex-state-parent-mode-"));
