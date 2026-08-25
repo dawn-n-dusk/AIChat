@@ -78,6 +78,10 @@ For a reply-eligible request, permanent result quarantine also queues one fixed,
 redacted terminal `blocked` status with a stable idempotency key. It is
 independent of accepted/running lifecycle notifications. A Relay send failure
 leaves the status pending for ordered recovery after reconnect or restart.
+When ordinary lifecycle status is disabled, request completion without a model
+result and failed/interrupted completion are checkpointed as local-only
+suppression events. They make the receipt safely releasable without sending a
+Relay message.
 
 ## Codex drivers
 
@@ -188,7 +192,7 @@ Node.js 20 or newer is required.
 | `AICHAT_INSTANCE_LOCK_PORT` | no | Deterministic mapping-specific loopback lock port. |
 | `AICHAT_INSTANCE_LOCK_METADATA_PATH` | must be unset | Fixed to `<canonical-state>.instance-lock.json`; overrides are rejected. |
 | `AICHAT_AUTO_REPLY_ENABLED` | no | `false`. |
-| `AICHAT_LIFECYCLE_STATUS_ENABLED` | no | `true`; controls ordinary accepted/running/blocked lifecycle notifications, not the fixed terminal quarantine status. No status is sent while automatic egress is off. |
+| `AICHAT_LIFECYCLE_STATUS_ENABLED` | no | `true`; controls ordinary accepted/running/completed/failed/blocked lifecycle notifications, not the fixed terminal quarantine status. Disabled completion status is checkpointed locally. No status is sent while automatic egress is off. |
 | `AICHAT_EGRESS_CHANNEL_AUDIENCE_ACK` | auto egress | Must be `true` because the channel is a broadcast audience. |
 | `AICHAT_EGRESS_CANARY_FILE` | auto egress | Private regular file, 16–512 characters, mode `0600` or stricter. |
 | `AICHAT_EGRESS_ALLOWED_REFERENCE_HOSTS` | no | Comma-separated exact HTTPS hostnames; empty blocks all references. |

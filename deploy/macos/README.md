@@ -7,8 +7,8 @@ LaunchAgent. It is intentionally conservative:
   disabled.
 - Only `request` messages from exact allowed sender IDs start Codex turns.
 - Automatic AIChat egress is disabled by default and requires the complete
-  local `egress` opt-in described below. General accepted/running lifecycle
-  status remains disabled even after opt-in.
+  local `egress` opt-in described below. General accepted/running/completed/
+  failed lifecycle status remains disabled even after opt-in.
 - Relay WebSocket events wake ordered cursor recovery. The 30-second periodic
   recovery timer is disabled. Startup and WebSocket reconnect still recover from
   the persisted cursor.
@@ -161,8 +161,10 @@ policy, the connector durably quarantines it and independently queues one fixed
 terminal `blocked` status. That status contains no original error, policy
 detail, model text, or secret. Its stable idempotency key survives Relay send
 failure and process restart. This terminal notification is independent of the
-general lifecycle-status switch; accepted/running notifications remain off in
-this package.
+general lifecycle-status switch. Accepted/running/completed/failed
+notifications remain off in this package; a completion without a model result
+is checkpointed as a local-only suppression event so its receipt can be safely
+released without Relay egress.
 
 `reply_to` correlates a response with a prior message; it is not a private
 recipient selector. Every channel member can read the response. Even with the
