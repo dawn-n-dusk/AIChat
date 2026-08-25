@@ -129,6 +129,15 @@ try {
     }
 }
 
+$legacyRunnerTest = Join-Path $PSScriptRoot "test_legacy_codex_runner_disabled.ps1"
+& powershell.exe `
+    -NoProfile `
+    -ExecutionPolicy Bypass `
+    -File $legacyRunnerTest
+if ($LASTEXITCODE -ne 0) {
+    throw "Legacy Windows CodexConnector runner boundary test failed"
+}
+
 $connectorServiceTest = Join-Path $PSScriptRoot "test_connector_service.ps1"
 & powershell.exe `
     -NoProfile `

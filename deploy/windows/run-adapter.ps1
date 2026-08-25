@@ -11,6 +11,10 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+if ($Mode -eq "CodexConnector") {
+    throw "Legacy CodexConnector runner is disabled; use deploy/windows/connector-service"
+}
+
 . (Join-Path $PSScriptRoot "common.ps1")
 
 $paths = Get-AIChatWindowsPaths -StateRoot $PSScriptRoot -ConfigPath $ConfigPath
@@ -47,29 +51,6 @@ switch ($Mode) {
             throw "AIChat MCP runtime is not installed. Re-run install.ps1 with CoreMcp."
         }
         & $executable
-        exit $LASTEXITCODE
-    }
-    "CodexConnector" {
-        foreach ($required in @("AICHAT_CHANNEL_ID")) {
-            if (-not (Get-Item -Path "Env:$required" -ErrorAction SilentlyContinue)) {
-                throw "AIChat config is missing channel_id/default_channel_id"
-            }
-        }
-        foreach ($property in @("allowed_sender_ids", "codex_thread_id")) {
-            if (-not $settings.PSObject.Properties[$property] -or -not [string]$settings.$property) {
-                throw "Adapter settings are missing $property"
-            }
-        }
-        $env:AICHAT_CODEX_CONNECTOR_ENABLED = "true"
-        $env:AICHAT_ALLOWED_SENDER_IDS = [string]$settings.allowed_sender_ids
-        $env:CODEX_TARGET_THREAD_ID = [string]$settings.codex_thread_id
-        $env:CODEX_DRIVER = if ($settings.PSObject.Properties["codex_driver"] -and [string]$settings.codex_driver) {
-            [string]$settings.codex_driver
-        } else {
-            "auto"
-        }
-        $entry = Join-Path $paths.RuntimeDirectory "codex-connector\src\cli.js"
-        & node $entry
         exit $LASTEXITCODE
     }
     "ClaudeChannel" {

@@ -388,12 +388,25 @@ def test_online_identity_check_validates_transport_before_authorization() -> Non
 
 def test_ci_runs_windows_connector_service_functional_test() -> None:
     functional = ROOT / "tests" / "test_connector_service.ps1"
+    legacy = ROOT / "tests" / "test_legacy_codex_runner_disabled.ps1"
     wrapper = ROOT / "tests" / "test_plugin_mcp_autoload.ps1"
     assert functional.is_file()
+    assert legacy.is_file()
     wrapper_text = wrapper.read_text(encoding="utf-8")
     assert "test_connector_service.ps1" in wrapper_text
+    assert "test_legacy_codex_runner_disabled.ps1" in wrapper_text
     assert "$protectedRootExisted = Test-Path" in wrapper_text
     assert "test-created AIChat root because it is no longer empty" in wrapper_text
     assert wrapper_text.index("Remove-Item -LiteralPath $protectedRoot -Force") < wrapper_text.index(
         "$connectorServiceTest ="
     )
+
+
+def test_legacy_codex_runner_fails_before_config_or_process_access() -> None:
+    runner = (ROOT / "run-adapter.ps1").read_text(encoding="utf-8")
+    guard = runner.index('if ($Mode -eq "CodexConnector")')
+    assert guard < runner.index('. (Join-Path $PSScriptRoot "common.ps1")')
+    assert guard < runner.index("Read-JsonObject")
+    assert guard < runner.index("$env:AICHAT_TOKEN")
+    assert '"CodexConnector" {' not in runner
+    assert "Legacy CodexConnector runner is disabled" in runner

@@ -101,7 +101,7 @@ Restart Codex App and open a new task after the refresh.
 | `CoreMcp` | Private Python runtime for interactive AIChat MCP tools | MCP does not wake an existing conversation |
 | `CodexPlugin` | Repository marketplace plugin, skills, and MCP entry | Restart Codex and open a new task after installation |
 | `CodexMcp` | Direct local MCP entry named `aichat-local` | Alternative to the plugin MCP, not proactive delivery |
-| `CodexConnector` | Event-driven fixed-task connector runtime | Windows uses separate `codex app-server`; it does not prove live attachment to the open Desktop UI task |
+| `CodexConnector` | Legacy runtime payload only | `run-adapter.ps1` refuses this mode before reading config; use the hardened `connector-service/` package |
 | `ClaudeDesktop` | Standard interactive MCP tools | Claude Desktop has no Claude Code Channel push |
 | `ClaudeCodeMcp` | Standard user-scoped MCP tools | Interactive pull/send only |
 | `ClaudeChannel` | Research-preview Claude Code Channel adapter | Start Claude with `--dangerously-load-development-channels server:aichat-channel`; it targets that launched session only |
@@ -312,15 +312,14 @@ Windows identity, and prints only the agent ID. If a token already exists it is
 preserved. Registration is disabled on the production Relay. Use the protected
 bootstrap import above instead of editing example JSON or typing a token.
 
-Prepare proactive adapters:
+Prepare the remaining proactive adapters:
 
 ```powershell
 .\deploy\windows\install.ps1 `
-  -Components CoreMcp,CodexConnector,ClaudeChannel,GrokBridge `
+  -Components CoreMcp,ClaudeChannel,GrokBridge `
   -RelayUrl "https://relay.example.org/aichat" `
   -ChannelId "CHANNEL_ID" `
   -AllowedSenderIds "AGENT_ID_1,AGENT_ID_2" `
-  -CodexThreadId "CODEX_SESSION_UUID" `
   -GrokWorkDir "C:\work\project"
 ```
 
@@ -328,14 +327,14 @@ Run prepared adapters from the private state directory:
 
 ```powershell
 $root = "$env:LOCALAPPDATA\AIChat\deploy\windows"
-& "$root\run-adapter.ps1" -Mode CodexConnector
 & "$root\run-adapter.ps1" -Mode GrokBridge
 claude --dangerously-load-development-channels server:aichat-channel
 ```
 
-Only one proactive adapter instance should own a given channel/task/state
-mapping. Keep Codex Desktop from editing the same Windows task while the
-app-server connector is delivering a turn.
+For Codex, use only the hardened `connector-service/` flow above. The legacy
+`run-adapter.ps1 -Mode CodexConnector` path fails before it reads identity
+configuration or starts Node, so it cannot bypass the task, sandbox, egress,
+and binary-pinning contract.
 
 ## Check, rollback, uninstall
 
