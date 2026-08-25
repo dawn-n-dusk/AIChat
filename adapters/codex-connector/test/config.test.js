@@ -3,6 +3,7 @@ import { access, chmod, link, mkdir, mkdtemp, stat, symlink, writeFile } from "n
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { pathToFileURL } from "node:url";
 
 import {
   defaultInstanceLockPort,
@@ -29,15 +30,16 @@ test("loadConfig requires an explicit enable gate and complete fixed mapping", (
   assert.throws(() => loadConfig(validEnv({ CODEX_TARGET_THREAD_ID: "" })), /required/);
   assert.throws(() => loadConfig(validEnv({ AICHAT_ALLOWED_SENDER_IDS: "" })), /required/);
 
-  const config = loadConfig(validEnv({ CODEX_TARGET_HOST_ID: "host-1" }), { cwd: "/tmp/base" });
+  const moduleBase = join(tmpdir(), "aichat-config-base");
+  const config = loadConfig(validEnv({ CODEX_TARGET_HOST_ID: "host-1" }), { cwd: moduleBase });
   assert.equal(config.channelId, "channel-1");
   assert.equal(config.targetThreadId, "thread-1");
   assert.equal(config.targetHostId, "host-1");
   assert.deepEqual([...config.allowedSenderIds], ["agent-a", "agent-b"]);
   assert.deepEqual([...config.deliverTypes], ["request"]);
-  assert.equal(config.driverModule, "file:///tmp/base/driver.js");
+  assert.equal(config.driverModule, pathToFileURL(join(moduleBase, "driver.js")).href);
   assert.equal(config.driverMode, "module");
-  assert.match(config.stateFile, /\.aichat\/codex-connector\/[a-f0-9]{24}\.json$/);
+  assert.match(config.stateFile, /\.aichat[\\/]codex-connector[\\/][a-f0-9]{24}\.json$/);
   assert.equal(config.instanceStateLockPort, defaultStateLockPort(config.stateFile));
   assert.match(config.instanceLockIdentity, /^[a-f0-9]{64}$/);
 });
@@ -47,7 +49,7 @@ test("built-in drivers require a dedicated low-privilege connector task", () => 
     CODEX_DRIVER_MODULE: "",
     CODEX_CONNECTOR_TASK_OWNED: "true",
     CODEX_CONNECTOR_TASK_MARKER: "AICHAT_CONNECTOR_TASK_MARKER_1",
-    CODEX_APP_SERVER_CWD: "/tmp",
+    CODEX_APP_SERVER_CWD: tmpdir(),
     CODEX_APP_SERVER_APPROVAL_POLICY: "never",
     CODEX_APP_SERVER_SANDBOX_POLICY_JSON: JSON.stringify({
       type: "readOnly",

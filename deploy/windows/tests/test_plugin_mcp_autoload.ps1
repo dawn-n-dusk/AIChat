@@ -15,6 +15,7 @@ $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..\..")).Path
 $installer = Join-Path $repositoryRoot "deploy\windows\install.ps1"
 $testId = [Guid]::NewGuid().ToString("N")
 $protectedRoot = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA "AIChat"))
+$protectedRootExisted = Test-Path -LiteralPath $protectedRoot
 $testRoot = [IO.Path]::GetFullPath((Join-Path $protectedRoot "ci-plugin-mcp-$testId"))
 if (-not $testRoot.StartsWith($protectedRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
     throw "Resolved test path escaped the expected LocalAppData root"
@@ -119,4 +120,29 @@ try {
         }
         Remove-Item -LiteralPath $resolvedCleanup -Recurse -Force -ErrorAction SilentlyContinue
     }
+    if (-not $protectedRootExisted -and (Test-Path -LiteralPath $protectedRoot -PathType Container)) {
+        $remaining = @(Get-ChildItem -LiteralPath $protectedRoot -Force)
+        if ($remaining.Count -ne 0) {
+            throw "Refusing to remove the test-created AIChat root because it is no longer empty"
+        }
+        Remove-Item -LiteralPath $protectedRoot -Force
+    }
+}
+
+$legacyRunnerTest = Join-Path $PSScriptRoot "test_legacy_codex_runner_disabled.ps1"
+& powershell.exe `
+    -NoProfile `
+    -ExecutionPolicy Bypass `
+    -File $legacyRunnerTest
+if ($LASTEXITCODE -ne 0) {
+    throw "Legacy Windows CodexConnector runner boundary test failed"
+}
+
+$connectorServiceTest = Join-Path $PSScriptRoot "test_connector_service.ps1"
+& powershell.exe `
+    -NoProfile `
+    -ExecutionPolicy Bypass `
+    -File $connectorServiceTest
+if ($LASTEXITCODE -ne 0) {
+    throw "Windows connector service functional test failed"
 }
