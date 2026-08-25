@@ -79,12 +79,17 @@ only for this single-worker invited deployment.
   public registration/channel provisioning denies.
 - `templates/caddy-global-options.caddy`: scoped AIChat error-logger query redaction.
 - `scripts/install.sh`: staged release, local health, atomic Caddy patch, validation,
-  public health, initial-backup acceptance, and transactional failure rollback.
+  bounded public-health retry, initial-backup acceptance, and transactional
+  failure rollback.
 - `scripts/check.sh`: service, bind, HTTPS, registration deny, DB, backup, Caddy,
   optional WSS, and RustDesk non-interference checks.
 - `scripts/rollback.sh`: atomic code rollback with optional explicit Caddy backup.
 - `scripts/backup.py`: consistent SQLite backup implementation.
 - `scripts/validate-package.sh`: non-root local artifact checks.
+
+The lightweight `validate-package.sh` checks run in GitHub Actions on Linux.
+The disposable Docker installer scenarios remain an explicit maintainer gate so
+routine CI does not need to start privileged throwaway installation containers.
 
 ## Preflight
 
@@ -140,8 +145,9 @@ deploy/raspberry-pi/scripts/validate-package.sh
 ```
 
 Maintainers can also run the disposable Docker failure-injection suite. It
-executes first-install and upgrade success plus local-health, daemon-reload,
-Caddy reload, public-health, initial-backup, previous-link, and incomplete
+executes first-install and upgrade success plus first-install and upgrade
+transient/persistent public-health behavior, local-health, daemon-reload, Caddy
+reload, public network failures, initial-backup, previous-link, and incomplete
 rollback scenarios inside throwaway containers; it never targets the host's
 `/opt` or `/etc`:
 
@@ -172,7 +178,12 @@ The installer performs these state changes only when it is run:
 6. first validates a full candidate that excludes only the AIChat prefix from
    access logs and scopes its handler errors to a query-redacting named logger,
    then backs up and atomically patches the existing Caddyfile before the
-   configured fallback, reloads Caddy, and accepts public `/aichat/health`;
+   configured fallback, reloads Caddy, and accepts public `/aichat/health` with
+   at most five 15-second probes separated by four 10-second sleeps. Each probe
+   disables root curl configuration and curl's own retries, and suppresses
+   response/error content. The roughly 115-second worst-case bound covers the
+   route's 30-second active-health interval plus 3-second timeout without
+   waiting indefinitely;
 7. creates an initial consistent SQLite backup, enables the daily timer, and
    only then records the formerly current release as `previous`.
 

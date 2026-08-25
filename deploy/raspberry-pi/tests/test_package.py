@@ -197,6 +197,15 @@ class DeploymentPackageTests(unittest.TestCase):
         for script in SCRIPTS.glob("*.py"):
             run("python3", "-m", "py_compile", str(script))
 
+    def test_ci_runs_lightweight_pi_package_validation_without_docker_gate(self) -> None:
+        workflow = (ROOT.parents[1] / ".github" / "workflows" / "ci.yml").read_text()
+        job = workflow.split("  raspberry-pi-package:\n", 1)[1].split(
+            "\n  windows-bootstrap:\n", 1
+        )[0]
+        self.assertIn("name: Raspberry Pi deployment package (Linux)", job)
+        self.assertIn("deploy/raspberry-pi/scripts/validate-package.sh", job)
+        self.assertNotIn("AICHAT_RUN_DOCKER_INSTALL_TESTS", job)
+
     def test_release_link_validation_is_fail_closed(self) -> None:
         script = r'''
 set -Eeuo pipefail
@@ -252,6 +261,65 @@ printf '%s\n%s\n' "$status" "$resolved"
             result = run_shell(script, str(SCRIPTS / "lib.sh"), str(link), str(releases))
             self.assertEqual(result.stdout.splitlines()[0], "2")
             self.assertIn("must be a symlink", result.stderr)
+
+    def test_public_health_retry_is_bounded_and_keeps_curl_max_time(self) -> None:
+        script = r'''
+set -Eeuo pipefail
+source "$1"
+AICHAT_PUBLIC_BASE_URL=https://example.test/aichat
+curl_calls=0
+sleep_calls=0
+curl() {
+  [[ "$1" == --disable ]]
+  curl_calls=$((curl_calls + 1))
+  retry_count=0
+  retry_value=""
+  previous_argument=""
+  for argument in "$@"; do
+    if [[ "$previous_argument" == --retry ]]; then
+      retry_value="$argument"
+    fi
+    if [[ "$argument" == --retry ]]; then
+      retry_count=$((retry_count + 1))
+    fi
+    previous_argument="$argument"
+  done
+  [[ "$retry_count" == 1 ]]
+  [[ "$retry_value" == 0 ]]
+  [[ "$*" == *"--max-time 15"* ]]
+  [[ "$*" == *"https://example.test/aichat/health"* ]]
+  printf 'UNTRUSTED_CURL_BODY token=must-not-leak\n' >&2
+  ((curl_calls >= 4))
+}
+sleep() {
+  [[ "$1" == 10 ]]
+  sleep_calls=$((sleep_calls + 1))
+}
+wait_for_public_health 5 10 15
+printf 'curl_calls=%s\nsleep_calls=%s\n' "$curl_calls" "$sleep_calls"
+'''
+        result = run_shell(script, str(SCRIPTS / "lib.sh"))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("curl_calls=4", result.stdout)
+        self.assertIn("sleep_calls=3", result.stdout)
+        self.assertIn("public HTTPS health accepted on attempt 4/5", result.stdout)
+        self.assertEqual(result.stderr.count("retrying in 10 seconds"), 3)
+        self.assertNotIn("UNTRUSTED_CURL_BODY", result.stderr)
+        self.assertNotIn("must-not-leak", result.stderr)
+
+        installer = (SCRIPTS / "install.sh").read_text()
+        self.assertIn("if ! wait_for_public_health", installer)
+        self.assertIn('"$AICHAT_PUBLIC_HEALTH_ATTEMPTS"', installer)
+        self.assertIn('"$AICHAT_PUBLIC_HEALTH_SLEEP_SECONDS"', installer)
+        self.assertIn('"$AICHAT_PUBLIC_HEALTH_MAX_TIME_SECONDS"', installer)
+        self.assertIn(
+            'curl --disable --fail --silent --retry 0 --max-time "$max_time_seconds"',
+            (SCRIPTS / "lib.sh").read_text(),
+        )
+        self.assertNotIn(
+            'curl --fail --silent --show-error --max-time 15 "$AICHAT_PUBLIC_BASE_URL/health"',
+            installer,
+        )
 
     def test_atomic_symlink_short_circuits_and_never_reuses_stale_temporary(self) -> None:
         script = r'''

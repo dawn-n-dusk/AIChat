@@ -434,7 +434,10 @@ if ! "$AICHAT_CADDY_BINARY" reload --config "$AICHAT_CADDY_CONFIG" --adapter cad
   fail_transaction "Caddy reload failed"
 fi
 
-if ! curl --fail --silent --show-error --max-time 15 "$AICHAT_PUBLIC_BASE_URL/health" >/dev/null; then
+if ! wait_for_public_health \
+  "$AICHAT_PUBLIC_HEALTH_ATTEMPTS" \
+  "$AICHAT_PUBLIC_HEALTH_SLEEP_SECONDS" \
+  "$AICHAT_PUBLIC_HEALTH_MAX_TIME_SECONDS"; then
   fail_transaction "public HTTPS health check failed"
 fi
 
