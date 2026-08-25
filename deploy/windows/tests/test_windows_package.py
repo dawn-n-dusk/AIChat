@@ -401,10 +401,13 @@ def test_ci_runs_windows_connector_service_functional_test() -> None:
     assert "2>&1 | Out-String" not in functional_text
     check_failure = functional_text.index("if ($LASTEXITCODE -ne 0) {", functional_text.index("$checkOutput ="))
     check_diagnostic = functional_text.index(
-        "Connector service check failed after first install:`n$checkOutput",
+        "Connector service check failed after first install; failed_checks=$failedCheckSummary",
         check_failure,
     )
     assert functional_text.index("$checkOutput.Contains($token)", check_failure) < check_diagnostic
+    assert "after first install:`n$checkOutput" not in functional_text
+    assert "allowedFailedChecks" in functional_text[check_failure:check_diagnostic]
+    assert "[string]$Matches[1]" in functional_text[check_failure:check_diagnostic]
     wrapper_text = wrapper.read_text(encoding="utf-8")
     assert "test_connector_service.ps1" in wrapper_text
     assert "test_legacy_codex_runner_disabled.ps1" in wrapper_text

@@ -346,7 +346,30 @@ public static class Program {
         if ($checkOutput.Contains($token)) {
             throw "Connector service check exposed the synthetic Relay token"
         }
-        throw "Connector service check failed after first install:`n$checkOutput"
+        $allowedFailedChecks = @(
+            "state-acl",
+            "connector-state-acl",
+            "transaction",
+            "settings",
+            "launcher",
+            "scheduled-task",
+            "codex-home",
+            "relay-identity"
+        )
+        $failedCheckNames = [Collections.Generic.List[string]]::new()
+        foreach ($line in @($checkOutput -split "`r?`n")) {
+            if ($line -match '^\[FAIL\] ([a-z][a-z-]*):') {
+                $failedCheck = [string]$Matches[1]
+                if ($allowedFailedChecks -contains $failedCheck -and
+                    -not $failedCheckNames.Contains($failedCheck)) {
+                    [void]$failedCheckNames.Add($failedCheck)
+                }
+            }
+        }
+        $failedCheckSummary = if ($failedCheckNames.Count -gt 0) {
+            [string]::Join(",", $failedCheckNames)
+        } else { "unclassified" }
+        throw "Connector service check failed after first install; failed_checks=$failedCheckSummary"
     }
 
     New-Item -ItemType HardLink -Path $hardlinkAlias -Target $paths.SettingsPath | Out-Null
