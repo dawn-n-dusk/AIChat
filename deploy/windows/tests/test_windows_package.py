@@ -247,6 +247,7 @@ def test_connector_service_launcher_fixes_security_and_environment_contract() ->
     root = ROOT / "connector-service"
     launcher = (root / "launcher.ps1").read_text(encoding="utf-8")
     common = (root / "common.ps1").read_text(encoding="utf-8")
+    checker = (root / "check.ps1").read_text(encoding="utf-8")
     required = {
         '["AICHAT_DELIVER_TYPES"] = "request"',
         '["AICHAT_AUTONOMOUS_TEXT_ENABLED"] = "false"',
@@ -275,6 +276,8 @@ def test_connector_service_launcher_fixes_security_and_environment_contract() ->
     assert "Get-AIChatTreeHash" in launcher
     assert "ProcessStartInfo" in launcher
     assert "UseShellExecute = $false" in launcher
+    assert "-CheckSettings *>&1" in checker
+    assert "-CheckSettings 2>&1" not in checker
 
 
 def test_connector_service_result_egress_is_explicit_and_fail_closed() -> None:

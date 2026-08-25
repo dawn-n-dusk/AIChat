@@ -47,7 +47,7 @@ try {
 }
 
 try {
-    $launcherOutput = & $paths.LauncherPath -StateRoot $paths.StateRoot -CheckSettings 2>&1 |
+    $launcherOutput = & $paths.LauncherPath -StateRoot $paths.StateRoot -CheckSettings *>&1 |
         Out-String
     if ($LASTEXITCODE -ne 0) { throw "installed launcher contract check failed" }
     $expectedEgress = if ($null -ne $settings -and [bool]$settings.egress.enabled) {
