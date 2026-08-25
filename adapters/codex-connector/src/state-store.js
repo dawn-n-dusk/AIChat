@@ -9,6 +9,7 @@ const MAX_SEEN_IDS = 1_000;
 const MAX_PENDING_STATUSES = 1_000;
 const MAX_BLOCKED_OUTBOUND = 1_000;
 const MAX_TURN_BUDGET = 10_000;
+const VALID_SOURCE_MESSAGE_TYPES = new Set(["text", "request", "result", "status"]);
 
 export class StateStore {
   constructor(path) {
@@ -22,10 +23,10 @@ export class StateStore {
       if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
         throw new Error("state must be a JSON object");
       }
-      if (!Number.isInteger(parsed.version) || parsed.version < 1 || parsed.version > 4) {
+      if (!Number.isInteger(parsed.version) || parsed.version < 1 || parsed.version > 5) {
         throw new Error("unsupported connector state version");
       }
-      const receipts = boundReceipts(parseReceipts(parsed.delivery_receipts));
+      const receipts = boundReceipts(parseReceipts(parsed.delivery_receipts, parsed.version));
       const pendingStatuses = parsePendingStatuses(parsed.pending_statuses);
       const blockedOutbound = parseBlockedOutbound(parsed.blocked_outbound);
       const turnBudget = parseTurnBudget(parsed.turn_budget);
@@ -66,7 +67,7 @@ export class StateStore {
         assertCapacity(turnBudget, MAX_TURN_BUDGET, "turn_budget");
         const payload = `${JSON.stringify(
           {
-            version: 4,
+            version: 5,
             cursor,
             seen_ids: [...seenIds].slice(-MAX_SEEN_IDS),
             outbound_seen_ids: [...outboundSeenIds].slice(-MAX_SEEN_IDS),
@@ -108,7 +109,7 @@ export function emptyState() {
   };
 }
 
-function parseReceipts(value) {
+function parseReceipts(value, stateVersion) {
   if (value == null) return [];
   if (!Array.isArray(value)) throw new Error("delivery_receipts must be an array");
   return value.map((item) => {
@@ -117,6 +118,17 @@ function parseReceipts(value) {
       sourceMessageId: requiredString(item.source_message_id, "delivery receipt source_message_id"),
       deliveryId: requiredString(item.delivery_id, "delivery receipt delivery_id"),
       senderId: requiredString(item.sender_id, "delivery receipt sender_id"),
+      sourceMessageType:
+        stateVersion >= 5
+          ? optionalSourceMessageType(
+              item.source_message_type,
+              "delivery receipt source_message_type",
+            )
+          : null,
+      replyEligible:
+        stateVersion >= 5
+          ? requiredBoolean(item.reply_eligible, "delivery receipt reply_eligible")
+          : false,
       hopCount: boundedInteger(item.hop_count, 0, 8, "delivery receipt hop_count"),
       replied: item.replied === true,
       outboundMessageId: optionalString(item.outbound_message_id),
@@ -129,6 +141,9 @@ function parseReceipts(value) {
     }
     if (receipt.driverReleasePending && !receipt.outboundEventId) {
       throw new Error("driver release pending receipt must contain outbound_event_id");
+    }
+    if (stateVersion >= 5 && receipt.replyEligible !== (receipt.sourceMessageType === "request")) {
+      throw new Error("delivery receipt reply eligibility does not match source_message_type");
     }
     return receipt;
   });
@@ -181,10 +196,20 @@ function parseTurnBudget(value) {
 }
 
 function toStoredReceipt(receipt) {
+  const sourceMessageType = optionalSourceMessageType(
+    receipt.sourceMessageType,
+    "delivery receipt sourceMessageType",
+  );
+  const replyEligible = receipt.replyEligible === true;
+  if (replyEligible !== (sourceMessageType === "request")) {
+    throw new Error("delivery receipt reply eligibility does not match sourceMessageType");
+  }
   return {
     source_message_id: receipt.sourceMessageId,
     delivery_id: receipt.deliveryId,
     sender_id: receipt.senderId,
+    source_message_type: sourceMessageType,
+    reply_eligible: replyEligible,
     hop_count: receipt.hopCount,
     replied: receipt.replied,
     outbound_message_id: receipt.outboundMessageId,
@@ -259,6 +284,19 @@ function parseStringArray(value) {
 
 function requiredString(value, name) {
   if (typeof value !== "string" || !value) throw new Error(`${name} must be a non-empty string`);
+  return value;
+}
+
+function optionalSourceMessageType(value, name) {
+  if (value == null) return null;
+  if (!VALID_SOURCE_MESSAGE_TYPES.has(value)) {
+    throw new Error(`${name} is invalid`);
+  }
+  return value;
+}
+
+function requiredBoolean(value, name) {
+  if (typeof value !== "boolean") throw new Error(`${name} must be true or false`);
   return value;
 }
 

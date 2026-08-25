@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import stat
 import sys
 from pathlib import Path
@@ -90,6 +91,7 @@ def validate_settings(settings: dict[str, Any]) -> dict[str, Any]:
         "max_turns_per_sender_per_hour",
         "max_deliveries_per_recovery",
         "codex_app_server_binary",
+        "egress",
     }
     if set(settings) - supported:
         fail("macOS connector settings contain unsupported fields")
@@ -180,6 +182,8 @@ def validate_settings(settings: dict[str, Any]) -> dict[str, Any]:
             "codex_app_server_binary",
         )
 
+    egress = validate_egress(settings.get("egress"), channel_id)
+
     return {
         "identity_config_path": identity_path,
         "channel_id": channel_id,
@@ -191,7 +195,114 @@ def validate_settings(settings: dict[str, Any]) -> dict[str, Any]:
         "max_turns_per_sender_per_hour": max_turns,
         "max_deliveries_per_recovery": max_deliveries,
         "codex_app_server_binary": codex_binary,
+        "egress": egress,
     }
+
+
+def validate_egress(value: Any, channel_id: str) -> dict[str, Any]:
+    if value is None:
+        value = {}
+    if not isinstance(value, dict):
+        fail("egress must be an object")
+    supported = {
+        "enabled",
+        "acknowledged_channel_id",
+        "canary_file",
+        "allowed_reference_hosts",
+        "max_text_bytes",
+    }
+    if set(value) - supported:
+        fail("egress contains unsupported fields")
+    enabled = value.get("enabled", False)
+    if not isinstance(enabled, bool):
+        fail("egress.enabled must be true or false")
+
+    acknowledged_channel_id = value.get("acknowledged_channel_id")
+    if acknowledged_channel_id is not None:
+        acknowledged_channel_id = required_string(
+            acknowledged_channel_id,
+            "egress.acknowledged_channel_id",
+        )
+        if acknowledged_channel_id != channel_id:
+            fail("egress.acknowledged_channel_id must exactly equal channel_id")
+    elif enabled:
+        fail("enabled egress requires acknowledged_channel_id")
+
+    raw_hosts = value.get("allowed_reference_hosts", [])
+    if not isinstance(raw_hosts, list) or any(not isinstance(host, str) for host in raw_hosts):
+        fail("egress.allowed_reference_hosts must be an array")
+    hosts: list[str] = []
+    for raw_host in raw_hosts:
+        host = raw_host.strip().lower()
+        if not is_exact_https_reference_host(host):
+            fail("egress.allowed_reference_hosts must contain exact public DNS hostnames")
+        if host not in hosts:
+            hosts.append(host)
+
+    max_text_bytes = positive_integer(
+        value.get("max_text_bytes", 8_192),
+        "egress.max_text_bytes",
+        128,
+        100_000,
+    )
+    canary_file = value.get("canary_file")
+    if canary_file is not None:
+        canary_path = Path(required_string(canary_file, "egress.canary_file")).expanduser()
+        if not canary_path.is_absolute():
+            fail("egress.canary_file must be absolute or home-relative")
+        canary_file = (
+            str(validate_private_canary_file(str(canary_path)))
+            if enabled
+            else str(canary_path)
+        )
+    elif enabled:
+        fail("enabled egress requires canary_file")
+
+    return {
+        "enabled": enabled,
+        "acknowledged_channel_id": acknowledged_channel_id,
+        "canary_file": canary_file,
+        "allowed_reference_hosts": hosts,
+        "max_text_bytes": max_text_bytes,
+    }
+
+
+def is_exact_https_reference_host(value: str) -> bool:
+    if not value or len(value) > 253 or value in {"localhost"} or value.endswith(".localhost"):
+        return False
+    if "://" in value or any(character in value for character in "/*?#@:"):
+        return False
+    labels = value.split(".")
+    return len(labels) >= 2 and all(
+        1 <= len(label) <= 63
+        and re.fullmatch(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?", label) is not None
+        for label in labels
+    )
+
+
+def validate_private_canary_file(path_value: str) -> Path:
+    path = Path(path_value).expanduser()
+    if not path.is_absolute():
+        fail("egress.canary_file must be absolute or home-relative")
+    try:
+        details = path.lstat()
+    except OSError as exc:
+        raise LaunchError("egress.canary_file is unavailable") from exc
+    if stat.S_ISLNK(details.st_mode) or not stat.S_ISREG(details.st_mode):
+        fail("egress.canary_file must be a non-symlink regular file")
+    if details.st_nlink != 1:
+        fail("egress.canary_file must not have hardlink aliases")
+    if details.st_uid != os.getuid():
+        fail("egress.canary_file must be owned by the current user")
+    if stat.S_IMODE(details.st_mode) & 0o077:
+        fail("egress.canary_file permissions must be 0600 or stricter")
+    try:
+        canary = path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise LaunchError("egress.canary_file is unreadable") from exc
+    if not 16 <= len(canary) <= 512 or "\n" in canary or "\r" in canary:
+        fail("egress.canary_file must contain one 16 through 512 character canary")
+    return path.resolve(strict=True)
 
 
 def contains_forbidden_key(value: Any, forbidden: set[str]) -> bool:
@@ -251,7 +362,7 @@ def build_environment(settings: dict[str, Any], identity: dict[str, Any]) -> dic
             "AICHAT_AUTONOMOUS_TEXT_ENABLED": "false",
             "AICHAT_WEBSOCKET_ENABLED": "true",
             "AICHAT_PERIODIC_RECOVERY_ENABLED": "false",
-            "AICHAT_AUTO_REPLY_ENABLED": "false",
+            "AICHAT_AUTO_REPLY_ENABLED": str(settings["egress"]["enabled"]).lower(),
             "AICHAT_LIFECYCLE_STATUS_ENABLED": "false",
             "AICHAT_MAX_TURNS_PER_SENDER_PER_HOUR": str(
                 settings["max_turns_per_sender_per_hour"]
@@ -260,6 +371,7 @@ def build_environment(settings: dict[str, Any], identity: dict[str, Any]) -> dic
                 settings["max_deliveries_per_recovery"]
             ),
             "CODEX_DRIVER": "app-server",
+            "CODEX_TARGET_THREAD_ID": settings["target_thread_id"],
             "CODEX_CONNECTOR_TASK_OWNED": "true",
             "CODEX_CONNECTOR_TASK_MARKER": settings["task_marker"],
             "CODEX_APP_SERVER_CWD": settings["app_server_cwd"],
@@ -270,6 +382,19 @@ def build_environment(settings: dict[str, Any], identity: dict[str, Any]) -> dic
             "CODEX_DESKTOP_OWNER_IPC_ENABLED": "false",
         }
     )
+    environment.update(
+        {
+            "AICHAT_EGRESS_CHANNEL_AUDIENCE_ACK": str(
+                settings["egress"]["enabled"]
+            ).lower(),
+            "AICHAT_EGRESS_ALLOWED_REFERENCE_HOSTS": ",".join(
+                settings["egress"]["allowed_reference_hosts"]
+            ),
+            "AICHAT_EGRESS_MAX_TEXT_BYTES": str(settings["egress"]["max_text_bytes"]),
+        }
+    )
+    if settings["egress"]["enabled"]:
+        environment["AICHAT_EGRESS_CANARY_FILE"] = settings["egress"]["canary_file"]
     if settings["codex_app_server_binary"]:
         environment["CODEX_APP_SERVER_BINARY"] = settings["codex_app_server_binary"]
     return environment
@@ -284,6 +409,7 @@ def main() -> int:
     if args.check_settings:
         print("settings_ok=true")
         print("token_read=false")
+        print(f"automatic_egress={str(settings['egress']['enabled']).lower()}")
         return 0
 
     _, identity = load_private_json(settings["identity_config_path"], "AIChat identity config")

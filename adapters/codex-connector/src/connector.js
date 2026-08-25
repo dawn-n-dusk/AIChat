@@ -11,6 +11,11 @@ const VALID_TYPES = new Set(["text", "request", "result", "status"]);
 const OUTBOUND_REPLY_TYPES = new Set(["result", "status"]);
 const MAX_TRACKED_IDS = 1_000;
 const MAX_RECOVERY_PAGES = 100;
+const TERMINAL_BLOCKED_TEXT = JSON.stringify({
+  status: "blocked",
+  terminal: true,
+  reason: "outbound_quarantined",
+});
 
 export class AIChatCodexConnector {
   constructor({ config, relay, stateStore, driver, instanceLock = null, logger = console }) {
@@ -45,7 +50,12 @@ export class AIChatCodexConnector {
     this.cursor = state.cursor;
     this.seenIds = new Set(state.seenIds);
     this.outboundSeenIds = new Set(state.outboundSeenIds);
-    this.receipts = new Map(state.receipts.map((receipt) => [receipt.sourceMessageId, receipt]));
+    this.receipts = new Map(
+      state.receipts.map((receipt) => {
+        const normalized = normalizeReceiptEligibility(receipt);
+        return [normalized.sourceMessageId, normalized];
+      }),
+    );
     this.pendingOutbound = state.pendingOutbound;
     this.pendingStatuses = state.pendingStatuses ?? [];
     this.blockedOutbound = state.blockedOutbound ?? [];
@@ -152,6 +162,10 @@ export class AIChatCodexConnector {
     const blocked = this.blockedOutbound.find((entry) => entry.eventId === eventId);
     if (!blocked) throw new Error("Blocked outbound event was not found");
     const pending = withoutBlockMetadata(blocked);
+    if (pending.messageType === "result") {
+      const receipt = this.receipts.get(pending.sourceMessageId);
+      assertReplyEligible(receipt, pending.deliveryId);
+    }
     assertEgressAllowed(pending, this.config);
     await this.#commit((current) => {
       const live = current.blockedOutbound.find((entry) => entry.eventId === eventId);
@@ -353,6 +367,8 @@ export class AIChatCodexConnector {
           sourceMessageId: message.id,
           deliveryId,
           senderId: message.sender_id,
+          sourceMessageType: message.type,
+          replyEligible: message.type === "request",
           hopCount: message.hop_count,
           replied: false,
           outboundMessageId: null,
@@ -422,6 +438,10 @@ export class AIChatCodexConnector {
       throw new Error("Delivery receipt already has a different quarantined outbound reply");
     }
     if (receipt.hopCount >= 8) throw new Error("Outbound reply would exceed the hop_count limit");
+    if (normalized.suppressRelay) {
+      assertReplyEligible(receipt, normalized.deliveryId);
+      return this.#checkpointSuppressedOutbound(normalized);
+    }
 
     const pendingOutbound = {
       eventId: normalized.eventId,
@@ -435,10 +455,18 @@ export class AIChatCodexConnector {
       idempotencyKey: outboundIdempotencyKey(normalized.eventId, normalized.deliveryId),
     };
     try {
+      assertReplyEligible(receipt, normalized.deliveryId);
+    } catch (error) {
+      return this.#quarantinePending(pendingOutbound, error, {
+        isStatus: false,
+        emitTerminalStatus: false,
+      });
+    }
+    try {
       assertEgressAllowed(pendingOutbound, this.config);
     } catch (error) {
       if (isPermanentEgressError(error)) {
-        return this.#quarantinePending(pendingOutbound, error, false);
+        return this.#quarantinePending(pendingOutbound, error, { isStatus: false });
       }
       throw error;
     }
@@ -446,15 +474,52 @@ export class AIChatCodexConnector {
     return this.#flushPendingOutbound();
   }
 
+  async #checkpointSuppressedOutbound(event) {
+    const outboundMessageId = suppressedOutboundMarker(event.eventId, event.deliveryId);
+    await this.#commit((current) => {
+      const receipt = current.receipts.get(event.sourceMessageId);
+      assertReplyEligible(receipt, event.deliveryId);
+      if (receipt.replied) {
+        if (receipt.outboundEventId === event.eventId) return current;
+        throw new Error("Delivery receipt already has a different outbound reply");
+      }
+      const receipts = new Map(current.receipts);
+      receipts.set(event.sourceMessageId, {
+        ...receipt,
+        replied: true,
+        outboundMessageId,
+        outboundEventId: event.eventId,
+        driverReleasePending: null,
+      });
+      return {
+        ...current,
+        outboundSeenIds: addBounded(current.outboundSeenIds, event.eventId),
+        receipts,
+      };
+    });
+    this.logger.error(
+      `[aichat-codex-connector] suppressed lifecycle event ${event.eventId} by local policy`,
+    );
+    return { suppressed: true, eventId: event.eventId, outboundMessageId };
+  }
+
   async #flushPendingOutbound() {
     await this.#flushPendingStatuses();
     const pending = this.pendingOutbound;
     if (!pending) return null;
     try {
+      assertReplyEligible(this.receipts.get(pending.sourceMessageId), pending.deliveryId);
+    } catch (error) {
+      return this.#quarantinePending(pending, error, {
+        isStatus: false,
+        emitTerminalStatus: false,
+      });
+    }
+    try {
       assertEgressAllowed(pending, this.config);
     } catch (error) {
       if (isPermanentEgressError(error)) {
-        return this.#quarantinePending(pending, error, false);
+        return this.#quarantinePending(pending, error, { isStatus: false });
       }
       throw error;
     }
@@ -503,7 +568,7 @@ export class AIChatCodexConnector {
         assertEgressAllowed(pending, this.config);
       } catch (error) {
         if (isPermanentEgressError(error)) {
-          await this.#quarantinePending(pending, error, true);
+          await this.#quarantinePending(pending, error, { isStatus: true });
           continue;
         }
         throw error;
@@ -541,7 +606,11 @@ export class AIChatCodexConnector {
     }));
   }
 
-  async #quarantinePending(pending, error, isStatus) {
+  async #quarantinePending(
+    pending,
+    error,
+    { isStatus = false, emitTerminalStatus = !isStatus } = {},
+  ) {
     const reasonCode =
       typeof error?.code === "string" && error.code ? error.code : "AICHAT_EGRESS_POLICY";
     const blocked = {
@@ -549,6 +618,10 @@ export class AIChatCodexConnector {
       blockedAt: new Date().toISOString(),
       reasonCode,
     };
+    const terminalStatus =
+      emitTerminalStatus && this.#canEmitTerminalBlockedStatus(pending)
+        ? terminalBlockedStatusFor(pending)
+        : null;
     await this.#commit((current) => {
       const alreadyBlocked = current.blockedOutbound.some(
         (entry) => entry.eventId === pending.eventId,
@@ -556,6 +629,9 @@ export class AIChatCodexConnector {
       const blockedOutbound = alreadyBlocked
         ? current.blockedOutbound
         : [...current.blockedOutbound, blocked];
+      const pendingStatuses = terminalStatus
+        ? addPendingStatusIfUnknown(current, terminalStatus)
+        : current.pendingStatuses;
       if (isStatus) {
         return {
           ...current,
@@ -580,12 +656,39 @@ export class AIChatCodexConnector {
         ...receipt,
         outboundEventId: pending.eventId,
       });
-      return { ...current, pendingOutbound: null, blockedOutbound, receipts };
+      return {
+        ...current,
+        pendingOutbound: null,
+        pendingStatuses,
+        blockedOutbound,
+        receipts,
+      };
     });
     this.logger.error(
       `[aichat-codex-connector] quarantined outbound event ${pending.eventId}; reason=${reasonCode}`,
     );
+    if (terminalStatus) {
+      try {
+        await this.#flushPendingStatuses();
+      } catch {
+        this.logger.error(
+          "[aichat-codex-connector] terminal blocked status send failed; durable recovery will retry",
+        );
+      }
+    }
     return { blocked: true, eventId: pending.eventId, reasonCode };
+  }
+
+  #canEmitTerminalBlockedStatus(pending) {
+    if (
+      pending.messageType !== "result" ||
+      !this.config.autoReplyEnabled ||
+      !this.config.egressAudienceAcknowledged
+    ) {
+      return false;
+    }
+    const receipt = this.receipts.get(pending.sourceMessageId);
+    return isReplyEligibleReceipt(receipt, pending.deliveryId);
   }
 
   #commit(transition) {
@@ -729,7 +832,11 @@ export class AIChatCodexConnector {
   }
 
   #queueLifecycleStatuses(message, deliveryId, entries, { flush = false } = {}) {
-    if (!this.config.autoReplyEnabled || this.config.lifecycleStatusEnabled === false) {
+    if (
+      message.type !== "request" ||
+      !this.config.autoReplyEnabled ||
+      this.config.lifecycleStatusEnabled === false
+    ) {
       return Promise.resolve();
     }
     const pending = entries.map(({ status, reason = null }) => {
@@ -891,6 +998,13 @@ function validateOutboundEvent(event, config) {
   if (systemGenerated && messageType !== "status") {
     throw new Error("Connector-generated lifecycle events must use status type");
   }
+  if (event.suppressRelay != null && typeof event.suppressRelay !== "boolean") {
+    throw new Error("Outbound suppressRelay must be true or false");
+  }
+  const suppressRelay = event.suppressRelay === true;
+  if (suppressRelay && !systemGenerated) {
+    throw new Error("Only connector-generated lifecycle events may suppress Relay egress");
+  }
   const references = event.references ?? [];
   if (
     !Array.isArray(references) ||
@@ -899,7 +1013,18 @@ function validateOutboundEvent(event, config) {
   ) {
     throw new Error("Outbound references must be at most 100 URI strings");
   }
-  return { eventId, sourceMessageId, deliveryId, text, messageType, references };
+  if (suppressRelay && (text !== JSON.stringify({ status: "suppressed" }) || references.length)) {
+    throw new Error("Suppressed lifecycle event payload is invalid");
+  }
+  return {
+    eventId,
+    sourceMessageId,
+    deliveryId,
+    text,
+    messageType,
+    references,
+    suppressRelay,
+  };
 }
 
 function deliveryIdFor(config, messageId) {
@@ -912,6 +1037,11 @@ function deliveryIdFor(config, messageId) {
 function outboundIdempotencyKey(eventId, deliveryId) {
   const digest = createHash("sha256").update(`${eventId}\0${deliveryId}`).digest("hex");
   return `codex-connector-reply-${digest}`;
+}
+
+function suppressedOutboundMarker(eventId, deliveryId) {
+  const digest = createHash("sha256").update(`${eventId}\0${deliveryId}`).digest("hex");
+  return `local-suppressed-${digest}`;
 }
 
 function lifecycleEventId(sourceMessageId, deliveryId, status, reason) {
@@ -935,6 +1065,64 @@ function isPermanentEgressError(error) {
     error?.code === "AICHAT_OUTBOUND_DLP" ||
     (typeof error?.code === "string" && error.code.startsWith("AICHAT_EGRESS_"))
   );
+}
+
+function normalizeReceiptEligibility(receipt) {
+  const sourceMessageType = VALID_TYPES.has(receipt?.sourceMessageType)
+    ? receipt.sourceMessageType
+    : null;
+  return {
+    ...receipt,
+    sourceMessageType,
+    replyEligible: sourceMessageType === "request" && receipt?.replyEligible === true,
+  };
+}
+
+function isReplyEligibleReceipt(receipt, deliveryId) {
+  return (
+    receipt?.deliveryId === deliveryId &&
+    receipt.sourceMessageType === "request" &&
+    receipt.replyEligible === true
+  );
+}
+
+function assertReplyEligible(receipt, deliveryId) {
+  if (!isReplyEligibleReceipt(receipt, deliveryId)) {
+    const error = new Error("Outbound reply is not eligible for this source message");
+    error.code = "AICHAT_REPLY_INELIGIBLE";
+    throw error;
+  }
+}
+
+function terminalBlockedStatusFor(pending) {
+  const eventId = lifecycleEventId(
+    pending.sourceMessageId,
+    pending.deliveryId,
+    "blocked",
+    `outbound_quarantined:${pending.eventId}`,
+  );
+  return {
+    eventId,
+    sourceMessageId: pending.sourceMessageId,
+    deliveryId: pending.deliveryId,
+    channelId: pending.channelId,
+    text: TERMINAL_BLOCKED_TEXT,
+    messageType: "status",
+    references: [],
+    hopCount: pending.hopCount,
+    idempotencyKey: `codex-connector-status-${eventId}`,
+  };
+}
+
+function addPendingStatusIfUnknown(current, pending) {
+  if (
+    current.outboundSeenIds.has(pending.eventId) ||
+    current.pendingStatuses.some((entry) => entry.eventId === pending.eventId) ||
+    current.blockedOutbound.some((entry) => entry.eventId === pending.eventId)
+  ) {
+    return current.pendingStatuses;
+  }
+  return [...current.pendingStatuses, pending];
 }
 
 function withoutBlockMetadata(entry) {

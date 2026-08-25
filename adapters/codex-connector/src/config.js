@@ -164,7 +164,7 @@ export function loadConfig(env = process.env, { cwd = process.cwd() } = {}) {
     env.AICHAT_EGRESS_MAX_TEXT_BYTES,
     DEFAULT_EGRESS_MAX_TEXT_BYTES,
     "AICHAT_EGRESS_MAX_TEXT_BYTES",
-    1,
+    128,
     100_000,
   );
   const egressCanary = autoReplyEnabled

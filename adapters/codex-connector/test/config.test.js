@@ -114,6 +114,10 @@ test("loadConfig rejects wildcard senders and invalid transport settings", () =>
     /true or false/,
   );
   assert.throws(
+    () => loadConfig(validEnv({ AICHAT_EGRESS_MAX_TEXT_BYTES: "127" })),
+    /between 128 and 100000/,
+  );
+  assert.throws(
     () => loadConfig(validEnv({ AICHAT_DELIVER_TYPES: "text,request" })),
     /AUTONOMOUS_TEXT_ENABLED/,
   );

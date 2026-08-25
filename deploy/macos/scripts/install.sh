@@ -99,7 +99,6 @@ printf 'state_root=%s\n' "$STATE_ROOT"
 printf 'plist=%s\n' "$PLIST_PATH"
 printf 'periodic_recovery=false\n'
 printf 'driver=app-server\n'
-printf 'automatic_egress=false\n'
 if [[ "$apply" != true ]]; then
   printf 'dry_run=true\n'
   exit 0
