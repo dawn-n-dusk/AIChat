@@ -278,6 +278,7 @@ def test_connector_service_launcher_fixes_security_and_environment_contract() ->
     assert "UseShellExecute = $false" in launcher
     assert "-CheckSettings *>&1" in checker
     assert "-CheckSettings 2>&1" not in checker
+    assert '"[$label] ${Name}: $Detail"' in checker
 
 
 def test_connector_service_result_egress_is_explicit_and_fail_closed() -> None:

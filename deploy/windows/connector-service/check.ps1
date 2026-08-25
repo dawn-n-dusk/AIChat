@@ -9,7 +9,7 @@ $failures = [Collections.Generic.List[string]]::new()
 function Report-AIChatCheck {
     param([string]$Name, [bool]$Passed, [string]$Detail)
     $label = if ($Passed) { "PASS" } else { "FAIL" }
-    Write-Host "[$label] $Name: $Detail"
+    Write-Host "[$label] ${Name}: $Detail"
     if (-not $Passed) { $failures.Add($Name) }
 }
 
