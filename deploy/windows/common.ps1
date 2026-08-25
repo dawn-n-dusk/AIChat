@@ -147,9 +147,19 @@ function Invoke-NativeCapture {
         [string[]]$Arguments = @()
     )
 
-    $output = & $FilePath @Arguments 2>&1 | Out-String
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        # Windows PowerShell 5.1 turns native stderr into NativeCommandError
+        # records. Capture those records and preserve the process exit code
+        # instead of allowing a diagnostic command to terminate the caller.
+        $ErrorActionPreference = "Continue"
+        $output = & $FilePath @Arguments 2>&1 | Out-String
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
     return [pscustomobject]@{
-        ExitCode = $LASTEXITCODE
+        ExitCode = $exitCode
         Output   = $output.Trim()
     }
 }

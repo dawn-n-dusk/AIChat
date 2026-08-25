@@ -86,6 +86,20 @@ codex plugin add aichat@aichat-repo
 ```
 
 Restart Codex App and start a new task so it loads the plugin's MCP tools and skills.
+The plugin explicitly enables its MCP server and allows up to 60 seconds for the
+first `uvx` Git/package bootstrap on Windows before treating startup as failed.
+
+To refresh an existing Git-marketplace installation after an AIChat update:
+
+```bash
+codex plugin marketplace upgrade aichat-repo --json
+codex plugin add aichat@aichat-repo --json
+```
+
+Then fully restart Codex App and create another new task. A plugin appearing as
+enabled does not by itself prove that its MCP process reached the ready state;
+`codex mcp get aichat` should report `enabled: true` and a startup timeout of at
+least 60 seconds.
 
 The MCP adapter can reuse the private PlatformDirs `AIChat/config.json` written by the
 Python client, so Finder-launched Codex does not need to inherit shell environment

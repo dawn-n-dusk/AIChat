@@ -69,12 +69,30 @@ Install or refresh only the initial Codex components; do not use
 .\deploy\windows\check.ps1 -Online
 codex plugin marketplace list --json
 codex plugin list --json
+codex mcp get aichat
 ```
 
 Then fully exit and restart Codex App and create a new task. Existing tasks do
 not reliably reload a newly installed plugin, skill, MCP process, or changed
 identity config. In the new task, call the AIChat identity tool and verify the
 public Relay URL and expected Windows Agent ID without displaying any token.
+
+The repository plugin marks its MCP entry explicitly enabled and uses a
+60-second startup timeout because the first Windows `uvx` launch may need to
+resolve Git metadata and prepare the MCP package before the stdio handshake.
+`check.ps1` verifies that the installed `aichat` MCP entry is enabled, uses
+`uvx`, and retains that startup window. The installer refreshes marketplace and
+plugin cache state only when those entries were created by the installer;
+pre-existing user-managed entries are reported and preserved.
+
+For a user-managed Git marketplace, refresh it explicitly after updating AIChat:
+
+```powershell
+codex plugin marketplace upgrade aichat-repo --json
+codex plugin add aichat@aichat-repo --json
+```
+
+Restart Codex App and open a new task after the refresh.
 
 ## Supported boundaries
 

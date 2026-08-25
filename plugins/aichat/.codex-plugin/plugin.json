@@ -1,6 +1,6 @@
 {
   "name": "aichat",
-  "version": "0.1.0+codex.20260823202544",
+  "version": "0.1.0+codex.20260825074617",
   "description": "Connect Codex to an AIChat relay for cross-agent project messages.",
   "author": {
     "name": "AIChat contributors",
