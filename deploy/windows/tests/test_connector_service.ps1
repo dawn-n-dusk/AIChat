@@ -104,6 +104,14 @@ try {
         -ProtectedRoot $protectedRoot)
     if ($createdCodexHome) {
         New-Item -ItemType Directory -Path $codexHome | Out-Null
+        # Hosted runners may assign BUILTIN\Administrators as the default owner
+        # for objects created by their elevated test account. Normalize only this
+        # synthetic directory to the owner contract expected from Codex Desktop.
+        $codexHomeAcl = Get-Acl -LiteralPath $codexHome
+        $codexHomeAcl.SetOwner(
+            [Security.Principal.WindowsIdentity]::GetCurrent().User
+        )
+        Set-Acl -LiteralPath $codexHome -AclObject $codexHomeAcl
     }
 
     $nodeCommand = Get-Command "node.exe" -CommandType Application -ErrorAction Stop |

@@ -408,6 +408,9 @@ def test_ci_runs_windows_connector_service_functional_test() -> None:
     assert "after first install:`n$checkOutput" not in functional_text
     assert "allowedFailedChecks" in functional_text[check_failure:check_diagnostic]
     assert "[string]$Matches[1]" in functional_text[check_failure:check_diagnostic]
+    created_codex_home = functional_text.index("if ($createdCodexHome) {")
+    set_codex_owner = functional_text.index("$codexHomeAcl.SetOwner(", created_codex_home)
+    assert set_codex_owner < functional_text.index("Set-Acl -LiteralPath $codexHome", set_codex_owner)
     wrapper_text = wrapper.read_text(encoding="utf-8")
     assert "test_connector_service.ps1" in wrapper_text
     assert "test_legacy_codex_runner_disabled.ps1" in wrapper_text
