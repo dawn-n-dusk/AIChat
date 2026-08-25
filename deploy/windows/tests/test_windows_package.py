@@ -392,6 +392,9 @@ def test_ci_runs_windows_connector_service_functional_test() -> None:
     wrapper = ROOT / "tests" / "test_plugin_mcp_autoload.ps1"
     assert functional.is_file()
     assert legacy.is_file()
+    functional_text = functional.read_text(encoding="utf-8")
+    assert "*>&1 | Out-String" in functional_text
+    assert "2>&1 | Out-String" not in functional_text
     wrapper_text = wrapper.read_text(encoding="utf-8")
     assert "test_connector_service.ps1" in wrapper_text
     assert "test_legacy_codex_runner_disabled.ps1" in wrapper_text

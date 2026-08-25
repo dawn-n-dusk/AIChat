@@ -69,7 +69,9 @@ function Invoke-ExpectedFailure {
     param([scriptblock]$Action, [string]$Label)
     $failed = $false
     try {
-        $captured = & $Action 2>&1 | Out-String
+        # Windows PowerShell 5.1 emits Write-Host on the information stream.
+        # Merge every stream so assertions and the token-leak canary inspect it.
+        $captured = & $Action *>&1 | Out-String
         Add-CapturedOutput $captured
     } catch {
         $failed = $true
@@ -83,7 +85,7 @@ try {
     $uncWhatIfOutput = & $installer `
         -SettingsPath "$uncProbe\settings.json" `
         -RepositoryRoot $uncProbe `
-        -Apply -WhatIf 2>&1 | Out-String
+        -Apply -WhatIf *>&1 | Out-String
     Add-CapturedOutput $uncWhatIfOutput
     if ($LASTEXITCODE -ne 0 -or
         $uncWhatIfOutput -notmatch '(?m)^mutation_performed=false\s*$' -or
@@ -270,7 +272,7 @@ public static class Program {
     $whatIfOutput = & $installer `
         -SettingsPath $settingsPath `
         -RepositoryRoot $repositoryRoot `
-        -Apply -WhatIf 2>&1 | Out-String
+        -Apply -WhatIf *>&1 | Out-String
     Add-CapturedOutput $whatIfOutput
     $env:PATH = $oldPath
     $env:AICHAT_CI_CODEX_EXEC_CANARY = $null
@@ -288,7 +290,7 @@ public static class Program {
     $installAOutput = & $installer `
         -SettingsPath $settingsPath `
         -RepositoryRoot $repositoryRoot `
-        -Apply 2>&1 | Out-String
+        -Apply *>&1 | Out-String
     $env:PATH = $oldPath
     Add-CapturedOutput $installAOutput
     if ($LASTEXITCODE -ne 0) { throw "First connector service install failed" }
@@ -323,7 +325,7 @@ public static class Program {
     [void](Assert-AIChatConnectorDataTree -Path $paths.ConnectorDataRoot)
     $launcherOutput = & $paths.LauncherPath `
         -StateRoot $paths.StateRoot `
-        -CheckSettings 2>&1 | Out-String
+        -CheckSettings *>&1 | Out-String
     Add-CapturedOutput $launcherOutput
     foreach ($required in @(
         "deliver_types=request",
@@ -338,7 +340,7 @@ public static class Program {
             throw "Launcher did not report required contract: $required"
         }
     }
-    $checkOutput = & $checker 2>&1 | Out-String
+    $checkOutput = & $checker *>&1 | Out-String
     Add-CapturedOutput $checkOutput
     if ($LASTEXITCODE -ne 0) { throw "Connector service check failed after first install" }
 
@@ -411,10 +413,10 @@ public static class Program {
     $installBOutput = & $installer `
         -SettingsPath $settingsPath `
         -RepositoryRoot $repositoryRoot `
-        -Apply 2>&1 | Out-String
+        -Apply *>&1 | Out-String
     Add-CapturedOutput $installBOutput
     if ($LASTEXITCODE -ne 0) { throw "Second connector service install failed" }
-    $rollbackOutput = & $rollback -Apply 2>&1 | Out-String
+    $rollbackOutput = & $rollback -Apply *>&1 | Out-String
     Add-CapturedOutput $rollbackOutput
     if ($LASTEXITCODE -ne 0) { throw "Connector service rollback failed" }
     $rolledBackSettings = Read-AIChatPrivateJson `
@@ -435,7 +437,7 @@ public static class Program {
         Pop-Location
     }
 
-    $uninstallOutput = & $uninstaller -Apply 2>&1 | Out-String
+    $uninstallOutput = & $uninstaller -Apply *>&1 | Out-String
     Add-CapturedOutput $uninstallOutput
     if ($LASTEXITCODE -ne 0 -or
         $null -ne (Get-AIChatConnectorTask) -or
@@ -444,7 +446,7 @@ public static class Program {
         -not (Test-Path -LiteralPath $identityPath -PathType Leaf)) {
         throw "Connector service uninstall did not preserve the expected boundary"
     }
-    $secondUninstall = & $uninstaller -Apply 2>&1 | Out-String
+    $secondUninstall = & $uninstaller -Apply *>&1 | Out-String
     Add-CapturedOutput $secondUninstall
     if ($secondUninstall -notmatch "already_uninstalled=true") {
         throw "Connector service uninstall is not idempotent"
