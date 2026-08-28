@@ -94,7 +94,11 @@ notifications, and `thread/read` for incomplete-record recovery.
 
 Before every new delivery it verifies that a target-session user message
 contains the locally configured task marker as one exact complete line and
-that the task has no visible in-progress turn. App Server
+that the task has no visible in-progress turn. Marker extraction accepts the
+legacy `userMessage.text` form and current `userMessage.content` text forms;
+the exact line must occur within one recognized text segment and is never
+assembled across content blocks. Unknown, mixed, non-text, or conflicting
+representations fail closed. App Server
 is still experimental and runs independently of Codex Desktop. Do not describe
 this path as a stable API for arbitrary existing UI conversations.
 

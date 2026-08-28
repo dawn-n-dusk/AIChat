@@ -843,9 +843,12 @@ export class AppServerDriver {
     const turns = Array.isArray(result?.thread?.turns) ? result.thread.turns : [];
     const markerPresent = turns.some((turn) =>
       (Array.isArray(turn?.items) ? turn.items : []).some(
-        (item) => item?.type === "userMessage" &&
-          typeof item.text === "string" &&
-          item.text.split(/\r?\n/).some((line) => line === this.taskMarker),
+        (item) => {
+          const segments = extractUserMessageTextSegments(item);
+          return segments !== null && segments.some(
+            (text) => text.split("\n").some((line) => line === this.taskMarker),
+          );
+        },
       ),
     );
     if (!markerPresent) {
@@ -1135,6 +1138,26 @@ export class AppServerReceiptStore {
   }
 }
 
+export function extractUserMessageTextSegments(item) {
+  if (!item || typeof item !== "object" || Array.isArray(item) || item.type !== "userMessage") {
+    return null;
+  }
+
+  const hasLegacyText = Object.prototype.hasOwnProperty.call(item, "text");
+  const hasContent = Object.prototype.hasOwnProperty.call(item, "content");
+  if (!hasLegacyText && !hasContent) return null;
+
+  const legacyText = hasLegacyText ? normalizeUserMessageText(item.text) : null;
+  const contentSegments = hasContent ? parseUserMessageContent(item.content) : null;
+  if (hasLegacyText && legacyText === null) return null;
+  if (hasContent && contentSegments === null) return null;
+  if (hasLegacyText && hasContent) {
+    if (contentSegments.length !== 1 || legacyText !== contentSegments[0]) return null;
+    return [legacyText];
+  }
+  return hasLegacyText ? [legacyText] : contentSegments;
+}
+
 export function parseModelDeclaredReply(text) {
   if (typeof text !== "string" || !text.trim()) return null;
   let parsed;
@@ -1159,6 +1182,40 @@ export function parseModelDeclaredReply(text) {
     return null;
   }
   return { text: reply.text, messageType, references };
+}
+
+function parseUserMessageContent(content) {
+  if (typeof content === "string") return [normalizeUserMessageText(content)];
+  if (isUserMessageTextBlock(content)) return [normalizeUserMessageText(content.text)];
+  if (!Array.isArray(content) || content.length === 0) return null;
+
+  const segments = [];
+  for (const block of content) {
+    if (!isUserMessageTextBlock(block)) return null;
+    segments.push(normalizeUserMessageText(block.text));
+  }
+  return segments;
+}
+
+function isUserMessageTextBlock(block) {
+  if (!block || typeof block !== "object" || Array.isArray(block)) return false;
+  if (block.type !== "text" || typeof block.text !== "string") return false;
+  if (
+    Object.keys(block).some(
+      (key) => key !== "type" && key !== "text" && key !== "text_elements",
+    )
+  ) {
+    return false;
+  }
+  return (
+    !Object.prototype.hasOwnProperty.call(block, "text_elements") ||
+    Array.isArray(block.text_elements)
+  );
+}
+
+function normalizeUserMessageText(text) {
+  if (typeof text !== "string") return null;
+  return text.replace(/\r\n?/g, "\n");
 }
 
 export function withReplyContract(envelope) {
