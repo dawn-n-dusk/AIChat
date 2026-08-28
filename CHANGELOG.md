@@ -8,6 +8,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Accept current Codex App Server `userMessage.content` text payloads during
+  dedicated-task marker verification while retaining legacy `text` support and
+  rejecting unknown, mixed, non-text, or conflicting message shapes.
 - Explicitly enable the repository plugin MCP entry, allow 60 seconds for cold
   Windows `uvx` startup, refresh installer-owned marketplace/plugin caches on
   rerun, and verify the effective plugin MCP settings in Windows checks.

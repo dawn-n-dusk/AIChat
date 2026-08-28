@@ -12,6 +12,7 @@ import {
   AppServerDriver,
   AppServerReceiptStore,
   DeliveryStartError,
+  extractUserMessageTextSegments,
   parseModelDeclaredReply,
   withReplyContract,
 } from "../src/app-server-driver.js";
@@ -780,6 +781,216 @@ test("Desktop owner version gate cannot be overridden without a development risk
   );
 });
 
+test("user-message text extraction accepts only explicit text schema variants", () => {
+  const marker = "AICHAT_CONNECTOR_TASK_MARKER_TEST";
+  const accepted = [
+    [{ type: "userMessage", text: marker }, [marker]],
+    [{ type: "userMessage", content: marker }, [marker]],
+    [
+      { type: "userMessage", content: { type: "text", text: marker, text_elements: [] } },
+      [marker],
+    ],
+    [
+      {
+        type: "userMessage",
+        content: [{ type: "text", text: marker, text_elements: [] }],
+      },
+      [marker],
+    ],
+    [
+      {
+        type: "userMessage",
+        content: [
+          { type: "text", text: "AICHAT_CONNECTOR_" },
+          { type: "text", text: "TASK_MARKER_TEST", text_elements: [] },
+        ],
+      },
+      ["AICHAT_CONNECTOR_", "TASK_MARKER_TEST"],
+    ],
+    [
+      { type: "userMessage", text: `before\r\n${marker}`, content: `before\n${marker}` },
+      [`before\n${marker}`],
+    ],
+  ];
+  for (const [item, expected] of accepted) {
+    assert.deepEqual(extractUserMessageTextSegments(item), expected);
+  }
+
+  const rejected = [
+    null,
+    [],
+    { type: "agentMessage", text: marker },
+    { type: "commandExecution", content: marker },
+    { type: "userMessage" },
+    { type: "userMessage", text: null },
+    { type: "userMessage", text: { nested: marker } },
+    { type: "userMessage", content: null },
+    { type: "userMessage", content: [] },
+    { type: "userMessage", content: [[{ type: "text", text: marker }]] },
+    { type: "userMessage", content: { type: "image", url: marker } },
+    { type: "userMessage", content: [{ type: "image", url: marker }] },
+    { type: "userMessage", content: [{ type: "input_text", text: marker }] },
+    { type: "userMessage", content: [{ type: "text", text: { nested: marker } }] },
+    { type: "userMessage", content: [{ type: "text", text: marker, future: true }] },
+    { type: "userMessage", content: [{ type: "text", text: marker, text_elements: {} }] },
+    {
+      type: "userMessage",
+      content: [
+        { type: "text", text: marker },
+        { type: "image", url: "https://example.test/image" },
+      ],
+    },
+    { type: "userMessage", text: marker, content: `different\n${marker}` },
+    {
+      type: "userMessage",
+      text: marker,
+      content: [
+        { type: "text", text: marker },
+        { type: "text", text: "" },
+      ],
+    },
+    { type: "userMessage", text: marker, content: [{ type: "image", url: marker }] },
+  ];
+  for (const item of rejected) assert.equal(extractUserMessageTextSegments(item), null);
+});
+
+test("app-server marker scan remains exact, user-only, and fail-closed across turns", async (t) => {
+  const marker = "AICHAT_CONNECTOR_TASK_MARKER_BOUNDARY_TEST";
+  const passCases = [
+    ["legacy text", [{ status: "completed", items: [{ type: "userMessage", text: marker }] }]],
+    [
+      "content string with CR line ending",
+      [{ status: "completed", items: [{ type: "userMessage", content: `before\r${marker}\rafter` }] }],
+    ],
+    [
+      "current content blocks with CRLF line ending",
+      [
+        { status: "completed", items: [{ type: "userMessage", content: "unrelated" }] },
+        {
+          status: "completed",
+          items: [
+            {
+              type: "userMessage",
+              content: [
+                { type: "text", text: `before\r\n${marker}`, text_elements: [] },
+                { type: "text", text: "\r\nafter", text_elements: [] },
+              ],
+            },
+          ],
+        },
+      ],
+    ],
+  ];
+  for (const [name, turns] of passCases) {
+    await t.test(name, async () => {
+      const driver = markerPreflightDriver(marker, turns);
+      await driver.start({ binding, onOutboundReply: async () => {} });
+      await driver.stop();
+    });
+  }
+
+  const failCases = [
+    ["empty turns", []],
+    ["malformed turns", { future: true }],
+    ["empty user message", [{ status: "completed", items: [{ type: "userMessage", content: [] }] }]],
+    [
+      "assistant and tool injection",
+      [
+        {
+          status: "completed",
+          items: [
+            { type: "agentMessage", text: marker },
+            { type: "commandExecution", aggregatedOutput: marker },
+            { type: "mcpToolCall", result: { content: marker } },
+            { type: "outputSchema", content: marker },
+          ],
+          metadata: { marker },
+        },
+      ],
+    ],
+    [
+      "substring",
+      [{ status: "completed", items: [{ type: "userMessage", content: `prefix ${marker} suffix` }] }],
+    ],
+    [
+      "unicode line separator",
+      [{ status: "completed", items: [{ type: "userMessage", content: `before\u2028${marker}` }] }],
+    ],
+    [
+      "zero width prefix",
+      [{ status: "completed", items: [{ type: "userMessage", content: `\u200b${marker}` }] }],
+    ],
+    [
+      "non-breaking-space suffix",
+      [{ status: "completed", items: [{ type: "userMessage", content: `${marker}\u00a0` }] }],
+    ],
+    [
+      "unknown content block invalidates whole user item",
+      [
+        {
+          status: "completed",
+          items: [
+            {
+              type: "userMessage",
+              content: [
+                { type: "text", text: marker, text_elements: [] },
+                { type: "image", url: "https://example.test/image" },
+              ],
+            },
+          ],
+        },
+      ],
+    ],
+    [
+      "marker split across text blocks",
+      [
+        {
+          status: "completed",
+          items: [
+            {
+              type: "userMessage",
+              content: [
+                { type: "text", text: "AICHAT_CONNECTOR_TASK_MARKER_" },
+                { type: "text", text: "BOUNDARY_TEST" },
+              ],
+            },
+          ],
+        },
+      ],
+    ],
+  ];
+  for (const [name, turns] of failCases) {
+    await t.test(name, async () => {
+      const driver = markerPreflightDriver(marker, turns);
+      await assert.rejects(
+        () => driver.start({ binding, onOutboundReply: async () => {} }),
+        /does not contain.*connector marker/,
+      );
+      await driver.stop();
+    });
+  }
+
+  await t.test("unicode composed and decomposed forms remain distinct", async () => {
+    const composedMarker = "AICHAT_CONNECTOR_TASK_MARKER_\u00c9_TEST";
+    const driver = markerPreflightDriver(composedMarker, [
+      {
+        status: "completed",
+        items: [
+          {
+            type: "userMessage",
+            content: "AICHAT_CONNECTOR_TASK_MARKER_E\u0301_TEST",
+          },
+        ],
+      },
+    ]);
+    await assert.rejects(
+      () => driver.start({ binding, onOutboundReply: async () => {} }),
+      /does not contain.*connector marker/,
+    );
+    await driver.stop();
+  });
+});
+
 test("app-server verifies the dedicated marker and applies fixed low-privilege turn policy", async () => {
   const marker = "AICHAT_CONNECTOR_TASK_MARKER_TEST";
   const protocol = [];
@@ -795,7 +1006,12 @@ test("app-server verifies the dedicated marker and applies fixed low-privilege t
             {
               id: "setup-turn",
               status: "completed",
-              items: [{ type: "userMessage", text: marker }],
+              items: [
+                {
+                  type: "userMessage",
+                  content: [{ type: "text", text: marker, text_elements: [] }],
+                },
+              ],
             },
           ],
         },
@@ -1464,6 +1680,30 @@ function memoryReceiptStore(initial = { records: [] }, options = {}) {
       this.saves.push(structuredClone(state));
     },
   };
+}
+
+function markerPreflightDriver(marker, turns) {
+  const process = fakeAppServer((message, child) => {
+    if (message.method === "initialize") child.respond(message.id, {});
+    else if (message.method === "thread/read") {
+      child.respond(message.id, { thread: { id: "thread-1", turns } });
+    }
+  });
+  return new AppServerDriver({
+    binding,
+    env: {
+      CODEX_CONNECTOR_TASK_MARKER: marker,
+      CODEX_APP_SERVER_CWD: "/tmp",
+      CODEX_APP_SERVER_APPROVAL_POLICY: "never",
+      CODEX_APP_SERVER_SANDBOX_POLICY_JSON: JSON.stringify({
+        type: "readOnly",
+        networkAccess: false,
+      }),
+    },
+    spawnImpl: () => process,
+    receiptStore: memoryReceiptStore(),
+    logger: { error() {} },
+  });
 }
 
 function acknowledgementRaceHarness() {
