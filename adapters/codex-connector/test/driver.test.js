@@ -12,6 +12,7 @@ import {
   AppServerDriver,
   AppServerReceiptStore,
   DeliveryStartError,
+  JsonRpcStdioClient,
   extractUserMessageTextSegments,
   parseModelDeclaredReply,
   withReplyContract,
@@ -238,6 +239,67 @@ test("AppServerDriver pins receipts to an explicit absolute directory", async (t
   assert.equal(persisted.records[0].connectorCheckpointed, true);
   assert.equal(persisted.records[0].outboundDelivered, true);
   await driver.stop();
+});
+
+test("JsonRpcStdioClient stop waits for the app-server child to exit", async () => {
+  const signals = [];
+  const process = fakeAppServer((message, child) => {
+    if (message.method === "initialize") child.respond(message.id, {});
+  });
+  process.kill = (signal) => {
+    signals.push(signal);
+    return true;
+  };
+  const client = new JsonRpcStdioClient({
+    binary: "codex",
+    args: [],
+    requestTimeoutMs: 1_000,
+    spawnImpl: () => process,
+    logger: { error() {} },
+  });
+  await client.start();
+
+  let stopped = false;
+  const stopping = client.stop().then(() => {
+    stopped = true;
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(stopped, false);
+  assert.deepEqual(signals, ["SIGTERM"]);
+
+  process.emit("exit", 0, "SIGTERM");
+  await stopping;
+  assert.equal(stopped, true);
+});
+
+test("JsonRpcStdioClient stop force-terminates a child that ignores graceful shutdown", async () => {
+  const signals = [];
+  const timers = controllableTimers();
+  const process = fakeAppServer((message, child) => {
+    if (message.method === "initialize") child.respond(message.id, {});
+  });
+  process.kill = (signal) => {
+    signals.push(signal);
+    return true;
+  };
+  const client = new JsonRpcStdioClient({
+    binary: "codex",
+    args: [],
+    requestTimeoutMs: 1_000,
+    spawnImpl: () => process,
+    timers,
+    logger: { error() {} },
+  });
+  await client.start();
+
+  const stopping = client.stop();
+  assert.deepEqual(signals, ["SIGTERM"]);
+  timers.fireFirst(5_000);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(signals, ["SIGTERM", "SIGKILL"]);
+
+  process.emit("exit", 0, "SIGKILL");
+  await stopping;
 });
 
 test("AppServerDriver persists source type and never creates outbound events for result input", async () => {

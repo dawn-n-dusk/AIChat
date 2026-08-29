@@ -15,6 +15,7 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
 const DEFAULT_TURN_TIMEOUT_MS = 10 * 60_000;
 const DEFAULT_RECOVERY_INTERVAL_MS = 30_000;
 const DEFAULT_OUTBOUND_RETRY_MAX_ATTEMPTS = 10;
+const DEFAULT_CHILD_STOP_TIMEOUT_MS = 5_000;
 const MAX_ORPHAN_TURNS = 20;
 const MAX_STDOUT_BUFFER = 4 * 1024 * 1024;
 const TERMINAL_TURN_STATUSES = new Set(["completed", "failed", "interrupted", "cancelled"]);
@@ -937,10 +938,13 @@ export class JsonRpcStdioClient {
     this.nextId = 1;
     this.stdoutBuffer = "";
     this.closed = false;
+    this.terminationPromise = null;
   }
 
   async start() {
     if (this.child) throw new Error("Codex app-server client is already started");
+    if (this.terminationPromise) await this.terminationPromise;
+    this.terminationPromise = null;
     this.closed = false;
     const child = this.spawnImpl(this.binary, this.args, {
       stdio: ["pipe", "pipe", "pipe"],
@@ -1006,7 +1010,6 @@ export class JsonRpcStdioClient {
   }
 
   async stop() {
-    const wasClosed = this.closed;
     this.closed = true;
     for (const [id, pending] of this.pending) {
       this.timers.clearTimeout(pending.timeout);
@@ -1020,14 +1023,19 @@ export class JsonRpcStdioClient {
     }
     const child = this.child;
     this.child = null;
-    if (!child) return;
+    if (!child) {
+      if (this.terminationPromise) await this.terminationPromise;
+      return;
+    }
     try {
       child.stdin.end();
     } catch {}
-    try {
-      child.kill("SIGTERM");
-    } catch {}
-    if (wasClosed) return;
+    this.terminationPromise ??= terminateChildProcess(
+      child,
+      this.timers,
+      DEFAULT_CHILD_STOP_TIMEOUT_MS,
+    );
+    await this.terminationPromise;
   }
 
   #readStdout(chunk) {
@@ -1111,13 +1119,67 @@ export class JsonRpcStdioClient {
       this.pending.delete(id);
     }
     const child = this.child;
+    this.child = null;
     if (child) {
       try {
-        child.kill("SIGTERM");
+        child.stdin.end();
       } catch {}
+      this.terminationPromise ??= terminateChildProcess(
+        child,
+        this.timers,
+        DEFAULT_CHILD_STOP_TIMEOUT_MS,
+      );
     }
-    this.onExit();
+    Promise.resolve(this.terminationPromise)
+      .catch(() => {
+        this.logger.error("[aichat-codex-driver] app-server child termination failed");
+      })
+      .finally(() => this.onExit());
   }
+}
+
+async function terminateChildProcess(child, timers, timeoutMs) {
+  if (child.exitCode != null || child.signalCode != null) return;
+  let exited = waitForChildExit(child, timers, timeoutMs);
+  let signalled = false;
+  try {
+    signalled = child.kill("SIGTERM") !== false;
+  } catch {}
+  if (!signalled && child.exitCode == null && child.signalCode == null) {
+    if (await exited) return;
+    throw new Error("Codex app-server process could not be terminated");
+  }
+  if (await exited) return;
+
+  exited = waitForChildExit(child, timers, timeoutMs);
+  signalled = false;
+  try {
+    signalled = child.kill("SIGKILL") !== false;
+  } catch {}
+  if (!signalled && child.exitCode == null && child.signalCode == null) {
+    if (await exited) return;
+    throw new Error("Codex app-server process could not be force-terminated");
+  }
+  if (!(await exited)) {
+    throw new Error("Codex app-server process did not exit after termination");
+  }
+}
+
+function waitForChildExit(child, timers, timeoutMs) {
+  if (child.exitCode != null || child.signalCode != null) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      timers.clearTimeout(timeout);
+      child.removeListener?.("exit", onExit);
+      resolve(value);
+    };
+    const onExit = () => finish(true);
+    const timeout = timers.setTimeout(() => finish(false), timeoutMs);
+    child.once("exit", onExit);
+  });
 }
 
 export class AppServerReceiptStore {

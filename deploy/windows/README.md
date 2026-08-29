@@ -237,8 +237,10 @@ $stateRoot = Join-Path $env:LOCALAPPDATA "AIChat\codex-connector-task"
 turn through `turn/completed`, waits for connector-side suppression handling,
 then shuts down App Server. It succeeds only when the connector cursor and
 receipt plus the app-server driver receipt all match `ExpectedMessageId`, with
-the driver record completed, connector-checkpointed, and outbound-handled. A
-successful run prints only non-secret booleans ending in
+exactly one seen inbound message and one delivery record in the fresh mapping,
+and with the driver record successfully completed, connector-checkpointed, and
+outbound-handled. A failed, interrupted, or cancelled Codex turn does not pass
+this acceptance. A successful run prints only non-secret booleans ending in
 `durable_checkpoint_ready=true`; seeing a turn in the Codex UI is not this
 checkpoint.
 

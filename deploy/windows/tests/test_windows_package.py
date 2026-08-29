@@ -290,6 +290,13 @@ def test_connector_service_launcher_has_supervised_durable_one_shot() -> None:
     assert '"CODEX_APP_SERVER_RECEIPT_DIR"' in launcher
     assert '$_.source_message_id -eq $ExpectedMessageId' in launcher
     assert '$_.sourceMessageId -eq $ExpectedMessageId' in launcher
+    assert "$allConnectorReceipts.Count -ne 1" in launcher
+    assert "$seenIds.Count -ne 1" in launcher
+    assert "$outboundSeenIds.Count -ne 1" in launcher
+    assert "$matchingDriverStates.Count -ne 1" in launcher
+    assert "$allDriverRecords.Count -ne 1" in launcher
+    assert '$driverRecords[0].completionStatus -ne "completed"' in launcher
+    assert '[bool]$driverRecords[0].outboundBlocked' in launcher
     assert 'Write-Host "connector_receipt_persisted=true"' in launcher
     assert 'Write-Host "driver_receipt_persisted=true"' in launcher
     assert 'Write-Host "durable_checkpoint_ready=true"' in launcher

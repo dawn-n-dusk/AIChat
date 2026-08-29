@@ -186,17 +186,28 @@ if ($Once -and $process.ExitCode -eq 0) {
     $connectorState = Read-AIChatPrivateJson `
         -Path $paths.ConnectorStatePath `
         -ProtectedRoot $paths.ConnectorDataRoot
-    $connectorReceipts = @($connectorState.delivery_receipts | Where-Object {
+    $allConnectorReceipts = @($connectorState.delivery_receipts)
+    $seenIds = @($connectorState.seen_ids)
+    $outboundSeenIds = @($connectorState.outbound_seen_ids)
+    $connectorReceipts = @($allConnectorReceipts | Where-Object {
         $_.source_message_id -eq $ExpectedMessageId
     })
     if ($connectorState.cursor -ne $ExpectedMessageId -or
-        @($connectorState.seen_ids) -notcontains $ExpectedMessageId -or
+        $seenIds.Count -ne 1 -or
+        $seenIds[0] -ne $ExpectedMessageId -or
+        $allConnectorReceipts.Count -ne 1 -or
         $connectorReceipts.Count -ne 1 -or
-        -not [bool]$connectorReceipts[0].replied) {
+        $connectorReceipts[0].source_message_type -ne "request" -or
+        -not [bool]$connectorReceipts[0].reply_eligible -or
+        -not [bool]$connectorReceipts[0].replied -or
+        -not [string]$connectorReceipts[0].delivery_id -or
+        -not [string]$connectorReceipts[0].outbound_event_id -or
+        $outboundSeenIds.Count -ne 1 -or
+        $outboundSeenIds[0] -ne [string]$connectorReceipts[0].outbound_event_id) {
         throw "Supervised connector checkpoint does not match ExpectedMessageId"
     }
 
-    $driverRecords = @()
+    $matchingDriverStates = @()
     foreach ($receiptFile in @(Get-ChildItem `
         -LiteralPath $paths.ConnectorDataRoot `
         -Filter "app-server-*.json" `
@@ -205,16 +216,28 @@ if ($Once -and $process.ExitCode -eq 0) {
             -Path $receiptFile.FullName `
             -ProtectedRoot $paths.ConnectorDataRoot
         if ($driverState.binding.channelId -eq [string]$settings.channel_id -and
-            $driverState.binding.threadId -eq [string]$settings.target_thread_id) {
-            $driverRecords += @($driverState.records | Where-Object {
-                $_.sourceMessageId -eq $ExpectedMessageId
-            })
+            $driverState.binding.threadId -eq [string]$settings.target_thread_id -and
+            $null -eq $driverState.binding.hostId) {
+            $matchingDriverStates += @($driverState)
         }
     }
-    if ($driverRecords.Count -ne 1 -or
+    if ($matchingDriverStates.Count -ne 1) {
+        throw "Supervised app-server receipt binding is not unique"
+    }
+    $allDriverRecords = @($matchingDriverStates[0].records)
+    $driverRecords = @($allDriverRecords | Where-Object {
+        $_.sourceMessageId -eq $ExpectedMessageId
+    })
+    if ($allDriverRecords.Count -ne 1 -or
+        $driverRecords.Count -ne 1 -or
+        $driverRecords[0].deliveryId -ne [string]$connectorReceipts[0].delivery_id -or
+        $driverRecords[0].sourceMessageType -ne "request" -or
+        -not [bool]$driverRecords[0].replyEligible -or
         $driverRecords[0].phase -ne "completed" -or
+        $driverRecords[0].completionStatus -ne "completed" -or
         -not [bool]$driverRecords[0].connectorCheckpointed -or
-        -not [bool]$driverRecords[0].outboundDelivered) {
+        -not [bool]$driverRecords[0].outboundDelivered -or
+        [bool]$driverRecords[0].outboundBlocked) {
         throw "Supervised app-server receipt does not match ExpectedMessageId"
     }
     Write-Host "message_id=$ExpectedMessageId"
