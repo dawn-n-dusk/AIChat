@@ -2,11 +2,24 @@
 param(
     [string]$StateRoot,
     [switch]$CheckSettings,
-    [switch]$PrintEnvironmentContract
+    [switch]$PrintEnvironmentContract,
+    [switch]$Once,
+    [string]$ExpectedMessageId
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+
+if ($ExpectedMessageId -and -not $Once) {
+    throw "ExpectedMessageId is valid only with Once"
+}
+if ($Once) {
+    $parsedExpectedMessageId = [Guid]::Empty
+    if (-not [Guid]::TryParseExact($ExpectedMessageId, "D", [ref]$parsedExpectedMessageId)) {
+        throw "Once requires an exact GUID ExpectedMessageId"
+    }
+    $ExpectedMessageId = $parsedExpectedMessageId.ToString("D")
+}
 
 $resolvedStateRoot = if ($StateRoot) {
     [IO.Path]::GetFullPath($StateRoot)
@@ -106,7 +119,7 @@ $token = [string]$identity.token
 $processInfo = [Diagnostics.ProcessStartInfo]::new()
 $processInfo.FileName = [string]$settings.node_binary
 $escapedConnector = '"' + $connectorPath.Replace('"', '\"') + '"'
-$processInfo.Arguments = $escapedConnector
+$processInfo.Arguments = $escapedConnector + $(if ($Once) { " --once" } else { "" })
 $processInfo.WorkingDirectory = $paths.StateRoot
 $processInfo.UseShellExecute = $false
 $processInfo.CreateNoWindow = $true
@@ -140,6 +153,7 @@ $processInfo.EnvironmentVariables["AICHAT_MAX_TURNS_PER_SENDER_PER_HOUR"] = `
 $processInfo.EnvironmentVariables["AICHAT_MAX_DELIVERIES_PER_RECOVERY"] = `
     [string]$settings.max_deliveries_per_recovery
 $processInfo.EnvironmentVariables["AICHAT_STATE_FILE"] = $paths.ConnectorStatePath
+$processInfo.EnvironmentVariables["CODEX_APP_SERVER_RECEIPT_DIR"] = $paths.ConnectorDataRoot
 $processInfo.EnvironmentVariables["CODEX_DRIVER"] = "app-server"
 $processInfo.EnvironmentVariables["CODEX_CONNECTOR_TASK_OWNED"] = "true"
 $processInfo.EnvironmentVariables["CODEX_CONNECTOR_TASK_MARKER"] = [string]$settings.task_marker
@@ -167,4 +181,46 @@ if (-not $process.Start()) {
     throw "AIChat connector process could not be started"
 }
 $process.WaitForExit()
+if ($Once -and $process.ExitCode -eq 0) {
+    [void](Assert-AIChatConnectorDataTree -Path $paths.ConnectorDataRoot)
+    $connectorState = Read-AIChatPrivateJson `
+        -Path $paths.ConnectorStatePath `
+        -ProtectedRoot $paths.ConnectorDataRoot
+    $connectorReceipts = @($connectorState.delivery_receipts | Where-Object {
+        $_.source_message_id -eq $ExpectedMessageId
+    })
+    if ($connectorState.cursor -ne $ExpectedMessageId -or
+        @($connectorState.seen_ids) -notcontains $ExpectedMessageId -or
+        $connectorReceipts.Count -ne 1 -or
+        -not [bool]$connectorReceipts[0].replied) {
+        throw "Supervised connector checkpoint does not match ExpectedMessageId"
+    }
+
+    $driverRecords = @()
+    foreach ($receiptFile in @(Get-ChildItem `
+        -LiteralPath $paths.ConnectorDataRoot `
+        -Filter "app-server-*.json" `
+        -File)) {
+        $driverState = Read-AIChatPrivateJson `
+            -Path $receiptFile.FullName `
+            -ProtectedRoot $paths.ConnectorDataRoot
+        if ($driverState.binding.channelId -eq [string]$settings.channel_id -and
+            $driverState.binding.threadId -eq [string]$settings.target_thread_id) {
+            $driverRecords += @($driverState.records | Where-Object {
+                $_.sourceMessageId -eq $ExpectedMessageId
+            })
+        }
+    }
+    if ($driverRecords.Count -ne 1 -or
+        $driverRecords[0].phase -ne "completed" -or
+        -not [bool]$driverRecords[0].connectorCheckpointed -or
+        -not [bool]$driverRecords[0].outboundDelivered) {
+        throw "Supervised app-server receipt does not match ExpectedMessageId"
+    }
+    Write-Host "message_id=$ExpectedMessageId"
+    Write-Host "cursor_checkpointed=true"
+    Write-Host "connector_receipt_persisted=true"
+    Write-Host "driver_receipt_persisted=true"
+    Write-Host "durable_checkpoint_ready=true"
+}
 exit $process.ExitCode

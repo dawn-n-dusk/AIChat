@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -36,6 +36,16 @@ test("generic driver loader and receipt validation enforce the contract", async 
         resolveDelivery: true,
       }),
     /optional resolveDelivery must be a function/,
+  );
+  assert.throws(
+    () =>
+      assertCodexDriver({
+        async start() {},
+        async deliver() {},
+        async stop() {},
+        drain: true,
+      }),
+    /optional drain must be a function/,
   );
   assert.throws(
     () => validateDriverReceipt({ accepted: true, deliveryId: "other" }, "expected"),
@@ -116,6 +126,117 @@ test("AppServerDriver starts a fixed turn, correlates notifications, and emits m
   const duplicate = await driver.deliver(deliveryRequest());
   assert.equal(duplicate.duplicate, true);
   assert.equal(protocol.filter((message) => message.method === "turn/start").length, 1);
+  await driver.stop();
+});
+
+test("AppServerDriver drain waits for accepted turn completion and durable outbound handling", async () => {
+  let child;
+  const store = memoryReceiptStore();
+  const process = fakeAppServer((message, current) => {
+    child = current;
+    if (message.method === "initialize") current.respond(message.id, {});
+    else if (message.method === "thread/resume") {
+      current.respond(message.id, { thread: { id: "thread-1" } });
+    } else if (message.method === "turn/start") {
+      current.respond(message.id, { turn: { id: "turn-drain-1", status: "inProgress" } });
+    }
+  });
+  const outbound = [];
+  const driver = new AppServerDriver({
+    binding,
+    env: { AICHAT_LIFECYCLE_STATUS_ENABLED: "false" },
+    spawnImpl: () => process,
+    receiptStore: store,
+    logger: { error() {} },
+  });
+  await driver.start({
+    binding,
+    onOutboundReply: async (event) => {
+      outbound.push(event);
+      return { suppressed: true };
+    },
+  });
+  const receipt = await driver.deliver(deliveryRequest());
+  await driver.acknowledgeDelivery(receipt.deliveryId);
+
+  let drained = false;
+  const drain = driver.drain().then(() => {
+    drained = true;
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(drained, false);
+
+  child.notify("item/completed", {
+    threadId: "thread-1",
+    turnId: "turn-drain-1",
+    item: {
+      type: "agentMessage",
+      text: JSON.stringify({ aichat_reply: null }),
+    },
+  });
+  child.notify("turn/completed", {
+    threadId: "thread-1",
+    turn: { id: "turn-drain-1", status: "completed" },
+  });
+  await drain;
+
+  assert.equal(store.state.records[0].phase, "completed");
+  assert.equal(store.state.records[0].connectorCheckpointed, true);
+  assert.equal(store.state.records[0].outboundDelivered, true);
+  assert.equal(outbound.length, 1);
+  await driver.stop();
+});
+
+test("AppServerDriver pins receipts to an explicit absolute directory", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "aichat-driver-receipts-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  assert.throws(
+    () =>
+      new AppServerDriver({
+        binding,
+        env: { CODEX_APP_SERVER_RECEIPT_DIR: "relative-receipts" },
+      }),
+    /must be an absolute path/,
+  );
+
+  let child;
+  const process = fakeAppServer((message, current) => {
+    child = current;
+    if (message.method === "initialize") current.respond(message.id, {});
+    else if (message.method === "thread/resume") {
+      current.respond(message.id, { thread: { id: "thread-1" } });
+    } else if (message.method === "turn/start") {
+      current.respond(message.id, { turn: { id: "turn-explicit-receipt", status: "inProgress" } });
+    }
+  });
+  const driver = new AppServerDriver({
+    binding,
+    env: {
+      CODEX_APP_SERVER_RECEIPT_DIR: directory,
+      AICHAT_LIFECYCLE_STATUS_ENABLED: "false",
+    },
+    spawnImpl: () => process,
+    logger: { error() {} },
+  });
+  await driver.start({ binding, onOutboundReply: async () => ({ suppressed: true }) });
+  const receipt = await driver.deliver(deliveryRequest());
+  await driver.acknowledgeDelivery(receipt.deliveryId);
+  child.notify("turn/completed", {
+    threadId: "thread-1",
+    turn: { id: "turn-explicit-receipt", status: "completed" },
+  });
+  await driver.drain();
+
+  const digest = createHash("sha256")
+    .update("channel-1\0thread-1\0")
+    .digest("hex")
+    .slice(0, 24);
+  const persisted = JSON.parse(
+    await readFile(join(directory, `app-server-${digest}.json`), "utf8"),
+  );
+  assert.equal(persisted.records[0].phase, "completed");
+  assert.equal(persisted.records[0].connectorCheckpointed, true);
+  assert.equal(persisted.records[0].outboundDelivered, true);
   await driver.stop();
 });
 

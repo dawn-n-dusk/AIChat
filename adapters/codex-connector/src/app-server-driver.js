@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 
 import { assertCodexDriver } from "./driver.js";
 import { atomicWritePrivateFile, SerializedSaveQueue } from "./atomic-file.js";
@@ -129,6 +129,10 @@ export class AppServerDriver {
       "CODEX_APP_SERVER_SANDBOX_POLICY_JSON",
     );
     this.taskMarker = env.CODEX_CONNECTOR_TASK_MARKER?.trim() || null;
+    this.receiptDirectory = absoluteDirectorySetting(
+      env.CODEX_APP_SERVER_RECEIPT_DIR,
+      "CODEX_APP_SERVER_RECEIPT_DIR",
+    );
   }
 
   async start({ binding, onOutboundReply }) {
@@ -143,7 +147,9 @@ export class AppServerDriver {
     }
     this.binding = Object.freeze({ ...binding });
     this.onOutboundReply = onOutboundReply;
-    this.receiptStore ??= new AppServerReceiptStore(defaultReceiptPath(binding));
+    this.receiptStore ??= new AppServerReceiptStore(
+      defaultReceiptPath(binding, this.receiptDirectory),
+    );
     const stored = normalizeLoadedDriverState(await this.receiptStore.load(binding));
     this.receipts = new Map(stored.records.map((record) => [record.deliveryId, record]));
 
@@ -286,6 +292,31 @@ export class AppServerDriver {
       this.receipts.delete(deliveryId);
       return { released: true };
     });
+  }
+
+  async drain() {
+    if (!this.started || this.stopped) return;
+    await this.deliveryQueue;
+    while (this.contexts.size > 0) {
+      await Promise.all(
+        [...this.contexts.values()].map((context) => context.completion.promise),
+      );
+    }
+    while (this.outboundTasks.size > 0) {
+      await Promise.all([...this.outboundTasks]);
+    }
+    await this.mutationQueue.run(async () => {});
+    const incomplete = [...this.receipts.values()].filter(
+      (record) =>
+        record.phase !== "completed" ||
+        !record.connectorCheckpointed ||
+        (record.outboundEvent && !record.outboundDelivered && !record.outboundBlocked),
+    );
+    if (incomplete.length > 0) {
+      throw new Error(
+        "Codex app-server durable drain ended with incomplete delivery checkpoints",
+      );
+    }
   }
 
   async stop() {
@@ -1567,12 +1598,15 @@ function parseStoredOutboundEvent(value, record) {
   };
 }
 
-function defaultReceiptPath(binding) {
+function defaultReceiptPath(binding, directory = null) {
   const digest = createHash("sha256")
     .update(`${binding.channelId}\0${binding.threadId}\0${binding.hostId ?? ""}`)
     .digest("hex")
     .slice(0, 24);
-  return join(homedir(), ".aichat", "codex-connector", `app-server-${digest}.json`);
+  return join(
+    directory ?? join(homedir(), ".aichat", "codex-connector"),
+    `app-server-${digest}.json`,
+  );
 }
 
 function boundedStoredRecords(records) {
@@ -1716,6 +1750,13 @@ function booleanSetting(value, fallback, name) {
   if (normalized === "true") return true;
   if (normalized === "false") return false;
   throw new Error(`${name} must be true or false`);
+}
+
+function absoluteDirectorySetting(value, name) {
+  if (value == null || value.trim() === "") return null;
+  const normalized = value.trim();
+  if (!isAbsolute(normalized)) throw new Error(`${name} must be an absolute path`);
+  return normalized;
 }
 
 function parseOptionalJson(value, name) {

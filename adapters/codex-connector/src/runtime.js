@@ -41,7 +41,7 @@ export class ConnectorRuntime {
     if (websocketEnabled) this.#connectWebSocket();
   }
 
-  async stop() {
+  async stop({ drain = false } = {}) {
     if (this.stopped) return;
     this.stopped = true;
     if (this.recoveryTimer) this.timers.clearInterval(this.recoveryTimer);
@@ -58,7 +58,7 @@ export class ConnectorRuntime {
         // WebSocket shutdown is best-effort and must never expose its token-bearing URL.
       }
     }
-    if (this.started) await this.connector.stop();
+    if (this.started) await this.connector.stop({ drain });
   }
 
   #wake(reason) {

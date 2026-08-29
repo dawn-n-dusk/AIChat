@@ -226,6 +226,7 @@ Node.js 20 or newer is required.
 | `CODEX_DESKTOP_IPC_RECONNECT_DELAY_MS` | owner IPC | `1000`. |
 | `CODEX_DESKTOP_IPC_TURN_TIMEOUT_MS` | owner IPC | `600000`. |
 | `CODEX_HOME` | no | Optional existing Codex home inherited by the isolated App Server process. |
+| `CODEX_APP_SERVER_RECEIPT_DIR` | no | Absolute trusted directory for binding-derived app-server receipts. Windows packaging pins this to the same current-user-only directory as connector state so receipt discovery never depends on inherited `HOME`/`USERPROFILE`. |
 
 ## Deployment
 
