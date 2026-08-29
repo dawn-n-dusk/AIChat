@@ -53,14 +53,17 @@ try {
     $expectedEgress = if ($null -ne $settings -and [bool]$settings.egress.enabled) {
         "true"
     } else { "false" }
+    $expectedDeliverTypes = if ($null -ne $settings) {
+        if ([bool]$settings.deliver_results) { "request,result" } else { "request" }
+    } else { "request" }
     if ($launcherOutput -notmatch '(?m)^token_read=false\s*$' -or
-        $launcherOutput -notmatch '(?m)^deliver_types=request\s*$' -or
+        $launcherOutput -notmatch "(?m)^deliver_types=$([regex]::Escape($expectedDeliverTypes))\s*`$" -or
         $launcherOutput -notmatch "(?m)^automatic_egress=$expectedEgress\s*`$" -or
         $launcherOutput -notmatch '(?m)^lifecycle_status_egress=false\s*$' -or
         $launcherOutput -notmatch '(?m)^state_file_fixed=true\s*$') {
         throw "installed launcher did not report the fixed connector contract"
     }
-    Report-AIChatCheck "launcher" $true "request-only inbound, controlled result egress, WebSocket, fixed state, app-server"
+    Report-AIChatCheck "launcher" $true "fixed inbound types ($expectedDeliverTypes), request-only reply eligibility, controlled result egress, WebSocket, fixed state, app-server"
 } catch {
     Report-AIChatCheck "launcher" $false $_.Exception.Message
 }

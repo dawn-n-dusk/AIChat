@@ -864,6 +864,7 @@ function Get-AIChatConnectorSettings {
         "expected_agent_id",
         "channel_id",
         "allowed_sender_ids",
+        "deliver_results",
         "target_thread_id",
         "task_marker",
         "app_server_cwd",
@@ -908,6 +909,9 @@ function Get-AIChatConnectorSettings {
         -Value $(if ($raw.PSObject.Properties["egress"]) { $raw.egress } else { $null }) `
         -ChannelId $channelId `
         -ProtectedRoot $ProtectedRoot
+    $deliverResults = Get-AIChatOptionalBoolean `
+        -Value $(if ($raw.PSObject.Properties["deliver_results"]) { $raw.deliver_results } else { $null }) `
+        -Name "deliver_results"
 
     if ($raw.allowed_sender_ids -is [string] -or
         $raw.allowed_sender_ids -isnot [Collections.IEnumerable]) {
@@ -1068,6 +1072,7 @@ function Get-AIChatConnectorSettings {
         expected_agent_id = $expectedAgentId
         channel_id = $channelId
         allowed_sender_ids = @($senders)
+        deliver_results = $deliverResults
         target_thread_id = $targetThreadId
         task_marker = $taskMarker
         app_server_cwd = $cwd

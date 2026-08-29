@@ -5,7 +5,9 @@ LaunchAgent. It is intentionally conservative:
 
 - `CODEX_DRIVER=app-server` is fixed. The private Desktop owner IPC path remains
   disabled.
-- Only `request` messages from exact allowed sender IDs start Codex turns.
+- Only `request` messages from exact allowed sender IDs start Codex turns by
+  default. A local `deliver_results: true` opt-in may also put
+  peer results into the same dedicated task for project alignment.
 - Automatic AIChat egress is disabled by default and requires the complete
   local `egress` opt-in described below. General accepted/running/completed/
   failed lifecycle status requires an additional explicit opt-in and remains
@@ -205,13 +207,27 @@ non-blocking process-scoped shared or exclusive locks. Read-only checks of a
 legacy active install that predates this file remain non-mutating and fail if a
 new locked operation appears during the snapshot.
 
-## Outbound collaboration
+## Inbound results and outbound collaboration
 
-The package always fixes inbound delivery to `request`; `text`, `result`, and
-`status` messages cannot start a Codex turn. A receipt also persists the source
-message type and reply eligibility. Only completion of a delivered `request`
-may produce a model `result` or connector-generated `status`; old receipt state
-without that proof migrates as reply-ineligible.
+The default `deliver_results` value is `false`. To make a peer's correlated
+result visible in this same dedicated task, use the only supported expansion:
+
+```json
+"deliver_results": true
+```
+
+The launcher then fixes the core allowlist to `request,result`; it never exposes
+`text`, `status`, unknown types, or `result`-only configurations. The fixed channel, exact sender list,
+fixed task/worktree, cursor, deduplication, receipt retention, and per-sender
+turn budget are unchanged.
+
+This opt-in is observation, not reply authority. A delivered `result` is
+persisted with `reply_eligible=false`; the App Server turn has no structured
+reply schema or reply contract, and its completion cannot emit a model result
+or lifecycle status. Only completion of a durably typed `request` may produce a
+model `result` or connector-generated `status`. Old receipt state without that
+proof migrates as reply-ineligible. The packaged launcher continues to filter
+inbound `status`, so a returned result cannot form a request/result loop.
 
 To opt in to automatic results, first create a separate private canary:
 

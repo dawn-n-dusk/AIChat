@@ -249,7 +249,8 @@ def test_connector_service_launcher_fixes_security_and_environment_contract() ->
     common = (root / "common.ps1").read_text(encoding="utf-8")
     checker = (root / "check.ps1").read_text(encoding="utf-8")
     required = {
-        '["AICHAT_DELIVER_TYPES"] = "request"',
+        '["AICHAT_DELIVER_TYPES"]',
+        '$settings.deliver_results',
         '["AICHAT_AUTONOMOUS_TEXT_ENABLED"] = "false"',
         '["AICHAT_WEBSOCKET_ENABLED"] = "true"',
         '["AICHAT_PERIODIC_RECOVERY_ENABLED"] = "false"',
@@ -323,11 +324,14 @@ def test_connector_service_result_egress_is_explicit_and_fail_closed() -> None:
     launcher = (root / "launcher.ps1").read_text(encoding="utf-8")
     example = json.loads((root / "config.example.json").read_text(encoding="utf-8"))
     assert example["egress"]["enabled"] is False
+    assert example["deliver_results"] is False
     assert "egress.acknowledged_channel_id must exactly match channel_id" in common
     assert "Assert-AIChatPrivateFile -Path $canaryPath" in common
     assert "exact public DNS hostnames" in common
     assert "egress.max_text_bytes must be from 128 through 100000" in common
-    assert 'AICHAT_DELIVER_TYPES"] = "request"' in launcher
+    assert '$settings.deliver_results' in launcher
+    assert '"deliver_results"' in common
+    assert 'Name "deliver_results"' in common
     assert 'AICHAT_LIFECYCLE_STATUS_ENABLED"] = "false"' in launcher
     assert "AICHAT_EGRESS_CHANNEL_AUDIENCE_ACK" in launcher
 

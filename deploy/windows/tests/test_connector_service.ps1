@@ -28,6 +28,7 @@ if ($null -ne (Get-AIChatConnectorTask)) {
 $testId = [Guid]::NewGuid().ToString("N")
 $protectedRoot = $paths.ProtectedRoot
 $settingsPath = Join-Path $protectedRoot "ci-connector-settings-$testId.json"
+$deliverResultsSettingsPath = Join-Path $protectedRoot "ci-connector-deliver-results-$testId.json"
 $unsafeSettingsPath = Join-Path $protectedRoot "ci-connector-unsafe-$testId.json"
 $identityPath = Join-Path $protectedRoot "ci-connector-identity-$testId.json"
 $egressSettingsPath = Join-Path $protectedRoot "ci-connector-egress-$testId.json"
@@ -236,6 +237,36 @@ public static class Program {
         -Path $settingsPath `
         -Value $settingsA `
         -ProtectedRoot $protectedRoot
+
+    $resultInboundSettings = $settingsA | ConvertTo-Json -Depth 12 | ConvertFrom-Json
+    $resultInboundSettings | Add-Member `
+        -NotePropertyName deliver_results `
+        -NotePropertyValue $true
+    Write-AIChatPrivateJson `
+        -Path $deliverResultsSettingsPath `
+        -Value $resultInboundSettings `
+        -ProtectedRoot $protectedRoot
+    $validatedResultInbound = Get-AIChatConnectorSettings `
+        -Path $deliverResultsSettingsPath `
+        -ProtectedRoot $protectedRoot
+    if (-not [bool]$validatedResultInbound.deliver_results) {
+        throw "Result inbound opt-in did not validate"
+    }
+    $invalidInboundShape = $settingsA | ConvertTo-Json -Depth 12 | ConvertFrom-Json
+    $invalidInboundShape | Add-Member `
+        -NotePropertyName deliver_results `
+        -NotePropertyValue "true"
+    Write-AIChatPrivateJson `
+        -Path $deliverResultsSettingsPath `
+        -Value $invalidInboundShape `
+        -ProtectedRoot $protectedRoot
+    Invoke-ExpectedFailure `
+        -Label "deliver_results string shape check" `
+        -Action {
+            Get-AIChatConnectorSettings `
+                -Path $deliverResultsSettingsPath `
+                -ProtectedRoot $protectedRoot
+        }
 
     [IO.File]::WriteAllText(
         $egressCanary,
@@ -521,6 +552,9 @@ public static class Program {
         -ProtectedRoot $paths.ProtectedRoot
     $settingsB = $settingsA | ConvertTo-Json -Depth 12 | ConvertFrom-Json
     $settingsB.task_marker = "AIChat Windows CI updated marker $testId"
+    $settingsB | Add-Member `
+        -NotePropertyName deliver_results `
+        -NotePropertyValue $true
     Write-AIChatPrivateJson `
         -Path $settingsPath `
         -Value $settingsB `
@@ -548,6 +582,13 @@ public static class Program {
         -Apply *>&1 | Out-String
     Add-CapturedOutput $installBOutput
     if ($LASTEXITCODE -ne 0) { throw "Second connector service install failed" }
+    $launcherBOutput = & $paths.LauncherPath `
+        -StateRoot $paths.StateRoot `
+        -CheckSettings *>&1 | Out-String
+    Add-CapturedOutput $launcherBOutput
+    if ($launcherBOutput -notmatch '(?m)^deliver_types=request,result\s*$') {
+        throw "Installed launcher did not expose the result inbound opt-in"
+    }
     $rollbackOutput = & $rollback -Apply *>&1 | Out-String
     Add-CapturedOutput $rollbackOutput
     if ($LASTEXITCODE -ne 0) { throw "Connector service rollback failed" }
@@ -608,6 +649,7 @@ public static class Program {
         $hardlinkAlias,
         $unsafeSettingsPath,
         $settingsPath,
+        $deliverResultsSettingsPath,
         $egressSettingsPath,
         $egressCanary,
         $hashMismatchSettingsPath,

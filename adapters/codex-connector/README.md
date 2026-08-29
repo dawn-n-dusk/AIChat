@@ -17,7 +17,10 @@ connector-owned session and do not edit that session concurrently in Desktop.
   required and `*` is rejected.
 - `text` delivery requires the additional
   `AICHAT_AUTONOMOUS_TEXT_ENABLED=true` acknowledgement. `result` and `status`
-  are passive by default, preventing request-result loops.
+  are passive by default, preventing request-result loops. The packaged macOS
+  and Windows launchers permit only the narrower `deliver_results=true`
+  (`request,result`) opt-in and
+  keep every non-request receipt reply-ineligible.
 - Automatic Relay egress is off by default. Ordinary assistant output is never
   forwarded implicitly.
 - Both built-in drivers require a dedicated connector-owned session marker, a
@@ -182,7 +185,7 @@ Node.js 20 or newer is required.
 | `AICHAT_SERVER` | no | `http://127.0.0.1:8000`; use HTTPS/WSS outside loopback. |
 | `AICHAT_CHANNEL_ID` | yes | One fixed channel. |
 | `AICHAT_ALLOWED_SENDER_IDS` | yes | Comma-separated exact Agent IDs; no wildcard. |
-| `AICHAT_DELIVER_TYPES` | no | `request`; adding `text` also requires the autonomy acknowledgement. |
+| `AICHAT_DELIVER_TYPES` | no | `request`; core can allow other protocol types, but packaged macOS/Windows derive only `request` or `request,result` from their boolean `deliver_results` setting. Only `request` is reply-eligible. Adding core-level `text` also requires the autonomy acknowledgement. |
 | `AICHAT_AUTONOMOUS_TEXT_ENABLED` | no | `false`. |
 | `AICHAT_WEBSOCKET_ENABLED` | no | `true`; WebSocket is only a wake hint. |
 | `AICHAT_WS_RECONNECT_DELAY_MS` | no | `2000`. |

@@ -49,9 +49,10 @@ class MacOSLauncherTests(unittest.TestCase):
         *,
         egress_enabled: bool = True,
         lifecycle_status_enabled: bool = False,
+        deliver_results: bool | None = None,
     ) -> dict[str, object]:
         channel_id = "channel-fixed"
-        return {
+        settings: dict[str, object] = {
             "identity_config_path": str(self.home / "identity.json"),
             "channel_id": channel_id,
             "allowed_sender_ids": ["agent-windows"],
@@ -68,6 +69,9 @@ class MacOSLauncherTests(unittest.TestCase):
                 "max_text_bytes": 4096,
             },
         }
+        if deliver_results is not None:
+            settings["deliver_results"] = deliver_results
+        return settings
 
     def test_launcher_environment_is_accepted_by_real_core_config_loader(self) -> None:
         node = shutil.which("node")
@@ -106,6 +110,38 @@ class MacOSLauncherTests(unittest.TestCase):
         self.assertEqual(loaded["hosts"], ["github.com", "docs.example.test"])
         self.assertEqual(loaded["maxBytes"], 4096)
         self.assertEqual(environment["CODEX_TARGET_THREAD_ID"], settings["target_thread_id"])
+
+    def test_result_delivery_is_explicit_and_preserves_request_as_the_only_reply_source(self) -> None:
+        settings = launcher.validate_settings(self.settings(deliver_results=True))
+        self.assertTrue(settings["deliver_results"])
+        environment = launcher.build_environment(
+            settings,
+            {"server": "https://relay.example.test", "token": "relay-test-token-value"},
+        )
+        self.assertEqual(environment["AICHAT_DELIVER_TYPES"], "request,result")
+
+        node = shutil.which("node")
+        self.assertIsNotNone(node, "Node.js is required for the functional launcher regression")
+        environment["HOME"] = str(self.home)
+        probe = (
+            f'import {{ loadConfig }} from {json.dumps(CORE_CONFIG_PATH.as_uri())};'
+            "const config = loadConfig();"
+            "process.stdout.write(JSON.stringify([...config.deliverTypes]));"
+        )
+        completed = subprocess.run(
+            [node, "--input-type=module", "--eval", probe],
+            cwd=self.worktree,
+            env=environment,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(json.loads(completed.stdout), ["request", "result"])
+
+        invalid_shape = self.settings()
+        invalid_shape["deliver_results"] = "true"
+        with self.assertRaisesRegex(launcher.LaunchError, "true or false"):
+            launcher.validate_settings(invalid_shape)
 
     def test_egress_defaults_off_and_never_exports_a_canary_path(self) -> None:
         settings = self.settings(egress_enabled=False)

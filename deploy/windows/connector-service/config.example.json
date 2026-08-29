@@ -5,6 +5,7 @@
   "allowed_sender_ids": [
     "REPLACE_WITH_EXACT_REMOTE_AGENT_ID"
   ],
+  "deliver_results": false,
   "target_thread_id": "00000000-0000-0000-0000-000000000000",
   "task_marker": "AIChat connector-owned task marker 00000000-0000-0000-0000-000000000000",
   "app_server_cwd": "C:\\absolute\\path\\to\\dedicated\\project-worktree",
