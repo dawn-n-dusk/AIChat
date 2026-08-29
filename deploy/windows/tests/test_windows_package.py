@@ -297,8 +297,13 @@ def test_connector_service_launcher_has_supervised_durable_one_shot() -> None:
     assert "$allDriverRecords.Count -ne 1" in launcher
     assert '$driverRecords[0].completionStatus -ne "completed"' in launcher
     assert '[bool]$driverRecords[0].outboundBlocked' in launcher
+    assert '[bool]$settings.egress.enabled' in launcher
+    assert '$driverRecords[0].outboundEvent.modelDeclared' in launcher
+    assert '$driverRecords[0].outboundEvent.messageType -ne "result"' in launcher
+    assert '$connectorReceipts[0].outbound_message_id' in launcher
     assert 'Write-Host "connector_receipt_persisted=true"' in launcher
     assert 'Write-Host "driver_receipt_persisted=true"' in launcher
+    assert 'Write-Host "relay_result_checkpointed=$(' in launcher
     assert 'Write-Host "durable_checkpoint_ready=true"' in launcher
 
 

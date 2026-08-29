@@ -239,8 +239,11 @@ then shuts down App Server. It succeeds only when the connector cursor and
 receipt plus the app-server driver receipt all match `ExpectedMessageId`, with
 exactly one seen inbound message and one delivery record in the fresh mapping,
 and with the driver record successfully completed, connector-checkpointed, and
-outbound-handled. A failed, interrupted, or cancelled Codex turn does not pass
-this acceptance. A successful run prints only non-secret booleans ending in
+outbound-handled. When result egress is enabled, the checkpoint additionally
+requires a model-declared `result` and a persisted Relay outbound message ID;
+a locally suppressed lifecycle completion cannot pass as result delivery. A
+failed, interrupted, or cancelled Codex turn does not pass this acceptance. A
+successful run prints only non-secret booleans ending in
 `durable_checkpoint_ready=true`; seeing a turn in the Codex UI is not this
 checkpoint.
 

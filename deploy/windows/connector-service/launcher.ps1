@@ -240,10 +240,18 @@ if ($Once -and $process.ExitCode -eq 0) {
         [bool]$driverRecords[0].outboundBlocked) {
         throw "Supervised app-server receipt does not match ExpectedMessageId"
     }
+    if ([bool]$settings.egress.enabled -and
+        ($null -eq $driverRecords[0].outboundEvent -or
+         -not [bool]$driverRecords[0].outboundEvent.modelDeclared -or
+         [string]$driverRecords[0].outboundEvent.messageType -ne "result" -or
+         -not [string]$connectorReceipts[0].outbound_message_id)) {
+        throw "Supervised result egress did not persist a model-declared Relay result"
+    }
     Write-Host "message_id=$ExpectedMessageId"
     Write-Host "cursor_checkpointed=true"
     Write-Host "connector_receipt_persisted=true"
     Write-Host "driver_receipt_persisted=true"
+    Write-Host "relay_result_checkpointed=$(([bool]$settings.egress.enabled).ToString().ToLowerInvariant())"
     Write-Host "durable_checkpoint_ready=true"
 }
 exit $process.ExitCode
