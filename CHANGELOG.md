@@ -10,7 +10,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Windows supervised one-shot acceptance now distinguishes a model-declared
   Relay `result` from a locally suppressed lifecycle completion when automatic
-  result egress is enabled.
+  result egress is enabled, binds the driver event to the persisted Relay
+  checkpoint, and rejects pre-existing local checkpoints.
 - Add supervised Windows `-Once -ExpectedMessageId` acceptance, explicit
   app-server receipt placement, exact clean-mapping verification, successful
   turn-status checks, and child-exit-confirmed durable draining so a visible

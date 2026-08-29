@@ -85,6 +85,25 @@ if (-not $active.PSObject.Properties["runtime_file_count"] -or
     throw "Installed connector release tree hash validation failed"
 }
 
+if ($Once) {
+    if (Test-Path -LiteralPath $paths.ConnectorStatePath) {
+        throw "Supervised one-shot acceptance requires a fresh connector state"
+    }
+    foreach ($receiptFile in @(Get-ChildItem `
+        -LiteralPath $paths.ConnectorDataRoot `
+        -Filter "app-server-*.json" `
+        -File)) {
+        $priorDriverState = Read-AIChatPrivateJson `
+            -Path $receiptFile.FullName `
+            -ProtectedRoot $paths.ConnectorDataRoot
+        if ($priorDriverState.binding.channelId -eq [string]$settings.channel_id -and
+            $priorDriverState.binding.threadId -eq [string]$settings.target_thread_id -and
+            $null -eq $priorDriverState.binding.hostId) {
+            throw "Supervised one-shot acceptance requires a fresh app-server receipt"
+        }
+    }
+}
+
 if ($CheckSettings -or $PrintEnvironmentContract) {
     Write-Host "settings_ok=true"
     Write-Host "identity_content_read=false"
@@ -240,18 +259,15 @@ if ($Once -and $process.ExitCode -eq 0) {
         [bool]$driverRecords[0].outboundBlocked) {
         throw "Supervised app-server receipt does not match ExpectedMessageId"
     }
-    if ([bool]$settings.egress.enabled -and
-        ($null -eq $driverRecords[0].outboundEvent -or
-         -not [bool]$driverRecords[0].outboundEvent.modelDeclared -or
-         [string]$driverRecords[0].outboundEvent.messageType -ne "result" -or
-         -not [string]$connectorReceipts[0].outbound_message_id)) {
-        throw "Supervised result egress did not persist a model-declared Relay result"
-    }
+    $relayResultCheckpointed = Assert-AIChatSupervisedResultEgressCheckpoint `
+        -Settings $settings `
+        -ConnectorReceipt $connectorReceipts[0] `
+        -DriverRecord $driverRecords[0]
     Write-Host "message_id=$ExpectedMessageId"
     Write-Host "cursor_checkpointed=true"
     Write-Host "connector_receipt_persisted=true"
     Write-Host "driver_receipt_persisted=true"
-    Write-Host "relay_result_checkpointed=$(([bool]$settings.egress.enabled).ToString().ToLowerInvariant())"
+    Write-Host "relay_result_checkpointed=$($relayResultCheckpointed.ToString().ToLowerInvariant())"
     Write-Host "durable_checkpoint_ready=true"
 }
 exit $process.ExitCode
