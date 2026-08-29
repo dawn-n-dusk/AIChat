@@ -86,12 +86,13 @@ if (-not $active.PSObject.Properties["runtime_file_count"] -or
 }
 
 if ($CheckSettings -or $PrintEnvironmentContract) {
+    $deliverTypes = if ([bool]$settings.deliver_results) { "request,result" } else { "request" }
     Write-Host "settings_ok=true"
     Write-Host "identity_content_read=false"
     Write-Host "token_read=false"
     Write-Host "channel_source=connector-settings"
     Write-Host "driver=app-server"
-    Write-Host "deliver_types=$(@($settings.deliver_types) -join ',')"
+    Write-Host "deliver_types=$deliverTypes"
     Write-Host "automatic_egress=$(([bool]$settings.egress.enabled).ToString().ToLowerInvariant())"
     Write-Host "lifecycle_status_egress=false"
     Write-Host "periodic_recovery=false"
@@ -142,7 +143,7 @@ $processInfo.EnvironmentVariables["AICHAT_CHANNEL_ID"] = [string]$settings.chann
 $processInfo.EnvironmentVariables["AICHAT_ALLOWED_SENDER_IDS"] = `
     (@($settings.allowed_sender_ids) -join ",")
 $processInfo.EnvironmentVariables["AICHAT_DELIVER_TYPES"] = `
-    (@($settings.deliver_types) -join ",")
+    $(if ([bool]$settings.deliver_results) { "request,result" } else { "request" })
 $processInfo.EnvironmentVariables["AICHAT_AUTONOMOUS_TEXT_ENABLED"] = "false"
 $processInfo.EnvironmentVariables["AICHAT_WEBSOCKET_ENABLED"] = "true"
 $processInfo.EnvironmentVariables["AICHAT_PERIODIC_RECOVERY_ENABLED"] = "false"

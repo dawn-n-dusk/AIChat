@@ -644,31 +644,6 @@ function Get-AIChatOptionalBoolean {
     return [bool]$Value
 }
 
-function Get-AIChatDeliverTypes {
-    param($Value)
-
-    if ($null -eq $Value) { return @("request") }
-    if ($Value -is [string] -or $Value -isnot [Collections.IEnumerable]) {
-        throw "deliver_types must be a JSON array"
-    }
-    $normalized = [Collections.Generic.List[string]]::new()
-    foreach ($item in @($Value)) {
-        $messageType = Get-AIChatRequiredString -Value $item -Name "deliver_types item"
-        if ($messageType -notin @("request", "result")) {
-            throw "deliver_types supports only request and the explicit result opt-in"
-        }
-        if (-not $normalized.Contains($messageType)) { $normalized.Add($messageType) }
-    }
-    if (-not $normalized.Contains("request")) {
-        throw "deliver_types must include request"
-    }
-    $result = [Collections.Generic.List[string]]::new()
-    foreach ($messageType in @("request", "result")) {
-        if ($normalized.Contains($messageType)) { $result.Add($messageType) }
-    }
-    return @($result)
-}
-
 function Get-AIChatEgressSettings {
     param(
         $Value,
@@ -863,7 +838,7 @@ function Get-AIChatConnectorSettings {
         "expected_agent_id",
         "channel_id",
         "allowed_sender_ids",
-        "deliver_types",
+        "deliver_results",
         "target_thread_id",
         "task_marker",
         "app_server_cwd",
@@ -908,8 +883,9 @@ function Get-AIChatConnectorSettings {
         -Value $(if ($raw.PSObject.Properties["egress"]) { $raw.egress } else { $null }) `
         -ChannelId $channelId `
         -ProtectedRoot $ProtectedRoot
-    $deliverTypes = Get-AIChatDeliverTypes `
-        -Value $(if ($raw.PSObject.Properties["deliver_types"]) { $raw.deliver_types } else { $null })
+    $deliverResults = Get-AIChatOptionalBoolean `
+        -Value $(if ($raw.PSObject.Properties["deliver_results"]) { $raw.deliver_results } else { $null }) `
+        -Name "deliver_results"
 
     if ($raw.allowed_sender_ids -is [string] -or
         $raw.allowed_sender_ids -isnot [Collections.IEnumerable]) {
@@ -1070,7 +1046,7 @@ function Get-AIChatConnectorSettings {
         expected_agent_id = $expectedAgentId
         channel_id = $channelId
         allowed_sender_ids = @($senders)
-        deliver_types = @($deliverTypes)
+        deliver_results = $deliverResults
         target_thread_id = $targetThreadId
         task_marker = $taskMarker
         app_server_cwd = $cwd

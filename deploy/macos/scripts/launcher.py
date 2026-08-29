@@ -84,7 +84,7 @@ def validate_settings(settings: dict[str, Any]) -> dict[str, Any]:
         "identity_config_path",
         "channel_id",
         "allowed_sender_ids",
-        "deliver_types",
+        "deliver_results",
         "target_thread_id",
         "task_marker",
         "app_server_cwd",
@@ -124,7 +124,9 @@ def validate_settings(settings: dict[str, Any]) -> dict[str, Any]:
     if any("," in value or "\n" in value or "\r" in value for value in normalized_senders):
         fail("allowed_sender_ids must not contain commas or line breaks")
 
-    deliver_types = validate_deliver_types(settings.get("deliver_types"))
+    deliver_results = settings.get("deliver_results", False)
+    if not isinstance(deliver_results, bool):
+        fail("deliver_results must be true or false")
 
     cwd = Path(required_string(settings.get("app_server_cwd"), "app_server_cwd"))
     if not cwd.is_absolute():
@@ -191,7 +193,7 @@ def validate_settings(settings: dict[str, Any]) -> dict[str, Any]:
         "identity_config_path": identity_path,
         "channel_id": channel_id,
         "allowed_sender_ids": normalized_senders,
-        "deliver_types": deliver_types,
+        "deliver_results": deliver_results,
         "target_thread_id": target_thread_id,
         "task_marker": task_marker,
         "app_server_cwd": str(resolved_cwd),
@@ -201,22 +203,6 @@ def validate_settings(settings: dict[str, Any]) -> dict[str, Any]:
         "codex_app_server_binary": codex_binary,
         "egress": egress,
     }
-
-
-def validate_deliver_types(value: Any) -> list[str]:
-    if value is None:
-        return ["request"]
-    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
-        fail("deliver_types must be a JSON array")
-    normalized = {item.strip() for item in value}
-    if "" in normalized:
-        fail("deliver_types items must be non-empty strings")
-    if "request" not in normalized:
-        fail("deliver_types must include request")
-    unsupported = normalized - {"request", "result"}
-    if unsupported:
-        fail("deliver_types supports only request and the explicit result opt-in")
-    return [item for item in ("request", "result") if item in normalized]
 
 
 def validate_egress(value: Any, channel_id: str) -> dict[str, Any]:
@@ -385,7 +371,9 @@ def build_environment(settings: dict[str, Any], identity: dict[str, Any]) -> dic
             "AICHAT_TOKEN": token,
             "AICHAT_CHANNEL_ID": settings["channel_id"],
             "AICHAT_ALLOWED_SENDER_IDS": ",".join(settings["allowed_sender_ids"]),
-            "AICHAT_DELIVER_TYPES": ",".join(settings["deliver_types"]),
+            "AICHAT_DELIVER_TYPES": (
+                "request,result" if settings["deliver_results"] else "request"
+            ),
             "AICHAT_AUTONOMOUS_TEXT_ENABLED": "false",
             "AICHAT_WEBSOCKET_ENABLED": "true",
             "AICHAT_PERIODIC_RECOVERY_ENABLED": "false",
@@ -438,7 +426,10 @@ def main() -> int:
     if args.check_settings:
         print("settings_ok=true")
         print("token_read=false")
-        print(f"deliver_types={','.join(settings['deliver_types'])}")
+        print(
+            "deliver_types="
+            f"{'request,result' if settings['deliver_results'] else 'request'}"
+        )
         print(f"automatic_egress={str(settings['egress']['enabled']).lower()}")
         print(
             "lifecycle_status_enabled="

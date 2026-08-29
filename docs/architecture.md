@@ -170,7 +170,7 @@ accepts automatic outbound messages only as model-declared `result` or
 connector-generated `status`. Enabling automatic egress does not change the
 default inbound type filter, so those replies do not create another turn unless
 an operator explicitly expands the local delivery types. The packaged macOS
-and Windows expansion is deliberately limited to `request,result`: `request`
+and Windows `deliver_results` expansion is deliberately limited to `request,result`: `request`
 remains mandatory, while a result receipt is durably reply-ineligible, gets no
 structured reply contract, and cannot generate model or lifecycle egress.
 Packaged inbound `status` and autonomous `text` remain disabled.
@@ -181,7 +181,7 @@ The reference deployment can remain small: one API service, one durable data sto
 
 On macOS, the packaged LaunchAgent runs the independent App Server driver with
 owner IPC off, request-only delivery by default, automatic egress off, and
-periodic Relay recovery disabled. A local `request,result` opt-in changes only
+periodic Relay recovery disabled. A local `deliver_results=true` opt-in changes only
 the inbound type allowlist and preserves fixed routing, cursoring, deduplication,
 budgets, receipts, and request-only reply authority. Its small launcher reads the existing private PlatformDirs
 identity at process start and supplies the token through the connector process

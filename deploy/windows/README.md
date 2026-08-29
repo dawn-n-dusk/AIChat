@@ -292,16 +292,16 @@ still requires a separate OS user, VM, or container.
 
 ### Optional inbound result alignment
 
-The default `deliver_types` setting remains `["request"]`. After the one-way
+The default `deliver_results` setting remains `false`. After the one-way
 request acceptance is durable, either host may opt in to showing peer results
 inside its fixed dedicated Codex task:
 
 ```json
-"deliver_types": ["request", "result"]
+"deliver_results": true
 ```
 
-`request` is mandatory. The Windows package rejects `result`-only, `text`,
-`status`, and unknown values. Enabling result delivery does not relax the fixed
+The Windows launcher then fixes the core allowlist to `request,result`; it
+cannot express `result`-only, `text`, `status`, or unknown values. Enabling result delivery does not relax the fixed
 channel, exact sender IDs, task/thread/worktree binding, sender turn budget,
 deduplication, cursor, state, receipt, or lock contracts.
 

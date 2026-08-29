@@ -28,7 +28,7 @@ if ($null -ne (Get-AIChatConnectorTask)) {
 $testId = [Guid]::NewGuid().ToString("N")
 $protectedRoot = $paths.ProtectedRoot
 $settingsPath = Join-Path $protectedRoot "ci-connector-settings-$testId.json"
-$deliverTypesSettingsPath = Join-Path $protectedRoot "ci-connector-deliver-types-$testId.json"
+$deliverResultsSettingsPath = Join-Path $protectedRoot "ci-connector-deliver-results-$testId.json"
 $unsafeSettingsPath = Join-Path $protectedRoot "ci-connector-unsafe-$testId.json"
 $identityPath = Join-Path $protectedRoot "ci-connector-identity-$testId.json"
 $egressSettingsPath = Join-Path $protectedRoot "ci-connector-egress-$testId.json"
@@ -183,53 +183,31 @@ public static class Program {
 
     $resultInboundSettings = $settingsA | ConvertTo-Json -Depth 12 | ConvertFrom-Json
     $resultInboundSettings | Add-Member `
-        -NotePropertyName deliver_types `
-        -NotePropertyValue @("result", "request", "result")
+        -NotePropertyName deliver_results `
+        -NotePropertyValue $true
     Write-AIChatPrivateJson `
-        -Path $deliverTypesSettingsPath `
+        -Path $deliverResultsSettingsPath `
         -Value $resultInboundSettings `
         -ProtectedRoot $protectedRoot
     $validatedResultInbound = Get-AIChatConnectorSettings `
-        -Path $deliverTypesSettingsPath `
+        -Path $deliverResultsSettingsPath `
         -ProtectedRoot $protectedRoot
-    if ((@($validatedResultInbound.deliver_types) -join ",") -ne "request,result") {
-        throw "Result inbound opt-in did not normalize to request,result"
-    }
-    $invalidDeliverTypeCases = @(
-        [pscustomobject]@{ Values = @("result") },
-        [pscustomobject]@{ Values = @("request", "status") },
-        [pscustomobject]@{ Values = @("request", "text") }
-    )
-    foreach ($invalidDeliverTypeCase in $invalidDeliverTypeCases) {
-        $invalidInbound = $settingsA | ConvertTo-Json -Depth 12 | ConvertFrom-Json
-        $invalidInbound | Add-Member `
-            -NotePropertyName deliver_types `
-            -NotePropertyValue @($invalidDeliverTypeCase.Values)
-        Write-AIChatPrivateJson `
-            -Path $deliverTypesSettingsPath `
-            -Value $invalidInbound `
-            -ProtectedRoot $protectedRoot
-        Invoke-ExpectedFailure `
-            -Label "invalid deliver_types check" `
-            -Action {
-                Get-AIChatConnectorSettings `
-                    -Path $deliverTypesSettingsPath `
-                    -ProtectedRoot $protectedRoot
-            }
+    if (-not [bool]$validatedResultInbound.deliver_results) {
+        throw "Result inbound opt-in did not validate"
     }
     $invalidInboundShape = $settingsA | ConvertTo-Json -Depth 12 | ConvertFrom-Json
     $invalidInboundShape | Add-Member `
-        -NotePropertyName deliver_types `
-        -NotePropertyValue "request,result"
+        -NotePropertyName deliver_results `
+        -NotePropertyValue "true"
     Write-AIChatPrivateJson `
-        -Path $deliverTypesSettingsPath `
+        -Path $deliverResultsSettingsPath `
         -Value $invalidInboundShape `
         -ProtectedRoot $protectedRoot
     Invoke-ExpectedFailure `
-        -Label "deliver_types string shape check" `
+        -Label "deliver_results string shape check" `
         -Action {
             Get-AIChatConnectorSettings `
-                -Path $deliverTypesSettingsPath `
+                -Path $deliverResultsSettingsPath `
                 -ProtectedRoot $protectedRoot
         }
 
@@ -479,8 +457,8 @@ public static class Program {
     $settingsB = $settingsA | ConvertTo-Json -Depth 12 | ConvertFrom-Json
     $settingsB.task_marker = "AIChat Windows CI updated marker $testId"
     $settingsB | Add-Member `
-        -NotePropertyName deliver_types `
-        -NotePropertyValue @("request", "result")
+        -NotePropertyName deliver_results `
+        -NotePropertyValue $true
     Write-AIChatPrivateJson `
         -Path $settingsPath `
         -Value $settingsB `
@@ -575,7 +553,7 @@ public static class Program {
         $hardlinkAlias,
         $unsafeSettingsPath,
         $settingsPath,
-        $deliverTypesSettingsPath,
+        $deliverResultsSettingsPath,
         $egressSettingsPath,
         $egressCanary,
         $hashMismatchSettingsPath,

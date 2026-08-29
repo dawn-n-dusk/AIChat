@@ -54,7 +54,7 @@ try {
         "true"
     } else { "false" }
     $expectedDeliverTypes = if ($null -ne $settings) {
-        @($settings.deliver_types) -join ","
+        if ([bool]$settings.deliver_results) { "request,result" } else { "request" }
     } else { "request" }
     if ($launcherOutput -notmatch '(?m)^token_read=false\s*$' -or
         $launcherOutput -notmatch "(?m)^deliver_types=$([regex]::Escape($expectedDeliverTypes))\s*`$" -or

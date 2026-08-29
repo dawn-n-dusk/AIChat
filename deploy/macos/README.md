@@ -6,7 +6,7 @@ LaunchAgent. It is intentionally conservative:
 - `CODEX_DRIVER=app-server` is fixed. The private Desktop owner IPC path remains
   disabled.
 - Only `request` messages from exact allowed sender IDs start Codex turns by
-  default. A local `deliver_types: ["request", "result"]` opt-in may also put
+  default. A local `deliver_results: true` opt-in may also put
   peer results into the same dedicated task for project alignment.
 - Automatic AIChat egress is disabled by default and requires the complete
   local `egress` opt-in described below. General accepted/running/completed/
@@ -209,15 +209,15 @@ new locked operation appears during the snapshot.
 
 ## Inbound results and outbound collaboration
 
-The default `deliver_types` value is `["request"]`. To make a peer's correlated
+The default `deliver_results` value is `false`. To make a peer's correlated
 result visible in this same dedicated task, use the only supported expansion:
 
 ```json
-"deliver_types": ["request", "result"]
+"deliver_results": true
 ```
 
-`request` must remain present. The launcher rejects `text`, `status`, unknown
-types, and `result`-only configurations. The fixed channel, exact sender list,
+The launcher then fixes the core allowlist to `request,result`; it never exposes
+`text`, `status`, unknown types, or `result`-only configurations. The fixed channel, exact sender list,
 fixed task/worktree, cursor, deduplication, receipt retention, and per-sender
 turn budget are unchanged.
 

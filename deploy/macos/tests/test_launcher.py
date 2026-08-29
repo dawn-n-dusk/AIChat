@@ -49,7 +49,7 @@ class MacOSLauncherTests(unittest.TestCase):
         *,
         egress_enabled: bool = True,
         lifecycle_status_enabled: bool = False,
-        deliver_types: list[str] | None = None,
+        deliver_results: bool | None = None,
     ) -> dict[str, object]:
         channel_id = "channel-fixed"
         settings: dict[str, object] = {
@@ -69,8 +69,8 @@ class MacOSLauncherTests(unittest.TestCase):
                 "max_text_bytes": 4096,
             },
         }
-        if deliver_types is not None:
-            settings["deliver_types"] = deliver_types
+        if deliver_results is not None:
+            settings["deliver_results"] = deliver_results
         return settings
 
     def test_launcher_environment_is_accepted_by_real_core_config_loader(self) -> None:
@@ -112,10 +112,8 @@ class MacOSLauncherTests(unittest.TestCase):
         self.assertEqual(environment["CODEX_TARGET_THREAD_ID"], settings["target_thread_id"])
 
     def test_result_delivery_is_explicit_and_preserves_request_as_the_only_reply_source(self) -> None:
-        settings = launcher.validate_settings(
-            self.settings(deliver_types=["result", "request", "result"])
-        )
-        self.assertEqual(settings["deliver_types"], ["request", "result"])
+        settings = launcher.validate_settings(self.settings(deliver_results=True))
+        self.assertTrue(settings["deliver_results"])
         environment = launcher.build_environment(
             settings,
             {"server": "https://relay.example.test", "token": "relay-test-token-value"},
@@ -140,13 +138,9 @@ class MacOSLauncherTests(unittest.TestCase):
         )
         self.assertEqual(json.loads(completed.stdout), ["request", "result"])
 
-        for invalid in (["result"], ["request", "status"], ["request", "text"]):
-            with self.subTest(invalid=invalid):
-                with self.assertRaises(launcher.LaunchError):
-                    launcher.validate_settings(self.settings(deliver_types=invalid))
         invalid_shape = self.settings()
-        invalid_shape["deliver_types"] = "request,result"
-        with self.assertRaisesRegex(launcher.LaunchError, "JSON array"):
+        invalid_shape["deliver_results"] = "true"
+        with self.assertRaisesRegex(launcher.LaunchError, "true or false"):
             launcher.validate_settings(invalid_shape)
 
     def test_egress_defaults_off_and_never_exports_a_canary_path(self) -> None:
