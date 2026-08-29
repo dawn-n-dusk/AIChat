@@ -44,7 +44,12 @@ class MacOSLauncherTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
-    def settings(self, *, egress_enabled: bool = True) -> dict[str, object]:
+    def settings(
+        self,
+        *,
+        egress_enabled: bool = True,
+        lifecycle_status_enabled: bool = False,
+    ) -> dict[str, object]:
         channel_id = "channel-fixed"
         return {
             "identity_config_path": str(self.home / "identity.json"),
@@ -56,6 +61,7 @@ class MacOSLauncherTests(unittest.TestCase):
             "sandbox_policy": {"type": "readOnly", "networkAccess": False},
             "egress": {
                 "enabled": egress_enabled,
+                "lifecycle_status_enabled": lifecycle_status_enabled,
                 "acknowledged_channel_id": channel_id,
                 "canary_file": str(self.canary),
                 "allowed_reference_hosts": ["github.com", "docs.example.test"],
@@ -113,6 +119,25 @@ class MacOSLauncherTests(unittest.TestCase):
         self.assertEqual(environment["AICHAT_AUTO_REPLY_ENABLED"], "false")
         self.assertEqual(environment["AICHAT_LIFECYCLE_STATUS_ENABLED"], "false")
         self.assertNotIn("AICHAT_EGRESS_CANARY_FILE", environment)
+
+    def test_lifecycle_status_requires_enabled_egress_and_explicit_opt_in(self) -> None:
+        disabled = self.settings(
+            egress_enabled=False,
+            lifecycle_status_enabled=True,
+        )
+        with self.assertRaisesRegex(launcher.LaunchError, "requires enabled egress"):
+            launcher.validate_settings(disabled)
+
+        settings = launcher.validate_settings(
+            self.settings(lifecycle_status_enabled=True)
+        )
+        environment = launcher.build_environment(
+            settings,
+            {"server": "https://relay.example.test", "token": "relay-test-token-value"},
+        )
+        self.assertTrue(settings["egress"]["lifecycle_status_enabled"])
+        self.assertEqual(environment["AICHAT_AUTO_REPLY_ENABLED"], "true")
+        self.assertEqual(environment["AICHAT_LIFECYCLE_STATUS_ENABLED"], "true")
 
     def test_enabled_egress_requires_exact_channel_hosts_and_private_canary(self) -> None:
         mismatch = self.settings()

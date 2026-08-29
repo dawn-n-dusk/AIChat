@@ -13,6 +13,7 @@
   },
   "egress": {
     "enabled": false,
+    "lifecycle_status_enabled": false,
     "acknowledged_channel_id": "replace-with-channel-id",
     "canary_file": "~/Library/Application Support/AIChat/codex-connector-egress-canary.txt",
     "allowed_reference_hosts": [
