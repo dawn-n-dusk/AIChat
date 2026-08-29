@@ -298,9 +298,24 @@ def test_connector_service_launcher_has_supervised_durable_one_shot() -> None:
     assert "$allDriverRecords.Count -ne 1" in launcher
     assert '$driverRecords[0].completionStatus -ne "completed"' in launcher
     assert '[bool]$driverRecords[0].outboundBlocked' in launcher
+    assert 'Supervised one-shot acceptance requires a fresh connector state' in launcher
+    assert 'Supervised one-shot acceptance requires a fresh app-server receipt' in launcher
+    assert 'Assert-AIChatSupervisedResultEgressCheckpoint' in launcher
     assert 'Write-Host "connector_receipt_persisted=true"' in launcher
     assert 'Write-Host "driver_receipt_persisted=true"' in launcher
+    assert 'Write-Host "relay_result_checkpointed=$(' in launcher
     assert 'Write-Host "durable_checkpoint_ready=true"' in launcher
+
+
+def test_supervised_result_egress_checkpoint_is_exactly_bound() -> None:
+    common = (ROOT / "connector-service" / "common.ps1").read_text(encoding="utf-8")
+    assert 'function Assert-AIChatSupervisedResultEgressCheckpoint' in common
+    assert '$DriverRecord.outboundEvent.modelDeclared' in common
+    assert '$DriverRecord.outboundEvent.messageType -ne "result"' in common
+    assert '$DriverRecord.outboundEvent.eventId -ne' in common
+    assert '$ConnectorReceipt.outbound_event_id' in common
+    assert '[Guid]::TryParseExact(' in common
+    assert '$ConnectorReceipt.outbound_message_id' in common
 
 
 def test_connector_service_result_egress_is_explicit_and_fail_closed() -> None:

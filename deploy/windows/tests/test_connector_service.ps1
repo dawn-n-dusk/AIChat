@@ -81,6 +81,63 @@ function Invoke-ExpectedFailure {
     if (-not $failed) { throw "$Label unexpectedly succeeded" }
 }
 
+$checkpointSettings = [pscustomobject]@{
+    egress = [pscustomobject]@{ enabled = $true }
+}
+$checkpointEventId = "app-server-event-$testId"
+$checkpointMessageId = [Guid]::NewGuid().ToString("D")
+$checkpointReceipt = [pscustomobject]@{
+    outbound_event_id = $checkpointEventId
+    outbound_message_id = $checkpointMessageId
+}
+$checkpointDriver = [pscustomobject]@{
+    outboundEvent = [pscustomobject]@{
+        modelDeclared = $true
+        messageType = "result"
+        eventId = $checkpointEventId
+    }
+}
+if (-not (Assert-AIChatSupervisedResultEgressCheckpoint `
+    -Settings $checkpointSettings `
+    -ConnectorReceipt $checkpointReceipt `
+    -DriverRecord $checkpointDriver)) {
+    throw "Matching supervised result egress checkpoint was rejected"
+}
+$disabledCheckpointSettings = [pscustomobject]@{
+    egress = [pscustomobject]@{ enabled = $false }
+}
+if (Assert-AIChatSupervisedResultEgressCheckpoint `
+    -Settings $disabledCheckpointSettings `
+    -ConnectorReceipt ([pscustomobject]@{}) `
+    -DriverRecord ([pscustomobject]@{})) {
+    throw "Disabled egress was reported as a Relay result checkpoint"
+}
+
+$mismatchedCheckpointReceipt = [pscustomobject]@{
+    outbound_event_id = "different-event-$testId"
+    outbound_message_id = $checkpointMessageId
+}
+Invoke-ExpectedFailure `
+    -Label "mismatched supervised outbound event" `
+    -Action {
+        Assert-AIChatSupervisedResultEgressCheckpoint `
+            -Settings $checkpointSettings `
+            -ConnectorReceipt $mismatchedCheckpointReceipt `
+            -DriverRecord $checkpointDriver
+    }
+$suppressedCheckpointReceipt = [pscustomobject]@{
+    outbound_event_id = $checkpointEventId
+    outbound_message_id = "local-suppressed-$testId"
+}
+Invoke-ExpectedFailure `
+    -Label "locally suppressed supervised outbound" `
+    -Action {
+        Assert-AIChatSupervisedResultEgressCheckpoint `
+            -Settings $checkpointSettings `
+            -ConnectorReceipt $suppressedCheckpointReceipt `
+            -DriverRecord $checkpointDriver
+    }
+
 try {
     $uncProbe = "\\127.0.0.1\aichat-no-io-$testId"
     $uncWhatIfOutput = & $installer `
@@ -379,6 +436,45 @@ public static class Program {
             throw "Launcher did not report required contract: $required"
         }
     }
+
+    Write-AIChatPrivateJson `
+        -Path $paths.ConnectorStatePath `
+        -Value ([pscustomobject]@{ version = 5 }) `
+        -ProtectedRoot $paths.ConnectorDataRoot
+    Invoke-ExpectedFailure `
+        -Label "pre-existing supervised connector checkpoint" `
+        -Action {
+            & $paths.LauncherPath `
+                -StateRoot $paths.StateRoot `
+                -Once `
+                -ExpectedMessageId ([Guid]::NewGuid().ToString("D"))
+        }
+    Remove-Item -LiteralPath $paths.ConnectorStatePath -Force
+
+    $priorDriverReceiptPath = Join-Path `
+        $paths.ConnectorDataRoot `
+        "app-server-ci-prior-$testId.json"
+    Write-AIChatPrivateJson `
+        -Path $priorDriverReceiptPath `
+        -Value ([pscustomobject]@{
+            binding = [pscustomobject]@{
+                channelId = [string]$settingsA.channel_id
+                threadId = [string]$settingsA.target_thread_id
+                hostId = $null
+            }
+            records = @()
+        }) `
+        -ProtectedRoot $paths.ConnectorDataRoot
+    Invoke-ExpectedFailure `
+        -Label "pre-existing supervised app-server checkpoint" `
+        -Action {
+            & $paths.LauncherPath `
+                -StateRoot $paths.StateRoot `
+                -Once `
+                -ExpectedMessageId ([Guid]::NewGuid().ToString("D"))
+        }
+    Remove-Item -LiteralPath $priorDriverReceiptPath -Force
+
     $checkOutput = & $checker *>&1 | Out-String
     Add-CapturedOutput $checkOutput
     if ($LASTEXITCODE -ne 0) {

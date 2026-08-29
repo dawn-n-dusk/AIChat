@@ -240,8 +240,14 @@ then shuts down App Server. It succeeds only when the connector cursor and
 receipt plus the app-server driver receipt all match `ExpectedMessageId`, with
 exactly one seen inbound message and one delivery record in the fresh mapping,
 and with the driver record successfully completed, connector-checkpointed, and
-outbound-handled. A failed, interrupted, or cancelled Codex turn does not pass
-this acceptance. A successful run prints only non-secret booleans ending in
+outbound-handled. When result egress is enabled, the checkpoint additionally
+requires a model-declared `result`, an exact driver-to-connector outbound event
+match, and a persisted Relay UUID; a locally suppressed lifecycle completion,
+an older local checkpoint, or a different outbound event cannot pass as result
+delivery. Supervised `-Once` therefore requires fresh connector state and no
+pre-existing app-server receipt for the fixed mapping. A
+failed, interrupted, or cancelled Codex turn does not pass this acceptance. A
+successful run prints only non-secret booleans ending in
 `durable_checkpoint_ready=true`; seeing a turn in the Codex UI is not this
 checkpoint.
 
