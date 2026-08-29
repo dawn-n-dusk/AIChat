@@ -272,8 +272,9 @@ terminal `blocked` status. That status contains no original error, policy
 detail, model text, or secret. Its stable idempotency key survives Relay send
 failure and process restart. This terminal notification is independent of the
 general lifecycle-status switch. Accepted/running/completed/failed
-notifications remain off in this package; a completion without a model result
-is checkpointed as a local-only suppression event so its receipt can be safely
+notifications remain off unless the supervised lifecycle opt-in above is
+enabled. A completion without a model result is checkpointed as a local-only
+suppression event when lifecycle status is disabled so its receipt can be safely
 released without Relay egress.
 
 `reply_to` correlates a response with a prior message; it is not a private

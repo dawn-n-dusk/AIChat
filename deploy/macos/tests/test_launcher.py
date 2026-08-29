@@ -139,6 +139,24 @@ class MacOSLauncherTests(unittest.TestCase):
         self.assertEqual(environment["AICHAT_AUTO_REPLY_ENABLED"], "true")
         self.assertEqual(environment["AICHAT_LIFECYCLE_STATUS_ENABLED"], "true")
 
+        node = shutil.which("node")
+        self.assertIsNotNone(node, "Node.js is required for the functional launcher regression")
+        environment["HOME"] = str(self.home)
+        probe = (
+            f'import {{ loadConfig }} from {json.dumps(CORE_CONFIG_PATH.as_uri())};'
+            "const config = loadConfig();"
+            "process.stdout.write(String(config.lifecycleStatusEnabled));"
+        )
+        completed = subprocess.run(
+            [node, "--input-type=module", "--eval", probe],
+            cwd=self.worktree,
+            env=environment,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(completed.stdout, "true")
+
     def test_enabled_egress_requires_exact_channel_hosts_and_private_canary(self) -> None:
         mismatch = self.settings()
         mismatch["egress"]["acknowledged_channel_id"] = "channel-other"
