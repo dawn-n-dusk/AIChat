@@ -46,6 +46,7 @@ test("runtime uses WebSocket only as a wake signal for serialized ordered recove
   let initialized = 0;
   let recovered = 0;
   let stopped = 0;
+  let stopOptions = null;
   const connector = {
     async initialize() {
       initialized += 1;
@@ -53,8 +54,9 @@ test("runtime uses WebSocket only as a wake signal for serialized ordered recove
     async requestRecovery() {
       recovered += 1;
     },
-    async stop() {
+    async stop(options) {
       stopped += 1;
+      stopOptions = options;
     },
   };
   const timers = manualTimers();
@@ -104,8 +106,9 @@ test("runtime uses WebSocket only as a wake signal for serialized ordered recove
   assert.equal(typeof timers.timeout, "function");
   timers.timeout();
   assert.equal(FakeWebSocket.instances.length, 2);
-  await runtime.stop();
+  await runtime.stop({ drain: true });
   assert.equal(stopped, 1);
+  assert.deepEqual(stopOptions, { drain: true });
 });
 
 test("runtime never logs token-bearing WebSocket constructor errors", async () => {

@@ -785,6 +785,66 @@ test("lifecycle-off completion is checkpointed locally without Relay egress", as
   assert.equal(ctx.sent.length, 0);
 });
 
+test("connector stop drains driver completion before final shutdown", async () => {
+  const order = [];
+  class DrainDriver extends MockCodexDriver {
+    async drain() {
+      order.push("drain");
+      const receipt = this.receipts.values().next().value;
+      await this.emitOutboundReply({
+        systemGenerated: true,
+        suppressRelay: true,
+        eventId: `app-server-suppressed-${"b".repeat(64)}`,
+        threadId: receipt.threadId,
+        hostId: receipt.hostId,
+        sourceMessageId: "message-1",
+        deliveryId: receipt.deliveryId,
+        text: JSON.stringify({ status: "suppressed" }),
+        messageType: "status",
+        references: [],
+      });
+    }
+
+    async stop() {
+      order.push("stop");
+      await super.stop();
+    }
+  }
+
+  const driver = new DrainDriver();
+  const ctx = harness([relayMessage()], { driver, lifecycleStatusEnabled: false });
+  await ctx.connector.initialize();
+  await ctx.connector.recoverPage();
+  await ctx.connector.stop({ drain: true });
+
+  assert.deepEqual(order, ["drain", "stop"]);
+  assert.equal(ctx.connector.getDeliveryReceipt("message-1").replied, true);
+  assert.equal(ctx.sent.length, 0);
+});
+
+test("failed durable drain still stops the driver before surfacing the failure", async () => {
+  const order = [];
+  class FailingDrainDriver extends MockCodexDriver {
+    async drain() {
+      order.push("drain");
+      throw new Error("durable drain failed");
+    }
+
+    async stop() {
+      order.push("stop");
+      await super.stop();
+    }
+  }
+
+  const ctx = harness([], { driver: new FailingDrainDriver() });
+  await ctx.connector.initialize();
+  await assert.rejects(
+    () => ctx.connector.stop({ drain: true }),
+    /durable drain failed/,
+  );
+  assert.deepEqual(order, ["drain", "stop"]);
+});
+
 test("retryable driver rejection emits blocked status without advancing the cursor", async () => {
   const driver = new MockCodexDriver();
   driver.deliver = async () => {

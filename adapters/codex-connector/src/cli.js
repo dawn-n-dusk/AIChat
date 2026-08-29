@@ -18,6 +18,7 @@ async function main(argv) {
   let config;
   let runtime;
   let instanceLock;
+  let drainOnStop = false;
   try {
     config = loadConfig();
     const lockLost = deferred();
@@ -50,13 +51,18 @@ async function main(argv) {
     runtime = new ConnectorRuntime({ config, relay, connector, logger: console });
 
     if (options.once) {
+      drainOnStop = true;
       await runtime.start({ websocketEnabled: false, periodicRecovery: false });
       return;
     }
 
     const stopSignal = waitForStopSignal();
     await runtime.start();
-    await Promise.race([stopSignal, lockLost.promise]);
+    const stopReason = await Promise.race([
+      stopSignal.then(() => "signal"),
+      lockLost.promise.then(() => "lock-lost"),
+    ]);
+    drainOnStop = stopReason === "signal";
   } catch (error) {
     const detail = redact(errorMessage(error), config?.token);
     process.stderr.write(`[aichat-codex-connector] fatal: ${detail}\n`);
@@ -64,7 +70,7 @@ async function main(argv) {
   } finally {
     if (runtime) {
       try {
-        await runtime.stop();
+        await runtime.stop({ drain: drainOnStop });
       } catch {
         process.stderr.write("[aichat-codex-connector] shutdown failed\n");
         process.exitCode = 1;

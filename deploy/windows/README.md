@@ -218,6 +218,39 @@ the Mac/core PR is compatible and a supervised Windows acceptance verifies the
 native `codex.exe app-server` initialize handshake, signed-in identity, and
 process-tree shutdown behavior.
 
+### Supervised durable one-shot acceptance
+
+Use a new empty two-member channel, a new dedicated Codex task, and fresh
+connector state. Keep the Scheduled Task disabled with zero triggers. Publish
+exactly one synthetic request, capture its Relay message ID, then immediately
+run the installed launcher in the foreground with that ID:
+
+```powershell
+$stateRoot = Join-Path $env:LOCALAPPDATA "AIChat\codex-connector-task"
+& (Join-Path $stateRoot "launcher.ps1") `
+  -StateRoot $stateRoot `
+  -Once `
+  -ExpectedMessageId "THE_SYNTHETIC_REQUEST_MESSAGE_GUID"
+```
+
+`-Once` disables WebSocket and periodic recovery, drains the accepted Codex
+turn through `turn/completed`, waits for connector-side suppression handling,
+then shuts down App Server. It succeeds only when the connector cursor and
+receipt plus the app-server driver receipt all match `ExpectedMessageId`, with
+exactly one seen inbound message and one delivery record in the fresh mapping,
+and with the driver record successfully completed, connector-checkpointed, and
+outbound-handled. A failed, interrupted, or cancelled Codex turn does not pass
+this acceptance. A successful run prints only non-secret booleans ending in
+`durable_checkpoint_ready=true`; seeing a turn in the Codex UI is not this
+checkpoint.
+
+Do not press Ctrl+C merely because the UI turn appears. If the marker result
+must be checked, read the dedicated task only after the durable line appears,
+then verify the exact assistant output separately. Finally confirm the wrapper
+exited and that neither Node nor the child `codex.exe app-server` remains. Do
+not reuse a channel with queued history, edit a cursor, or skip a message to
+force the test through.
+
 ### Optional result return path
 
 The default example keeps `egress.enabled=false`, and the first synthetic E2E

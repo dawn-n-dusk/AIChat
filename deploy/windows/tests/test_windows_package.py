@@ -281,6 +281,27 @@ def test_connector_service_launcher_fixes_security_and_environment_contract() ->
     assert '"[$label] ${Name}: $Detail"' in checker
 
 
+def test_connector_service_launcher_has_supervised_durable_one_shot() -> None:
+    launcher = (ROOT / "connector-service" / "launcher.ps1").read_text(encoding="utf-8")
+    assert "[switch]$Once" in launcher
+    assert "[string]$ExpectedMessageId" in launcher
+    assert "Once requires an exact GUID ExpectedMessageId" in launcher
+    assert '" --once"' in launcher
+    assert '"CODEX_APP_SERVER_RECEIPT_DIR"' in launcher
+    assert '$_.source_message_id -eq $ExpectedMessageId' in launcher
+    assert '$_.sourceMessageId -eq $ExpectedMessageId' in launcher
+    assert "$allConnectorReceipts.Count -ne 1" in launcher
+    assert "$seenIds.Count -ne 1" in launcher
+    assert "$outboundSeenIds.Count -ne 1" in launcher
+    assert "$matchingDriverStates.Count -ne 1" in launcher
+    assert "$allDriverRecords.Count -ne 1" in launcher
+    assert '$driverRecords[0].completionStatus -ne "completed"' in launcher
+    assert '[bool]$driverRecords[0].outboundBlocked' in launcher
+    assert 'Write-Host "connector_receipt_persisted=true"' in launcher
+    assert 'Write-Host "driver_receipt_persisted=true"' in launcher
+    assert 'Write-Host "durable_checkpoint_ready=true"' in launcher
+
+
 def test_connector_service_result_egress_is_explicit_and_fail_closed() -> None:
     root = ROOT / "connector-service"
     common = (root / "common.ps1").read_text(encoding="utf-8")

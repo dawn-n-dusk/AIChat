@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 
 import { assertCodexDriver } from "./driver.js";
 import { atomicWritePrivateFile, SerializedSaveQueue } from "./atomic-file.js";
@@ -15,6 +15,7 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
 const DEFAULT_TURN_TIMEOUT_MS = 10 * 60_000;
 const DEFAULT_RECOVERY_INTERVAL_MS = 30_000;
 const DEFAULT_OUTBOUND_RETRY_MAX_ATTEMPTS = 10;
+const DEFAULT_CHILD_STOP_TIMEOUT_MS = 5_000;
 const MAX_ORPHAN_TURNS = 20;
 const MAX_STDOUT_BUFFER = 4 * 1024 * 1024;
 const TERMINAL_TURN_STATUSES = new Set(["completed", "failed", "interrupted", "cancelled"]);
@@ -129,6 +130,10 @@ export class AppServerDriver {
       "CODEX_APP_SERVER_SANDBOX_POLICY_JSON",
     );
     this.taskMarker = env.CODEX_CONNECTOR_TASK_MARKER?.trim() || null;
+    this.receiptDirectory = absoluteDirectorySetting(
+      env.CODEX_APP_SERVER_RECEIPT_DIR,
+      "CODEX_APP_SERVER_RECEIPT_DIR",
+    );
   }
 
   async start({ binding, onOutboundReply }) {
@@ -143,7 +148,9 @@ export class AppServerDriver {
     }
     this.binding = Object.freeze({ ...binding });
     this.onOutboundReply = onOutboundReply;
-    this.receiptStore ??= new AppServerReceiptStore(defaultReceiptPath(binding));
+    this.receiptStore ??= new AppServerReceiptStore(
+      defaultReceiptPath(binding, this.receiptDirectory),
+    );
     const stored = normalizeLoadedDriverState(await this.receiptStore.load(binding));
     this.receipts = new Map(stored.records.map((record) => [record.deliveryId, record]));
 
@@ -286,6 +293,31 @@ export class AppServerDriver {
       this.receipts.delete(deliveryId);
       return { released: true };
     });
+  }
+
+  async drain() {
+    if (!this.started || this.stopped) return;
+    await this.deliveryQueue;
+    while (this.contexts.size > 0) {
+      await Promise.all(
+        [...this.contexts.values()].map((context) => context.completion.promise),
+      );
+    }
+    while (this.outboundTasks.size > 0) {
+      await Promise.all([...this.outboundTasks]);
+    }
+    await this.mutationQueue.run(async () => {});
+    const incomplete = [...this.receipts.values()].filter(
+      (record) =>
+        record.phase !== "completed" ||
+        !record.connectorCheckpointed ||
+        (record.outboundEvent && !record.outboundDelivered && !record.outboundBlocked),
+    );
+    if (incomplete.length > 0) {
+      throw new Error(
+        "Codex app-server durable drain ended with incomplete delivery checkpoints",
+      );
+    }
   }
 
   async stop() {
@@ -906,10 +938,13 @@ export class JsonRpcStdioClient {
     this.nextId = 1;
     this.stdoutBuffer = "";
     this.closed = false;
+    this.terminationPromise = null;
   }
 
   async start() {
     if (this.child) throw new Error("Codex app-server client is already started");
+    if (this.terminationPromise) await this.terminationPromise;
+    this.terminationPromise = null;
     this.closed = false;
     const child = this.spawnImpl(this.binary, this.args, {
       stdio: ["pipe", "pipe", "pipe"],
@@ -975,7 +1010,6 @@ export class JsonRpcStdioClient {
   }
 
   async stop() {
-    const wasClosed = this.closed;
     this.closed = true;
     for (const [id, pending] of this.pending) {
       this.timers.clearTimeout(pending.timeout);
@@ -989,14 +1023,19 @@ export class JsonRpcStdioClient {
     }
     const child = this.child;
     this.child = null;
-    if (!child) return;
+    if (!child) {
+      if (this.terminationPromise) await this.terminationPromise;
+      return;
+    }
     try {
       child.stdin.end();
     } catch {}
-    try {
-      child.kill("SIGTERM");
-    } catch {}
-    if (wasClosed) return;
+    this.terminationPromise ??= terminateChildProcess(
+      child,
+      this.timers,
+      DEFAULT_CHILD_STOP_TIMEOUT_MS,
+    );
+    await this.terminationPromise;
   }
 
   #readStdout(chunk) {
@@ -1080,13 +1119,67 @@ export class JsonRpcStdioClient {
       this.pending.delete(id);
     }
     const child = this.child;
+    this.child = null;
     if (child) {
       try {
-        child.kill("SIGTERM");
+        child.stdin.end();
       } catch {}
+      this.terminationPromise ??= terminateChildProcess(
+        child,
+        this.timers,
+        DEFAULT_CHILD_STOP_TIMEOUT_MS,
+      );
     }
-    this.onExit();
+    Promise.resolve(this.terminationPromise)
+      .catch(() => {
+        this.logger.error("[aichat-codex-driver] app-server child termination failed");
+      })
+      .finally(() => this.onExit());
   }
+}
+
+async function terminateChildProcess(child, timers, timeoutMs) {
+  if (child.exitCode != null || child.signalCode != null) return;
+  let exited = waitForChildExit(child, timers, timeoutMs);
+  let signalled = false;
+  try {
+    signalled = child.kill("SIGTERM") !== false;
+  } catch {}
+  if (!signalled && child.exitCode == null && child.signalCode == null) {
+    if (await exited) return;
+    throw new Error("Codex app-server process could not be terminated");
+  }
+  if (await exited) return;
+
+  exited = waitForChildExit(child, timers, timeoutMs);
+  signalled = false;
+  try {
+    signalled = child.kill("SIGKILL") !== false;
+  } catch {}
+  if (!signalled && child.exitCode == null && child.signalCode == null) {
+    if (await exited) return;
+    throw new Error("Codex app-server process could not be force-terminated");
+  }
+  if (!(await exited)) {
+    throw new Error("Codex app-server process did not exit after termination");
+  }
+}
+
+function waitForChildExit(child, timers, timeoutMs) {
+  if (child.exitCode != null || child.signalCode != null) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      timers.clearTimeout(timeout);
+      child.removeListener?.("exit", onExit);
+      resolve(value);
+    };
+    const onExit = () => finish(true);
+    const timeout = timers.setTimeout(() => finish(false), timeoutMs);
+    child.once("exit", onExit);
+  });
 }
 
 export class AppServerReceiptStore {
@@ -1567,12 +1660,15 @@ function parseStoredOutboundEvent(value, record) {
   };
 }
 
-function defaultReceiptPath(binding) {
+function defaultReceiptPath(binding, directory = null) {
   const digest = createHash("sha256")
     .update(`${binding.channelId}\0${binding.threadId}\0${binding.hostId ?? ""}`)
     .digest("hex")
     .slice(0, 24);
-  return join(homedir(), ".aichat", "codex-connector", `app-server-${digest}.json`);
+  return join(
+    directory ?? join(homedir(), ".aichat", "codex-connector"),
+    `app-server-${digest}.json`,
+  );
 }
 
 function boundedStoredRecords(records) {
@@ -1716,6 +1812,13 @@ function booleanSetting(value, fallback, name) {
   if (normalized === "true") return true;
   if (normalized === "false") return false;
   throw new Error(`${name} must be true or false`);
+}
+
+function absoluteDirectorySetting(value, name) {
+  if (value == null || value.trim() === "") return null;
+  const normalized = value.trim();
+  if (!isAbsolute(normalized)) throw new Error(`${name} must be an absolute path`);
+  return normalized;
 }
 
 function parseOptionalJson(value, name) {

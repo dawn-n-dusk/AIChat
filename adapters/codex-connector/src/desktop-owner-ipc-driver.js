@@ -71,6 +71,10 @@ export class DesktopOwnerIpcDriver {
     return this.appServer.deliver(request, { externalStarter });
   }
 
+  async drain() {
+    if (typeof this.appServer.drain === "function") await this.appServer.drain();
+  }
+
   async stop() {
     await Promise.allSettled([this.ownerClient.stop(), this.appServer.stop()]);
   }

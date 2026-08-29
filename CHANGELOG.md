@@ -8,6 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Add supervised Windows `-Once -ExpectedMessageId` acceptance, explicit
+  app-server receipt placement, exact clean-mapping verification, successful
+  turn-status checks, and child-exit-confirmed durable draining so a visible
+  Codex turn cannot be mistaken for a persisted connector checkpoint.
 - Accept current Codex App Server `userMessage.content` text payloads during
   dedicated-task marker verification while retaining legacy `text` support and
   rejecting unknown, mixed, non-text, or conflicting message shapes.

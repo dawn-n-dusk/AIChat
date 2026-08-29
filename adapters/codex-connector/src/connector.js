@@ -257,10 +257,22 @@ export class AIChatCodexConnector {
     };
   }
 
-  async stop() {
+  async stop({ drain = false } = {}) {
     if (this.stopped) return;
     this.stopped = true;
-    await this.driver.stop();
+    let failure = null;
+    try {
+      await this.recoveryInFlight;
+      if (drain && typeof this.driver.drain === "function") await this.driver.drain();
+    } catch (error) {
+      failure = error;
+    }
+    try {
+      await this.driver.stop();
+    } catch (error) {
+      failure ??= error;
+    }
+    if (failure) throw failure;
   }
 
   async #recoverUntilCaughtUp() {
