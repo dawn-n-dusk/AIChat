@@ -45,6 +45,32 @@ function Get-AIChatConnectorDataRoot {
     return [IO.Path]::GetFullPath((Join-Path (Get-AIChatUserProfile) ".aichat\codex-connector"))
 }
 
+function Assert-AIChatSupervisedResultEgressCheckpoint {
+    param(
+        [Parameter(Mandatory = $true)]$Settings,
+        [Parameter(Mandatory = $true)]$ConnectorReceipt,
+        [Parameter(Mandatory = $true)]$DriverRecord
+    )
+
+    if (-not [bool]$Settings.egress.enabled) { return $false }
+
+    $outboundMessageId = [Guid]::Empty
+    if ($null -eq $DriverRecord.outboundEvent -or
+        -not [bool]$DriverRecord.outboundEvent.modelDeclared -or
+        [string]$DriverRecord.outboundEvent.messageType -ne "result" -or
+        -not [string]$DriverRecord.outboundEvent.eventId -or
+        [string]$DriverRecord.outboundEvent.eventId -ne
+            [string]$ConnectorReceipt.outbound_event_id -or
+        -not [Guid]::TryParseExact(
+            [string]$ConnectorReceipt.outbound_message_id,
+            "D",
+            [ref]$outboundMessageId
+        )) {
+        throw "Supervised result egress did not persist the matching Relay result"
+    }
+    return $true
+}
+
 function Assert-AIChatNoControlText {
     param(
         [Parameter(Mandatory = $true)][string]$Value,
