@@ -28,6 +28,7 @@ if ($null -ne (Get-AIChatConnectorTask)) {
 $testId = [Guid]::NewGuid().ToString("N")
 $protectedRoot = $paths.ProtectedRoot
 $settingsPath = Join-Path $protectedRoot "ci-connector-settings-$testId.json"
+$deliverTypesSettingsPath = Join-Path $protectedRoot "ci-connector-deliver-types-$testId.json"
 $unsafeSettingsPath = Join-Path $protectedRoot "ci-connector-unsafe-$testId.json"
 $identityPath = Join-Path $protectedRoot "ci-connector-identity-$testId.json"
 $egressSettingsPath = Join-Path $protectedRoot "ci-connector-egress-$testId.json"
@@ -179,6 +180,58 @@ public static class Program {
         -Path $settingsPath `
         -Value $settingsA `
         -ProtectedRoot $protectedRoot
+
+    $resultInboundSettings = $settingsA | ConvertTo-Json -Depth 12 | ConvertFrom-Json
+    $resultInboundSettings | Add-Member `
+        -NotePropertyName deliver_types `
+        -NotePropertyValue @("result", "request", "result")
+    Write-AIChatPrivateJson `
+        -Path $deliverTypesSettingsPath `
+        -Value $resultInboundSettings `
+        -ProtectedRoot $protectedRoot
+    $validatedResultInbound = Get-AIChatConnectorSettings `
+        -Path $deliverTypesSettingsPath `
+        -ProtectedRoot $protectedRoot
+    if ((@($validatedResultInbound.deliver_types) -join ",") -ne "request,result") {
+        throw "Result inbound opt-in did not normalize to request,result"
+    }
+    $invalidDeliverTypeCases = @(
+        [pscustomobject]@{ Values = @("result") },
+        [pscustomobject]@{ Values = @("request", "status") },
+        [pscustomobject]@{ Values = @("request", "text") }
+    )
+    foreach ($invalidDeliverTypeCase in $invalidDeliverTypeCases) {
+        $invalidInbound = $settingsA | ConvertTo-Json -Depth 12 | ConvertFrom-Json
+        $invalidInbound | Add-Member `
+            -NotePropertyName deliver_types `
+            -NotePropertyValue @($invalidDeliverTypeCase.Values)
+        Write-AIChatPrivateJson `
+            -Path $deliverTypesSettingsPath `
+            -Value $invalidInbound `
+            -ProtectedRoot $protectedRoot
+        Invoke-ExpectedFailure `
+            -Label "invalid deliver_types check" `
+            -Action {
+                Get-AIChatConnectorSettings `
+                    -Path $deliverTypesSettingsPath `
+                    -ProtectedRoot $protectedRoot
+            }
+    }
+    $invalidInboundShape = $settingsA | ConvertTo-Json -Depth 12 | ConvertFrom-Json
+    $invalidInboundShape | Add-Member `
+        -NotePropertyName deliver_types `
+        -NotePropertyValue "request,result"
+    Write-AIChatPrivateJson `
+        -Path $deliverTypesSettingsPath `
+        -Value $invalidInboundShape `
+        -ProtectedRoot $protectedRoot
+    Invoke-ExpectedFailure `
+        -Label "deliver_types string shape check" `
+        -Action {
+            Get-AIChatConnectorSettings `
+                -Path $deliverTypesSettingsPath `
+                -ProtectedRoot $protectedRoot
+        }
 
     [IO.File]::WriteAllText(
         $egressCanary,
@@ -425,6 +478,9 @@ public static class Program {
         -ProtectedRoot $paths.ProtectedRoot
     $settingsB = $settingsA | ConvertTo-Json -Depth 12 | ConvertFrom-Json
     $settingsB.task_marker = "AIChat Windows CI updated marker $testId"
+    $settingsB | Add-Member `
+        -NotePropertyName deliver_types `
+        -NotePropertyValue @("request", "result")
     Write-AIChatPrivateJson `
         -Path $settingsPath `
         -Value $settingsB `
@@ -452,6 +508,13 @@ public static class Program {
         -Apply *>&1 | Out-String
     Add-CapturedOutput $installBOutput
     if ($LASTEXITCODE -ne 0) { throw "Second connector service install failed" }
+    $launcherBOutput = & $paths.LauncherPath `
+        -StateRoot $paths.StateRoot `
+        -CheckSettings *>&1 | Out-String
+    Add-CapturedOutput $launcherBOutput
+    if ($launcherBOutput -notmatch '(?m)^deliver_types=request,result\s*$') {
+        throw "Installed launcher did not expose the result inbound opt-in"
+    }
     $rollbackOutput = & $rollback -Apply *>&1 | Out-String
     Add-CapturedOutput $rollbackOutput
     if ($LASTEXITCODE -ne 0) { throw "Connector service rollback failed" }
@@ -512,6 +575,7 @@ public static class Program {
         $hardlinkAlias,
         $unsafeSettingsPath,
         $settingsPath,
+        $deliverTypesSettingsPath,
         $egressSettingsPath,
         $egressCanary,
         $hashMismatchSettingsPath,

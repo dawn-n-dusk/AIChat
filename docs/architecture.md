@@ -77,7 +77,7 @@ These paths are intentionally not described as equivalent:
 
 - **Universal MCP adapter:** exposes identity, channel, read, and send tools. MCP gives a model tools and context; it does not by itself push a relay event into an already open conversation.
 - **Claude Channel adapter:** uses Claude Code Channel notifications to inject incoming messages into the running session. Custom Channels are a research-preview capability and require explicit development-channel startup. A live test displayed `← aichat: UNTRUSTED REMOTE...` in Claude Code; the subsequent Claude model API request failed with `ECONNREFUSED`, so a live model-generated `reply` was not accepted in that test.
-- **Codex event-driven connector:** a local service owns one fixed channel-to-session mapping, Relay cursor recovery, deduplication, delivery receipts, and optional structured reply routing. Only `request` starts a turn by default, and automatic Relay egress is off. WebSocket is a wake hint; startup, reconnect, and optional 30-second cursor recovery preserve ordered delivery. Built-in drivers are local-only, and Relay content never selects a session, host, driver, cwd, approval policy, or sandbox.
+- **Codex event-driven connector:** a local service owns one fixed channel-to-session mapping, Relay cursor recovery, deduplication, delivery receipts, and optional structured reply routing. Only `request` starts a turn by default; packaged launchers may explicitly add reply-ineligible `result` observation, while automatic Relay egress remains a separate opt-in. WebSocket is a wake hint; startup, reconnect, and optional 30-second cursor recovery preserve ordered delivery. Built-in drivers are local-only, and Relay content never selects a session, host, driver, cwd, approval policy, or sandbox.
 - **Codex App Server default:** an independently started local App Server uses `initialize`, `thread/resume`, `turn/start`, streamed notifications, and `thread/read` for a dedicated connector-owned session. It is an independent experimental runtime and does not automatically join the private owner process of an already-running Desktop task.
 - **Codex Desktop owner IPC:** an explicit macOS-only experiment that is disabled by default and pinned to one tested Desktop build. Exact version/protocol and current-user `0600` socket checks do not prove the peer process ID or signature. This is a private, version-coupled surface rather than a public cross-version contract. An unknown version or ambiguous acceptance must fail closed.
 - **Legacy Codex bridge task:** a dedicated Codex App task is woken by a user-configured heartbeat, polls one configured channel, and forwards a wrapped message to one preconfigured target when the runtime exposes task-send capabilities. It remains a compatibility fallback, not the primary architecture.
@@ -169,15 +169,21 @@ The Codex connector additionally persists a per-sender hourly turn budget and
 accepts automatic outbound messages only as model-declared `result` or
 connector-generated `status`. Enabling automatic egress does not change the
 default inbound type filter, so those replies do not create another turn unless
-an operator explicitly expands the local delivery types.
+an operator explicitly expands the local delivery types. The packaged macOS
+and Windows expansion is deliberately limited to `request,result`: `request`
+remains mandatory, while a result receipt is durably reply-ineligible, gets no
+structured reply contract, and cannot generate model or lifecycle egress.
+Packaged inbound `status` and autonomous `text` remain disabled.
 
 ## Deployment shape
 
 The reference deployment can remain small: one API service, one durable data store, and TLS termination. Gateways initiate outbound connections, so users do not need to expose local machines to inbound Internet traffic.
 
 On macOS, the packaged LaunchAgent runs the independent App Server driver with
-owner IPC off, request-only delivery, automatic egress off, and periodic Relay
-recovery disabled. Its small launcher reads the existing private PlatformDirs
+owner IPC off, request-only delivery by default, automatic egress off, and
+periodic Relay recovery disabled. A local `request,result` opt-in changes only
+the inbound type allowlist and preserves fixed routing, cursoring, deduplication,
+budgets, receipts, and request-only reply authority. Its small launcher reads the existing private PlatformDirs
 identity at process start and supplies the token through the connector process
 environment; the token is absent from the plist, repository, and command line.
 The launcher is rollback-capable and uses versioned connector releases. Another

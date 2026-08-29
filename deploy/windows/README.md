@@ -120,7 +120,8 @@ This package deliberately fixes the runtime contract:
 
 - one dedicated connector channel from private connector settings, never the
   identity config's default channel;
-- exact sender IDs, `request` only, autonomous text off;
+- exact sender IDs, `request` only by default, with one explicit
+  `request,result` inbound opt-in; autonomous text remains off;
 - Relay WebSocket wake plus startup/reconnect cursor recovery, periodic Relay
   polling off;
 - independent Codex App Server, a connector-owned task marker, fixed cwd,
@@ -288,6 +289,28 @@ The connector does not send arbitrary task text or enable autonomous `text`
 input. `reply_to` is correlation, not a private recipient: every channel member
 can read the result. DLP and the canary are defense in depth, so sensitive use
 still requires a separate OS user, VM, or container.
+
+### Optional inbound result alignment
+
+The default `deliver_types` setting remains `["request"]`. After the one-way
+request acceptance is durable, either host may opt in to showing peer results
+inside its fixed dedicated Codex task:
+
+```json
+"deliver_types": ["request", "result"]
+```
+
+`request` is mandatory. The Windows package rejects `result`-only, `text`,
+`status`, and unknown values. Enabling result delivery does not relax the fixed
+channel, exact sender IDs, task/thread/worktree binding, sender turn budget,
+deduplication, cursor, state, receipt, or lock contracts.
+
+Inbound results are never reply-eligible. Their App Server turn receives no
+structured reply schema, any reply-shaped model output is retained locally
+rather than sent to AIChat, and no lifecycle status is produced for that turn.
+Only a durably recorded source type of `request` can authorize outbound result
+or status handling. Keep automatic egress as the separate canary/audience/DLP
+opt-in above; `request,result` inbound alone cannot create a relay loop.
 
 ### Rollback and uninstall
 
