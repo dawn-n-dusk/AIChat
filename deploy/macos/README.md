@@ -8,7 +8,8 @@ LaunchAgent. It is intentionally conservative:
 - Only `request` messages from exact allowed sender IDs start Codex turns.
 - Automatic AIChat egress is disabled by default and requires the complete
   local `egress` opt-in described below. General accepted/running/completed/
-  failed lifecycle status remains disabled even after opt-in.
+  failed lifecycle status requires an additional explicit opt-in and remains
+  disabled by default.
 - Relay WebSocket events wake ordered cursor recovery. The 30-second periodic
   recovery timer is disabled. Startup and WebSocket reconnect still recover from
   the persisted cursor.
@@ -228,6 +229,7 @@ Then change the settings block to:
 {
   "egress": {
     "enabled": true,
+    "lifecycle_status_enabled": false,
     "acknowledged_channel_id": "the-exact-same-value-as-channel_id",
     "canary_file": "~/Library/Application Support/AIChat/codex-connector-egress-canary.txt",
     "allowed_reference_hosts": ["github.com"],
@@ -242,14 +244,37 @@ must still be a credential-free HTTPS URL on that list. `max_text_bytes` must
 be from 128 through 100000. Re-run install preflight, apply, and `check.sh`; all
 three report `automatic_egress=true` only when this full opt-in validates.
 
+For a supervised, synthetic foreground acceptance that must observe
+`request -> accepted/running -> result`, also set
+`egress.lifecycle_status_enabled=true`. This is rejected unless egress itself
+is enabled with the exact channel acknowledgement and private canary. Keep it
+false for ordinary operation because every status is visible to every channel
+member.
+
+With the LaunchAgent unloaded, the same token-safe launcher can be run in the
+foreground for a bounded supervised test without placing the Relay credential
+on the command line:
+
+```bash
+deploy/macos/scripts/launcher.py \
+  --settings "/private/path/to/fresh-e2e-settings.json" \
+  --connector "$PWD/adapters/codex-connector/src/cli.js" \
+  --node "$(command -v node)"
+```
+
+Use a fresh two-member channel, dedicated task and worktree, and previously
+unused mapping state. Stop the foreground process after the bounded acceptance;
+do not bootstrap the LaunchAgent as part of this procedure.
+
 If a model result is permanently rejected by the egress DLP/size/reference
 policy, the connector durably quarantines it and independently queues one fixed
 terminal `blocked` status. That status contains no original error, policy
 detail, model text, or secret. Its stable idempotency key survives Relay send
 failure and process restart. This terminal notification is independent of the
 general lifecycle-status switch. Accepted/running/completed/failed
-notifications remain off in this package; a completion without a model result
-is checkpointed as a local-only suppression event so its receipt can be safely
+notifications remain off unless the supervised lifecycle opt-in above is
+enabled. A completion without a model result is checkpointed as a local-only
+suppression event when lifecycle status is disabled so its receipt can be safely
 released without Relay egress.
 
 `reply_to` correlates a response with a prior message; it is not a private

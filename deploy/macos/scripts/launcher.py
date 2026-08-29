@@ -206,6 +206,7 @@ def validate_egress(value: Any, channel_id: str) -> dict[str, Any]:
         fail("egress must be an object")
     supported = {
         "enabled",
+        "lifecycle_status_enabled",
         "acknowledged_channel_id",
         "canary_file",
         "allowed_reference_hosts",
@@ -216,6 +217,11 @@ def validate_egress(value: Any, channel_id: str) -> dict[str, Any]:
     enabled = value.get("enabled", False)
     if not isinstance(enabled, bool):
         fail("egress.enabled must be true or false")
+    lifecycle_status_enabled = value.get("lifecycle_status_enabled", False)
+    if not isinstance(lifecycle_status_enabled, bool):
+        fail("egress.lifecycle_status_enabled must be true or false")
+    if lifecycle_status_enabled and not enabled:
+        fail("lifecycle status requires enabled egress")
 
     acknowledged_channel_id = value.get("acknowledged_channel_id")
     if acknowledged_channel_id is not None:
@@ -260,6 +266,7 @@ def validate_egress(value: Any, channel_id: str) -> dict[str, Any]:
 
     return {
         "enabled": enabled,
+        "lifecycle_status_enabled": lifecycle_status_enabled,
         "acknowledged_channel_id": acknowledged_channel_id,
         "canary_file": canary_file,
         "allowed_reference_hosts": hosts,
@@ -363,7 +370,9 @@ def build_environment(settings: dict[str, Any], identity: dict[str, Any]) -> dic
             "AICHAT_WEBSOCKET_ENABLED": "true",
             "AICHAT_PERIODIC_RECOVERY_ENABLED": "false",
             "AICHAT_AUTO_REPLY_ENABLED": str(settings["egress"]["enabled"]).lower(),
-            "AICHAT_LIFECYCLE_STATUS_ENABLED": "false",
+            "AICHAT_LIFECYCLE_STATUS_ENABLED": str(
+                settings["egress"]["lifecycle_status_enabled"]
+            ).lower(),
             "AICHAT_MAX_TURNS_PER_SENDER_PER_HOUR": str(
                 settings["max_turns_per_sender_per_hour"]
             ),
@@ -410,6 +419,10 @@ def main() -> int:
         print("settings_ok=true")
         print("token_read=false")
         print(f"automatic_egress={str(settings['egress']['enabled']).lower()}")
+        print(
+            "lifecycle_status_enabled="
+            f"{str(settings['egress']['lifecycle_status_enabled']).lower()}"
+        )
         return 0
 
     _, identity = load_private_json(settings["identity_config_path"], "AIChat identity config")
