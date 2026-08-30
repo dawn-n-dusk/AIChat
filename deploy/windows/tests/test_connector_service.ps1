@@ -236,6 +236,30 @@ public static class Program {
         npm_cli_path = $npmCliPath
         codex_app_server_binary = $codexPath
     }
+    $freshMappingState = New-AIChatConnectorMappingState -Settings $settingsA
+    [void](Assert-AIChatConnectorMappingState `
+        -MappingState $freshMappingState `
+        -Settings $settingsA)
+    if ([string]$freshMappingState.state_mode -ne "mapping-digest" -or
+        [string]$freshMappingState.state_basename -notmatch '^state-[a-f0-9]{64}\.json$') {
+        throw "Fresh connector mapping did not select a digest-scoped state file"
+    }
+    $legacyMappingState = New-AIChatConnectorMappingState `
+        -Settings $settingsA `
+        -PreviousSettings $settingsA
+    if ([string]$legacyMappingState.state_mode -ne "legacy-default" -or
+        [string]$legacyMappingState.state_basename -ne "state.json") {
+        throw "Unchanged pre-namespace mapping did not retain legacy state.json"
+    }
+    $differentMappingSettings = $settingsA | ConvertTo-Json -Depth 12 | ConvertFrom-Json
+    $differentMappingSettings.channel_id = "different-channel-$testId"
+    $differentMappingState = New-AIChatConnectorMappingState `
+        -Settings $differentMappingSettings `
+        -PreviousSettings $settingsA
+    if ([string]$differentMappingState.state_mode -ne "mapping-digest" -or
+        [string]$differentMappingState.mapping_digest -eq [string]$freshMappingState.mapping_digest) {
+        throw "Changed mapping reused the previous connector state namespace"
+    }
     Write-AIChatPrivateJson `
         -Path $settingsPath `
         -Value $settingsA `
@@ -373,6 +397,10 @@ public static class Program {
         -RepositoryRoot $repositoryRoot `
         -Apply -WhatIf *>&1 | Out-String
     Add-CapturedOutput $whatIfOutput
+    if ($whatIfOutput -notmatch '(?m)^mapping_state_selection=deferred_until_apply\s*$' -or
+        $whatIfOutput -notmatch '(?m)^legacy_connector_state_mutated=false\s*$') {
+        throw "Connector service WhatIf did not report the inert mapping-state boundary"
+    }
     $env:PATH = $oldPath
     $env:AICHAT_CI_CODEX_EXEC_CANARY = $null
     if ((Test-Path -LiteralPath $paths.StateRoot) -or
@@ -422,6 +450,21 @@ public static class Program {
         -Path $paths.StateRoot `
         -ProtectedRoot $paths.ProtectedRoot)
     [void](Assert-AIChatConnectorDataTree -Path $paths.ConnectorDataRoot)
+    $installedMappingState = Read-AIChatPrivateJson `
+        -Path $paths.MappingStatePath `
+        -ProtectedRoot $paths.ProtectedRoot
+    $connectorStatePath = Get-AIChatConnectorStatePath `
+        -Paths $paths `
+        -Settings (Get-AIChatConnectorSettings `
+            -Path $paths.SettingsPath `
+            -ProtectedRoot $paths.ProtectedRoot `
+            -RequirePinnedHashes) `
+        -MappingState $installedMappingState
+    if ([string]$installedMappingState.state_mode -ne "mapping-digest" -or
+        (Split-Path -Leaf $connectorStatePath) -ne [string]$installedMappingState.state_basename -or
+        (Test-Path -LiteralPath $paths.ConnectorLegacyStatePath)) {
+        throw "Fresh install did not preserve an empty legacy state namespace"
+    }
     $connectorDataAcl = Get-Acl -LiteralPath $paths.ConnectorDataRoot
     $connectorDataSids = @($connectorDataAcl.GetAccessRules(
         $true,
@@ -496,6 +539,7 @@ public static class Program {
         "periodic_recovery=false",
         "websocket=true",
         "state_file_fixed=true",
+        "state_file_mapping_scoped=true",
         "token_read=false"
     )) {
         if ($launcherOutput -notmatch "(?m)^$([regex]::Escape($required))\s*$") {
@@ -504,11 +548,11 @@ public static class Program {
     }
 
     [IO.File]::WriteAllText(
-        $paths.ConnectorStatePath,
+        $connectorStatePath,
         (([pscustomobject]@{ version = 5 } | ConvertTo-Json) + "`n"),
         [Text.UTF8Encoding]::new($false)
     )
-    Set-AIChatConnectorDataAcl -Path $paths.ConnectorStatePath
+    Set-AIChatConnectorDataAcl -Path $connectorStatePath
     Invoke-ExpectedFailure `
         -Label "pre-existing supervised connector checkpoint" `
         -Action {
@@ -517,7 +561,7 @@ public static class Program {
                 -Once `
                 -ExpectedMessageId ([Guid]::NewGuid().ToString("D"))
         }
-    Remove-Item -LiteralPath $paths.ConnectorStatePath -Force
+    Remove-Item -LiteralPath $connectorStatePath -Force
 
     $priorDriverReceiptPath = Join-Path `
         $paths.ConnectorDataRoot `
@@ -557,6 +601,7 @@ public static class Program {
             "connector-state-acl",
             "transaction",
             "settings",
+            "mapping-state",
             "launcher",
             "scheduled-task",
             "codex-home",
@@ -617,6 +662,7 @@ public static class Program {
     if ($LASTEXITCODE -ne 0) { throw "Could not remove junction security probe" }
 
     $activeHashA = (Get-FileHash -LiteralPath $paths.ActiveReleasePath -Algorithm SHA256).Hash
+    $mappingHashA = (Get-FileHash -LiteralPath $paths.MappingStatePath -Algorithm SHA256).Hash
     $taskXmlA = [string](Get-AIChatConnectorTask).Xml
     $installedSettingsA = Read-AIChatPrivateJson `
         -Path $paths.SettingsPath `
@@ -636,6 +682,7 @@ public static class Program {
         -Action { & $installer -SettingsPath $settingsPath -RepositoryRoot $repositoryRoot -Apply }
     $env:AICHAT_WINDOWS_CONNECTOR_TEST_FAILURE = $null
     if ((Get-FileHash -LiteralPath $paths.ActiveReleasePath -Algorithm SHA256).Hash -ne $activeHashA -or
+        (Get-FileHash -LiteralPath $paths.MappingStatePath -Algorithm SHA256).Hash -ne $mappingHashA -or
         [string](Get-AIChatConnectorTask).Xml -ne $taskXmlA -or
         (Test-Path -LiteralPath $paths.TransactionPath)) {
         throw "Failure injection did not restore the prior package exactly"
@@ -660,6 +707,24 @@ public static class Program {
     if ($launcherBOutput -notmatch '(?m)^deliver_types=request,result\s*$') {
         throw "Installed launcher did not expose the result inbound opt-in"
     }
+    $preRollbackWhatIfActiveHash = (Get-FileHash `
+        -LiteralPath $paths.ActiveReleasePath `
+        -Algorithm SHA256).Hash
+    $preRollbackWhatIfMappingHash = (Get-FileHash `
+        -LiteralPath $paths.MappingStatePath `
+        -Algorithm SHA256).Hash
+    $preRollbackWhatIfTaskXml = [string](Get-AIChatConnectorTask).Xml
+    $rollbackWhatIfOutput = & $rollback -Apply -WhatIf *>&1 | Out-String
+    Add-CapturedOutput $rollbackWhatIfOutput
+    if ($rollbackWhatIfOutput -notmatch '(?m)^mapping_state_rollback=deferred_until_apply\s*$' -or
+        $rollbackWhatIfOutput -notmatch '(?m)^connector_data_mutated=false\s*$' -or
+        (Get-FileHash -LiteralPath $paths.ActiveReleasePath -Algorithm SHA256).Hash -ne
+            $preRollbackWhatIfActiveHash -or
+        (Get-FileHash -LiteralPath $paths.MappingStatePath -Algorithm SHA256).Hash -ne
+            $preRollbackWhatIfMappingHash -or
+        [string](Get-AIChatConnectorTask).Xml -ne $preRollbackWhatIfTaskXml) {
+        throw "Connector service rollback WhatIf produced a mapping or package side effect"
+    }
     $rollbackOutput = & $rollback -Apply *>&1 | Out-String
     Add-CapturedOutput $rollbackOutput
     if ($LASTEXITCODE -ne 0) { throw "Connector service rollback failed" }
@@ -669,7 +734,60 @@ public static class Program {
     if ([string]$rolledBackSettings.task_marker -ne [string]$installedSettingsA.task_marker) {
         throw "Connector service rollback did not restore the first install"
     }
+    if ((Get-FileHash -LiteralPath $paths.MappingStatePath -Algorithm SHA256).Hash -ne $mappingHashA) {
+        throw "Connector service rollback did not restore mapping state metadata"
+    }
     Assert-AIChatTaskContract -Task (Get-AIChatConnectorTask) -Paths $paths
+
+    # Emulate an upgrade from the pre-namespace package: installed settings are
+    # present, mapping-state.json is absent, and legacy state.json belongs to
+    # that unchanged fixed mapping. The installer must retain it in place.
+    [void](Assert-AIChatPrivateFile `
+        -Path $paths.MappingStatePath `
+        -ProtectedRoot $paths.ProtectedRoot)
+    Remove-Item -LiteralPath $paths.MappingStatePath -Force
+    $legacyStateContent = "{`"version`":5,`"cursor`":`"legacy-$testId`"}`n"
+    [IO.File]::WriteAllText(
+        $paths.ConnectorLegacyStatePath,
+        $legacyStateContent,
+        [Text.UTF8Encoding]::new($false)
+    )
+    Set-AIChatConnectorDataAcl -Path $paths.ConnectorLegacyStatePath
+    $legacyStateHash = (Get-FileHash `
+        -LiteralPath $paths.ConnectorLegacyStatePath `
+        -Algorithm SHA256).Hash
+    Write-AIChatPrivateJson `
+        -Path $settingsPath `
+        -Value $settingsA `
+        -ProtectedRoot $protectedRoot
+    $legacyUpgradeOutput = & $installer `
+        -SettingsPath $settingsPath `
+        -RepositoryRoot $repositoryRoot `
+        -Apply *>&1 | Out-String
+    Add-CapturedOutput $legacyUpgradeOutput
+    if ($LASTEXITCODE -ne 0 -or
+        $legacyUpgradeOutput -notmatch '(?m)^mapping_state_mode=legacy-default\s*$') {
+        throw "Legacy unchanged-mapping upgrade failed"
+    }
+    $legacyUpgradeSettings = Get-AIChatConnectorSettings `
+        -Path $paths.SettingsPath `
+        -ProtectedRoot $paths.ProtectedRoot `
+        -RequirePinnedHashes
+    $legacyUpgradeMapping = Read-AIChatPrivateJson `
+        -Path $paths.MappingStatePath `
+        -ProtectedRoot $paths.ProtectedRoot
+    $legacyUpgradeStatePath = Get-AIChatConnectorStatePath `
+        -Paths $paths `
+        -Settings $legacyUpgradeSettings `
+        -MappingState $legacyUpgradeMapping
+    if (-not $legacyUpgradeStatePath.Equals(
+            $paths.ConnectorLegacyStatePath,
+            [StringComparison]::OrdinalIgnoreCase
+        ) -or
+        (Get-FileHash -LiteralPath $paths.ConnectorLegacyStatePath -Algorithm SHA256).Hash -ne
+            $legacyStateHash) {
+        throw "Legacy unchanged-mapping upgrade moved or changed state.json"
+    }
 
     Push-Location (Join-Path $repositoryRoot "adapters\codex-connector")
     try {

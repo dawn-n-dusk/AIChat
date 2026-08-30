@@ -372,8 +372,30 @@ def test_connector_atomic_windows_writes_protect_acl_before_rename() -> None:
     assert '"/grant:r"' in source
     assert "WINDOWS_SYSTEM_SID" in source
     assert '["AICHAT_WINDOWS_PRIVATE_SID"] = Get-AIChatCurrentSid' in launcher
-    assert "Read-AIChatConnectorDataJson -Path $paths.ConnectorStatePath" in launcher
+    assert "Read-AIChatConnectorDataJson -Path $connectorStatePath" in launcher
     assert "-ProtectedRoot $paths.ConnectorDataRoot" not in launcher
+
+
+def test_connector_service_state_namespace_is_mapping_scoped_and_legacy_safe() -> None:
+    root = ROOT / "connector-service"
+    common = (root / "common.ps1").read_text(encoding="utf-8")
+    install = (root / "install.ps1").read_text(encoding="utf-8")
+    launcher = (root / "launcher.ps1").read_text(encoding="utf-8")
+    assert "function Get-AIChatConnectorMappingDigest" in common
+    assert '"aichat-windows-mapping-v1`0app-server`0local`0"' in common
+    assert '"state-$digest.json"' in common
+    assert 'state_basename = "state.json"' not in common
+    assert '$stateBasename = "state.json"' in common
+    assert 'MappingStatePath = Join-Path $state "mapping-state.json"' in common
+    assert 'mapping_state = $Paths.MappingStatePath' in common
+    assert '[int]$Manifest.schema_version -eq 1' in common
+    assert 'Remove-Item -LiteralPath $Paths.MappingStatePath -Force' in common
+    assert "PreviousSettings" in install
+    assert "PreviousMappingState" in install
+    assert 'Write-Host "mapping_state_mode=$(' in install
+    assert 'EnvironmentVariables["AICHAT_STATE_FILE"] = $connectorStatePath' in launcher
+    assert 'EnvironmentVariables["AICHAT_INSTANCE_LOCK_METADATA_PATH"]' not in launcher
+    assert 'CODEX_APP_SERVER_RECEIPT_DIR"] = $paths.ConnectorDataRoot' in launcher
 
 
 def test_connector_service_whatif_returns_before_mutating_capabilities() -> None:
@@ -385,6 +407,8 @@ def test_connector_service_whatif_returns_before_mutating_capabilities() -> None
     for forbidden in ("Test-Path", "Resolve-Path", "Get-Item", "Get-ChildItem"):
         assert forbidden not in plan_prefix
     assert 'Write-Host "mutation_performed=false"' in install[early_return:dot_source]
+    assert 'Write-Host "mapping_state_selection=deferred_until_apply"' in install[early_return:dot_source]
+    assert 'Write-Host "legacy_connector_state_mutated=false"' in install[early_return:dot_source]
     prefix = install[:dot_source]
     for forbidden in (
         "Set-Acl",
@@ -402,7 +426,7 @@ def test_connector_service_journal_uses_fixed_ids_hashes_and_inverse_rollback() 
     common = (root / "common.ps1").read_text(encoding="utf-8")
     install = (root / "install.ps1").read_text(encoding="utf-8")
     rollback = (root / "rollback.ps1").read_text(encoding="utf-8")
-    assert 'schema_version = 1' in install
+    assert 'schema_version = 2' in install
     assert 'kind = "aichat-windows-connector-transaction"' in install
     assert 'status = "prepared"' in install
     assert 'Set-AIChatTransactionStatus -Status "applying"' in install
@@ -411,10 +435,13 @@ def test_connector_service_journal_uses_fixed_ids_hashes_and_inverse_rollback() 
     assert "Get-AIChatDeploymentTargets" in common
     assert 'common = $Paths.CommonPath' in common
     assert 'active_release = $Paths.ActiveReleasePath' in common
+    assert 'mapping_state = $Paths.MappingStatePath' in common
     assert "Get-FileHash" in common
     assert "Assert-AIChatTransactionManifest" in rollback
     assert "Invoke-AIChatManifestRollback" in rollback
     assert "Restore-AIChatTaskSnapshot" in common
+    assert 'Write-Host "mapping_state_rollback=deferred_until_apply"' in rollback
+    assert 'Write-Host "connector_data_mutated=false"' in rollback
 
 
 def test_connector_service_pins_native_node_npm_and_codex_without_path_shim() -> None:

@@ -8,6 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Namespace packaged Windows connector state and its derived instance lock by
+  a trusted local channel/task mapping digest, while preserving legacy
+  `state.json` only for an unchanged pre-namespace mapping and leaving all
+  prior mapping state files untouched during install and rollback.
 - Protect Windows connector state, app-server receipt, and lock-metadata files
   before atomic rename with explicit current-user and LocalSystem ACLs; migrate
   only the narrow legacy current-user ACL shape during install, upgrade, or

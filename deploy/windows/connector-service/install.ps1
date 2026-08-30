@@ -27,6 +27,8 @@ Write-Host "token_read=false"
 if (-not $Apply -or $WhatIfPreference) {
     Write-Host "dry_run=true"
     Write-Host "mutation_performed=false"
+    Write-Host "mapping_state_selection=deferred_until_apply"
+    Write-Host "legacy_connector_state_mutated=false"
     Write-Host "security_runtime_checks=deferred_until_apply"
     exit 0
 }
@@ -139,6 +141,32 @@ try {
         -ProtectedRoot $paths.ProtectedRoot
     Write-Host "automatic_egress=$(([bool]$settings.egress.enabled).ToString().ToLowerInvariant())"
 
+    $previousSettings = $null
+    $previousMappingState = $null
+    if (Test-Path -LiteralPath $paths.SettingsPath -PathType Leaf) {
+        $previousSettings = Get-AIChatConnectorSettings `
+            -Path $paths.SettingsPath `
+            -ProtectedRoot $paths.ProtectedRoot `
+            -RequirePinnedHashes
+        if (Test-Path -LiteralPath $paths.MappingStatePath -PathType Leaf) {
+            $previousMappingState = Read-AIChatPrivateJson `
+                -Path $paths.MappingStatePath `
+                -ProtectedRoot $paths.ProtectedRoot
+            [void](Assert-AIChatConnectorMappingState `
+                -MappingState $previousMappingState `
+                -Settings $previousSettings)
+        }
+    } elseif (Test-Path -LiteralPath $paths.MappingStatePath) {
+        throw "Connector mapping state exists without installed settings"
+    }
+    $mappingState = New-AIChatConnectorMappingState `
+        -Settings $settings `
+        -PreviousSettings $previousSettings `
+        -PreviousMappingState $previousMappingState
+    [void](Assert-AIChatConnectorMappingState `
+        -MappingState $mappingState `
+        -Settings $settings)
+
     $existingTask = Get-AIChatConnectorTask
     if ($null -ne $existingTask) {
         Assert-AIChatTaskContract -Task $existingTask -Paths $paths
@@ -178,7 +206,7 @@ try {
         }
     }
     $transaction = [pscustomobject][ordered]@{
-        schema_version = 1
+        schema_version = 2
         kind = "aichat-windows-connector-transaction"
         transaction_id = $transactionId
         created_at = (Get-Date).ToUniversalTime().ToString("o")
@@ -265,6 +293,10 @@ try {
         -Path $paths.SettingsPath `
         -Value $settings `
         -ProtectedRoot $paths.ProtectedRoot
+    Write-AIChatPrivateJson `
+        -Path $paths.MappingStatePath `
+        -Value $mappingState `
+        -ProtectedRoot $paths.ProtectedRoot
 
     $runtimeTree = Get-AIChatTreeHash `
         -Root (Join-Path $release "runtime") `
@@ -314,6 +346,7 @@ try {
     Remove-Item -LiteralPath $paths.TransactionPath -Force
 
     Write-Host "installed_release=$transactionId"
+    Write-Host "mapping_state_mode=$([string]$mappingState.state_mode)"
     Write-Host "service_enabled=false"
     Write-Host "task_triggers=0"
     Write-Host "token_read=false"
