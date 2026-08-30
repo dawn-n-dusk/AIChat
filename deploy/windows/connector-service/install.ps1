@@ -94,13 +94,7 @@ try {
             -Path $directory `
             -ProtectedRoot $paths.ProtectedRoot)
     }
-    $profile = Get-AIChatUserProfile
-    $connectorPrivateRoot = Join-Path $profile ".aichat"
-    [void](Initialize-AIChatPrivateDirectory `
-        -Path $paths.ConnectorDataRoot `
-        -ProtectedRoot $connectorPrivateRoot `
-        -AnchorRoot $profile)
-    [void](Assert-AIChatConnectorDataTree -Path $paths.ConnectorDataRoot)
+    [void](Initialize-AIChatConnectorDataDirectory -Path $paths.ConnectorDataRoot)
 
     if (Test-Path -LiteralPath $paths.TransactionPath -PathType Leaf) {
         $unfinished = Read-AIChatPrivateJson `

@@ -174,8 +174,21 @@ package pins and revalidates SHA-256 for both native binaries and hashes the
 entire installed connector runtime tree.
 
 The connector state root is `%USERPROFILE%\.aichat\codex-connector`. On a
-fresh profile the installer creates `%USERPROFILE%\.aichat` and the connector
-subdirectory with current-SID-only protected ACLs. If `%USERPROFILE%\.aichat`
+fresh profile the installer creates `%USERPROFILE%\.aichat` with a
+current-SID-only protected ACL, then gives the dedicated connector subdirectory
+exactly two protected FullControl rules: the current SID and LocalSystem. The
+connector writes state, app-server receipts, and transient lock metadata through
+an atomic Windows path that removes inheritance from every temporary file before
+rename. This prevents a durable checkpoint from becoming unreadable merely
+because the newly renamed file inherited its parent DACL.
+
+Apply-mode install, upgrade, and rollback normalize a legacy connector data
+tree only when every existing entry is a regular, single-link file owned by the
+current SID and its ACL contains no principal beyond the current SID or the new
+current-SID-plus-LocalSystem contract. Inherited current-SID-only files from an
+older package are migrated to protected explicit rules. Additional or broad
+principals still fail closed and are never silently rewritten. If
+`%USERPROFILE%\.aichat`
 already exists with inherited, shared, or additional ACL entries, installation
 fails closed. Before changing that existing root, back it up, inspect its
 contents and ACLs, and confirm that no other application or Windows account

@@ -24,7 +24,7 @@ try {
 }
 try {
     [void](Assert-AIChatConnectorDataTree -Path $paths.ConnectorDataRoot)
-    Report-AIChatCheck "connector-state-acl" $true "fixed USERPROFILE state/receipt directory"
+    Report-AIChatCheck "connector-state-acl" $true "protected current-SID and LocalSystem state/receipt directory"
 } catch {
     Report-AIChatCheck "connector-state-acl" $false $_.Exception.Message
 }

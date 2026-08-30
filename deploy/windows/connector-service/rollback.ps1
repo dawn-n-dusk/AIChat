@@ -24,6 +24,7 @@ $paths = Get-AIChatConnectorPaths
 if (Test-Path -LiteralPath $paths.TransactionPath) {
     throw "Refusing user rollback while an unfinished install transaction exists"
 }
+[void](Initialize-AIChatConnectorDataDirectory -Path $paths.ConnectorDataRoot)
 $task = Get-AIChatConnectorTask
 if ($null -ne $task) {
     Assert-AIChatTaskContract -Task $task -Paths $paths

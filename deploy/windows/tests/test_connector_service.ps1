@@ -44,6 +44,9 @@ $hardlinkAlias = Join-Path $protectedRoot "ci-connector-hardlink-$testId.json"
 $junctionTarget = Join-Path $protectedRoot "ci-connector-junction-target-$testId"
 $junctionPath = Join-Path $protectedRoot "ci-connector-junction-$testId"
 $aclProbe = Join-Path $protectedRoot "ci-connector-acl-$testId.json"
+$inheritedDataProbe = Join-Path $paths.ConnectorDataRoot "ci-inherited-$testId.json"
+$broadDataProbe = Join-Path $paths.ConnectorDataRoot "ci-broad-$testId.json"
+$nodeDataProbe = Join-Path $paths.ConnectorDataRoot "ci-node-$testId.json"
 $allOutput = [Text.StringBuilder]::new()
 $codexHome = Join-Path (Get-AIChatUserProfile) ".codex"
 $createdCodexHome = -not (Test-Path -LiteralPath $codexHome)
@@ -419,6 +422,69 @@ public static class Program {
         -Path $paths.StateRoot `
         -ProtectedRoot $paths.ProtectedRoot)
     [void](Assert-AIChatConnectorDataTree -Path $paths.ConnectorDataRoot)
+    $connectorDataAcl = Get-Acl -LiteralPath $paths.ConnectorDataRoot
+    $connectorDataSids = @($connectorDataAcl.GetAccessRules(
+        $true,
+        $true,
+        [Security.Principal.SecurityIdentifier]
+    ) | ForEach-Object { $_.IdentityReference.Value })
+    if (-not $connectorDataAcl.AreAccessRulesProtected -or
+        $connectorDataSids.Count -ne 2 -or
+        $connectorDataSids -notcontains (Get-AIChatCurrentSid) -or
+        $connectorDataSids -notcontains "S-1-5-18") {
+        throw "Connector data root does not have the protected user and LocalSystem ACL"
+    }
+
+    [IO.File]::WriteAllText($inheritedDataProbe, "{}`n", [Text.UTF8Encoding]::new($false))
+    # Elevated hosted runners may default a newly created file owner to the
+    # Administrators group. Normalize only the synthetic probe owner while
+    # preserving its inherited DACL so it matches a legacy user-process write.
+    $inheritedProbeAcl = Get-Acl -LiteralPath $inheritedDataProbe
+    $inheritedProbeAcl.SetOwner(
+        [Security.Principal.WindowsIdentity]::GetCurrent().User
+    )
+    Set-Acl -LiteralPath $inheritedDataProbe -AclObject $inheritedProbeAcl
+    Invoke-ExpectedFailure `
+        -Label "inherited connector data ACL check" `
+        -Action { Assert-AIChatConnectorDataTree -Path $paths.ConnectorDataRoot }
+    [void](Initialize-AIChatConnectorDataDirectory -Path $paths.ConnectorDataRoot)
+    [void](Assert-AIChatConnectorDataTree -Path $paths.ConnectorDataRoot)
+    Remove-Item -LiteralPath $inheritedDataProbe -Force
+
+    [IO.File]::WriteAllText($broadDataProbe, "{}`n", [Text.UTF8Encoding]::new($false))
+    Set-AIChatConnectorDataAcl -Path $broadDataProbe
+    icacls.exe $broadDataProbe /grant "*S-1-1-0:(R)" | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Could not create broad connector ACL probe" }
+    Invoke-ExpectedFailure `
+        -Label "broad connector data ACL migration check" `
+        -Action { Initialize-AIChatConnectorDataDirectory -Path $paths.ConnectorDataRoot }
+    Set-AIChatConnectorDataAcl -Path $broadDataProbe
+    Remove-Item -LiteralPath $broadDataProbe -Force
+
+    $env:AICHAT_WINDOWS_PRIVATE_SID = Get-AIChatCurrentSid
+    & $nodePath `
+        (Join-Path $PSScriptRoot "fixtures\write_connector_checkpoint.mjs") `
+        $nodeDataProbe
+    $env:AICHAT_WINDOWS_PRIVATE_SID = $null
+    if ($LASTEXITCODE -ne 0) { throw "Node Windows checkpoint ACL probe failed" }
+    [void](Assert-AIChatConnectorDataFile -Path $nodeDataProbe)
+    $nodeProbeAcl = Get-Acl -LiteralPath $nodeDataProbe
+    $nodeProbeOwner = $nodeProbeAcl.GetOwner(
+        [Security.Principal.SecurityIdentifier]
+    ).Value
+    $nodeProbeSids = @($nodeProbeAcl.GetAccessRules(
+        $true,
+        $true,
+        [Security.Principal.SecurityIdentifier]
+    ) | ForEach-Object { $_.IdentityReference.Value })
+    if ($nodeProbeOwner -ne (Get-AIChatCurrentSid) -or
+        -not $nodeProbeAcl.AreAccessRulesProtected -or
+        $nodeProbeSids.Count -ne 2 -or
+        $nodeProbeSids -notcontains (Get-AIChatCurrentSid) -or
+        $nodeProbeSids -notcontains "S-1-5-18") {
+        throw "Node Windows checkpoint ACL probe did not persist the exact trusted contract"
+    }
+    Remove-Item -LiteralPath $nodeDataProbe -Force
     $launcherOutput = & $paths.LauncherPath `
         -StateRoot $paths.StateRoot `
         -CheckSettings *>&1 | Out-String
@@ -437,10 +503,12 @@ public static class Program {
         }
     }
 
-    Write-AIChatPrivateJson `
-        -Path $paths.ConnectorStatePath `
-        -Value ([pscustomobject]@{ version = 5 }) `
-        -ProtectedRoot $paths.ConnectorDataRoot
+    [IO.File]::WriteAllText(
+        $paths.ConnectorStatePath,
+        (([pscustomobject]@{ version = 5 } | ConvertTo-Json) + "`n"),
+        [Text.UTF8Encoding]::new($false)
+    )
+    Set-AIChatConnectorDataAcl -Path $paths.ConnectorStatePath
     Invoke-ExpectedFailure `
         -Label "pre-existing supervised connector checkpoint" `
         -Action {
@@ -454,17 +522,20 @@ public static class Program {
     $priorDriverReceiptPath = Join-Path `
         $paths.ConnectorDataRoot `
         "app-server-ci-prior-$testId.json"
-    Write-AIChatPrivateJson `
-        -Path $priorDriverReceiptPath `
-        -Value ([pscustomobject]@{
+    $priorDriverReceipt = [pscustomobject]@{
             binding = [pscustomobject]@{
                 channelId = [string]$settingsA.channel_id
                 threadId = [string]$settingsA.target_thread_id
                 hostId = $null
             }
             records = @()
-        }) `
-        -ProtectedRoot $paths.ConnectorDataRoot
+        }
+    [IO.File]::WriteAllText(
+        $priorDriverReceiptPath,
+        (($priorDriverReceipt | ConvertTo-Json -Depth 8) + "`n"),
+        [Text.UTF8Encoding]::new($false)
+    )
+    Set-AIChatConnectorDataAcl -Path $priorDriverReceiptPath
     Invoke-ExpectedFailure `
         -Label "pre-existing supervised app-server checkpoint" `
         -Action {
@@ -604,9 +675,11 @@ public static class Program {
     try {
         & $nodePath $npmCliPath ci --ignore-scripts --no-audit --no-fund
         if ($LASTEXITCODE -ne 0) { throw "Windows connector npm ci failed" }
+        $env:AICHAT_WINDOWS_PRIVATE_SID = Get-AIChatCurrentSid
         & $nodePath --test
         if ($LASTEXITCODE -ne 0) { throw "Windows connector Node test suite failed" }
     } finally {
+        $env:AICHAT_WINDOWS_PRIVATE_SID = $null
         Pop-Location
     }
 
@@ -632,6 +705,7 @@ public static class Program {
 } finally {
     $env:AICHAT_WINDOWS_CONNECTOR_TEST_FAILURE = $null
     $env:AICHAT_CI_CODEX_EXEC_CANARY = $null
+    $env:AICHAT_WINDOWS_PRIVATE_SID = $null
     if ($null -ne (Get-AIChatConnectorTask)) {
         try {
             $task = Get-AIChatConnectorTask
@@ -646,6 +720,9 @@ public static class Program {
         & cmd.exe /d /c "rmdir `"$junctionPath`"" | Out-Null
     }
     foreach ($path in @(
+        $inheritedDataProbe,
+        $broadDataProbe,
+        $nodeDataProbe,
         $hardlinkAlias,
         $unsafeSettingsPath,
         $settingsPath,
