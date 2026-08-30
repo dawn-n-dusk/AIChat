@@ -435,6 +435,14 @@ public static class Program {
     }
 
     [IO.File]::WriteAllText($inheritedDataProbe, "{}`n", [Text.UTF8Encoding]::new($false))
+    # Elevated hosted runners may default a newly created file owner to the
+    # Administrators group. Normalize only the synthetic probe owner while
+    # preserving its inherited DACL so it matches a legacy user-process write.
+    $inheritedProbeAcl = Get-Acl -LiteralPath $inheritedDataProbe
+    $inheritedProbeAcl.SetOwner(
+        [Security.Principal.WindowsIdentity]::GetCurrent().User
+    )
+    Set-Acl -LiteralPath $inheritedDataProbe -AclObject $inheritedProbeAcl
     Invoke-ExpectedFailure `
         -Label "inherited connector data ACL check" `
         -Action { Assert-AIChatConnectorDataTree -Path $paths.ConnectorDataRoot }
@@ -469,10 +477,12 @@ public static class Program {
         }
     }
 
-    Write-AIChatPrivateJson `
-        -Path $paths.ConnectorStatePath `
-        -Value ([pscustomobject]@{ version = 5 }) `
-        -ProtectedRoot $paths.ConnectorDataRoot
+    [IO.File]::WriteAllText(
+        $paths.ConnectorStatePath,
+        (([pscustomobject]@{ version = 5 } | ConvertTo-Json) + "`n"),
+        [Text.UTF8Encoding]::new($false)
+    )
+    Set-AIChatConnectorDataAcl -Path $paths.ConnectorStatePath
     Invoke-ExpectedFailure `
         -Label "pre-existing supervised connector checkpoint" `
         -Action {
@@ -486,17 +496,20 @@ public static class Program {
     $priorDriverReceiptPath = Join-Path `
         $paths.ConnectorDataRoot `
         "app-server-ci-prior-$testId.json"
-    Write-AIChatPrivateJson `
-        -Path $priorDriverReceiptPath `
-        -Value ([pscustomobject]@{
+    $priorDriverReceipt = [pscustomobject]@{
             binding = [pscustomobject]@{
                 channelId = [string]$settingsA.channel_id
                 threadId = [string]$settingsA.target_thread_id
                 hostId = $null
             }
             records = @()
-        }) `
-        -ProtectedRoot $paths.ConnectorDataRoot
+        }
+    [IO.File]::WriteAllText(
+        $priorDriverReceiptPath,
+        (($priorDriverReceipt | ConvertTo-Json -Depth 8) + "`n"),
+        [Text.UTF8Encoding]::new($false)
+    )
+    Set-AIChatConnectorDataAcl -Path $priorDriverReceiptPath
     Invoke-ExpectedFailure `
         -Label "pre-existing supervised app-server checkpoint" `
         -Action {
@@ -636,9 +649,11 @@ public static class Program {
     try {
         & $nodePath $npmCliPath ci --ignore-scripts --no-audit --no-fund
         if ($LASTEXITCODE -ne 0) { throw "Windows connector npm ci failed" }
+        $env:AICHAT_WINDOWS_PRIVATE_SID = Get-AIChatCurrentSid
         & $nodePath --test
         if ($LASTEXITCODE -ne 0) { throw "Windows connector Node test suite failed" }
     } finally {
+        $env:AICHAT_WINDOWS_PRIVATE_SID = $null
         Pop-Location
     }
 

@@ -567,6 +567,21 @@ function Assert-AIChatConnectorDataTree {
     return $root
 }
 
+function Assert-AIChatConnectorDataFile {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $root = Get-AIChatConnectorDataRoot
+    [void](Assert-AIChatConnectorDataTree -Path $root)
+    $resolved = Assert-AIChatPathWithinRoot -Path $Path -Root $root
+    [void](Assert-AIChatNoReparsePath -Path $resolved -StopAt $root)
+    $item = Get-Item -LiteralPath $resolved -Force -ErrorAction Stop
+    if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw "Connector state/receipt JSON must be a regular non-reparse file: $resolved"
+    }
+    Assert-AIChatConnectorDataAcl -Path $resolved
+    return $resolved
+}
+
 function Assert-AIChatPrivateFile {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -612,6 +627,33 @@ function Read-AIChatPrivateJson {
     $value = $raw | ConvertFrom-Json
     if ($null -eq $value -or $value -isnot [psobject]) {
         throw "AIChat private JSON must contain an object: $resolved"
+    }
+    return $value
+}
+
+function Read-AIChatConnectorDataJson {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $resolved = Assert-AIChatConnectorDataFile -Path $Path
+    $stream = $null
+    $reader = $null
+    try {
+        $stream = [IO.FileStream]::new(
+            $resolved,
+            [IO.FileMode]::Open,
+            [IO.FileAccess]::Read,
+            [IO.FileShare]::None
+        )
+        $reader = [IO.StreamReader]::new($stream, [Text.UTF8Encoding]::new($false), $true)
+        $raw = $reader.ReadToEnd()
+    } finally {
+        if ($null -ne $reader) { $reader.Dispose() }
+        if ($null -ne $stream) { $stream.Dispose() }
+    }
+    if (-not $raw.Trim()) { throw "Connector state/receipt JSON must not be empty: $resolved" }
+    $value = $raw | ConvertFrom-Json
+    if ($null -eq $value -or $value -isnot [psobject]) {
+        throw "Connector state/receipt JSON must contain an object: $resolved"
     }
     return $value
 }

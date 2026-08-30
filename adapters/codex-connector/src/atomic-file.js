@@ -51,8 +51,7 @@ export async function protectWindowsPrivateFile(
 ) {
   if (platform !== "win32") return;
   const currentSid = env.AICHAT_WINDOWS_PRIVATE_SID?.trim();
-  if (!currentSid) return;
-  if (!WINDOWS_SID.test(currentSid) || currentSid === WINDOWS_SYSTEM_SID) {
+  if (!currentSid || !WINDOWS_SID.test(currentSid) || currentSid === WINDOWS_SYSTEM_SID) {
     throw new Error("Windows private-file SID binding is missing or invalid");
   }
   try {

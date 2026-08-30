@@ -93,9 +93,7 @@ if ($Once) {
         -LiteralPath $paths.ConnectorDataRoot `
         -Filter "app-server-*.json" `
         -File)) {
-        $priorDriverState = Read-AIChatPrivateJson `
-            -Path $receiptFile.FullName `
-            -ProtectedRoot $paths.ConnectorDataRoot
+        $priorDriverState = Read-AIChatConnectorDataJson -Path $receiptFile.FullName
         if ($priorDriverState.binding.channelId -eq [string]$settings.channel_id -and
             $priorDriverState.binding.threadId -eq [string]$settings.target_thread_id -and
             $null -eq $priorDriverState.binding.hostId) {
@@ -205,9 +203,7 @@ if (-not $process.Start()) {
 $process.WaitForExit()
 if ($Once -and $process.ExitCode -eq 0) {
     [void](Assert-AIChatConnectorDataTree -Path $paths.ConnectorDataRoot)
-    $connectorState = Read-AIChatPrivateJson `
-        -Path $paths.ConnectorStatePath `
-        -ProtectedRoot $paths.ConnectorDataRoot
+    $connectorState = Read-AIChatConnectorDataJson -Path $paths.ConnectorStatePath
     $allConnectorReceipts = @($connectorState.delivery_receipts)
     $seenIds = @($connectorState.seen_ids)
     $outboundSeenIds = @($connectorState.outbound_seen_ids)
@@ -234,9 +230,7 @@ if ($Once -and $process.ExitCode -eq 0) {
         -LiteralPath $paths.ConnectorDataRoot `
         -Filter "app-server-*.json" `
         -File)) {
-        $driverState = Read-AIChatPrivateJson `
-            -Path $receiptFile.FullName `
-            -ProtectedRoot $paths.ConnectorDataRoot
+        $driverState = Read-AIChatConnectorDataJson -Path $receiptFile.FullName
         if ($driverState.binding.channelId -eq [string]$settings.channel_id -and
             $driverState.binding.threadId -eq [string]$settings.target_thread_id -and
             $null -eq $driverState.binding.hostId) {

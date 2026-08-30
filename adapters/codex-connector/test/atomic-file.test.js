@@ -36,6 +36,17 @@ test("Windows private writes fail closed on an invalid launcher SID binding", as
   );
 });
 
+test("Windows private writes fail closed when the launcher SID binding is absent", async () => {
+  await assert.rejects(
+    protectWindowsPrivateFile("C:\\private\\state.tmp", {
+      platform: "win32",
+      env: {},
+      execFileImpl: async () => {},
+    }),
+    /SID binding is missing or invalid/,
+  );
+});
+
 test("Windows private writes fail before rename when ACL protection fails", async () => {
   await assert.rejects(
     protectWindowsPrivateFile("C:\\private\\state.tmp", {

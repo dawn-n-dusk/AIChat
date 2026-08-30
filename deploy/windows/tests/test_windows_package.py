@@ -349,6 +349,8 @@ def test_connector_service_private_path_and_hardlink_contracts_are_fail_closed()
     assert 'Get-AIChatConnectorDataRoot' in common
     assert '"state.json"' in common
     assert "Assert-AIChatConnectorDataTree" in common
+    assert "Assert-AIChatConnectorDataFile" in common
+    assert "Read-AIChatConnectorDataJson" in common
     assert "Initialize-AIChatConnectorDataDirectory" in common
     assert "Set-AIChatConnectorDataAcl" in common
     assert 'S-1-5-18' in common
@@ -369,6 +371,8 @@ def test_connector_atomic_windows_writes_protect_acl_before_rename() -> None:
     assert '"/grant:r"' in source
     assert "WINDOWS_SYSTEM_SID" in source
     assert '["AICHAT_WINDOWS_PRIVATE_SID"] = Get-AIChatCurrentSid' in launcher
+    assert "Read-AIChatConnectorDataJson -Path $paths.ConnectorStatePath" in launcher
+    assert "-ProtectedRoot $paths.ConnectorDataRoot" not in launcher
 
 
 def test_connector_service_whatif_returns_before_mutating_capabilities() -> None:
