@@ -40,6 +40,13 @@ $settings = Get-AIChatConnectorSettings `
     -Path $paths.SettingsPath `
     -ProtectedRoot $paths.ProtectedRoot `
     -RequirePinnedHashes
+$mappingState = Read-AIChatPrivateJson `
+    -Path $paths.MappingStatePath `
+    -ProtectedRoot $paths.ProtectedRoot
+$connectorStatePath = Get-AIChatConnectorStatePath `
+    -Paths $paths `
+    -Settings $settings `
+    -MappingState $mappingState
 $active = Read-AIChatPrivateJson `
     -Path $paths.ActiveReleasePath `
     -ProtectedRoot $paths.ProtectedRoot
@@ -86,7 +93,7 @@ if (-not $active.PSObject.Properties["runtime_file_count"] -or
 }
 
 if ($Once) {
-    if (Test-Path -LiteralPath $paths.ConnectorStatePath) {
+    if (Test-Path -LiteralPath $connectorStatePath) {
         throw "Supervised one-shot acceptance requires a fresh connector state"
     }
     foreach ($receiptFile in @(Get-ChildItem `
@@ -115,6 +122,8 @@ if ($CheckSettings -or $PrintEnvironmentContract) {
     Write-Host "periodic_recovery=false"
     Write-Host "websocket=true"
     Write-Host "state_file_fixed=true"
+    Write-Host "state_file_mapping_scoped=true"
+    Write-Host "state_mode=$([string]$mappingState.state_mode)"
     Write-Host "task_owned=true"
     Write-Host "approval_policy=never"
     Write-Host "owner_ipc=false"
@@ -171,7 +180,7 @@ $processInfo.EnvironmentVariables["AICHAT_MAX_TURNS_PER_SENDER_PER_HOUR"] = `
     [string]$settings.max_turns_per_sender_per_hour
 $processInfo.EnvironmentVariables["AICHAT_MAX_DELIVERIES_PER_RECOVERY"] = `
     [string]$settings.max_deliveries_per_recovery
-$processInfo.EnvironmentVariables["AICHAT_STATE_FILE"] = $paths.ConnectorStatePath
+$processInfo.EnvironmentVariables["AICHAT_STATE_FILE"] = $connectorStatePath
 $processInfo.EnvironmentVariables["AICHAT_WINDOWS_PRIVATE_SID"] = Get-AIChatCurrentSid
 $processInfo.EnvironmentVariables["CODEX_APP_SERVER_RECEIPT_DIR"] = $paths.ConnectorDataRoot
 $processInfo.EnvironmentVariables["CODEX_DRIVER"] = "app-server"
@@ -203,7 +212,7 @@ if (-not $process.Start()) {
 $process.WaitForExit()
 if ($Once -and $process.ExitCode -eq 0) {
     [void](Assert-AIChatConnectorDataTree -Path $paths.ConnectorDataRoot)
-    $connectorState = Read-AIChatConnectorDataJson -Path $paths.ConnectorStatePath
+    $connectorState = Read-AIChatConnectorDataJson -Path $connectorStatePath
     $allConnectorReceipts = @($connectorState.delivery_receipts)
     $seenIds = @($connectorState.seen_ids)
     $outboundSeenIds = @($connectorState.outbound_seen_ids)

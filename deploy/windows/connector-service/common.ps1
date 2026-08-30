@@ -46,6 +46,114 @@ function Get-AIChatConnectorDataRoot {
     return [IO.Path]::GetFullPath((Join-Path (Get-AIChatUserProfile) ".aichat\codex-connector"))
 }
 
+function Get-AIChatConnectorMappingDigest {
+    param([Parameter(Mandatory = $true)]$Settings)
+
+    # Keep this namespace entirely derived from trusted local mapping settings.
+    # Relay messages never participate in path selection. The driver and host
+    # labels are explicit so future packaged drivers cannot alias this state.
+    $canonical = "aichat-windows-mapping-v1`0app-server`0local-agent`0" +
+        [string]$Settings.expected_agent_id + "`0" +
+        [string]$Settings.channel_id + "`0" + [string]$Settings.target_thread_id
+    return Get-AIChatSha256Text -Value $canonical
+}
+
+function New-AIChatConnectorMappingState {
+    param(
+        [Parameter(Mandatory = $true)]$Settings,
+        $PreviousSettings,
+        $PreviousMappingState
+    )
+
+    $digest = Get-AIChatConnectorMappingDigest -Settings $Settings
+    $stateBasename = "state-$digest.json"
+    $mode = "mapping-digest"
+    if ($null -ne $PreviousSettings -and
+        (Get-AIChatConnectorMappingDigest -Settings $PreviousSettings) -eq $digest) {
+        if ($null -eq $PreviousMappingState) {
+            # An installation made before mapping-state.json used state.json.
+            # Preserve that exact default for an unchanged mapping; do not move,
+            # copy, delete, or silently adopt it for a different mapping.
+            $stateBasename = "state.json"
+            $mode = "legacy-default"
+        } else {
+            $stateBasename = [string]$PreviousMappingState.state_basename
+            $mode = [string]$PreviousMappingState.state_mode
+        }
+    }
+    return [pscustomobject][ordered]@{
+        schema_version = 1
+        kind = "aichat-windows-connector-mapping-state"
+        mapping_digest = $digest
+        driver = "app-server"
+        host_binding = "local"
+        state_mode = $mode
+        state_basename = $stateBasename
+    }
+}
+
+function Assert-AIChatConnectorMappingState {
+    param(
+        [Parameter(Mandatory = $true)]$MappingState,
+        [Parameter(Mandatory = $true)]$Settings
+    )
+
+    $supported = @(
+        "schema_version", "kind", "mapping_digest", "driver",
+        "host_binding", "state_mode", "state_basename"
+    )
+    foreach ($name in @($MappingState.PSObject.Properties.Name)) {
+        if ($supported -notcontains $name) {
+            throw "Windows connector mapping state contains an unsupported field"
+        }
+    }
+    foreach ($required in $supported) {
+        if (-not $MappingState.PSObject.Properties[$required]) {
+            throw "Windows connector mapping state is incomplete"
+        }
+    }
+    $digest = Get-AIChatConnectorMappingDigest -Settings $Settings
+    if ([int]$MappingState.schema_version -ne 1 -or
+        [string]$MappingState.kind -ne "aichat-windows-connector-mapping-state" -or
+        [string]$MappingState.mapping_digest -notmatch '^[a-f0-9]{64}$' -or
+        [string]$MappingState.mapping_digest -ne $digest -or
+        [string]$MappingState.driver -ne "app-server" -or
+        [string]$MappingState.host_binding -ne "local") {
+        throw "Windows connector mapping state does not match the fixed local mapping"
+    }
+    $expectedBasename = "state-$digest.json"
+    if ([string]$MappingState.state_mode -eq "legacy-default") {
+        if ([string]$MappingState.state_basename -ne "state.json") {
+            throw "Legacy connector mapping state must retain state.json"
+        }
+    } elseif ([string]$MappingState.state_mode -eq "mapping-digest") {
+        if ([string]$MappingState.state_basename -ne $expectedBasename) {
+            throw "Digest connector mapping state basename is invalid"
+        }
+    } else {
+        throw "Windows connector mapping state mode is invalid"
+    }
+    return $MappingState
+}
+
+function Get-AIChatConnectorStatePath {
+    param(
+        [Parameter(Mandatory = $true)]$Paths,
+        [Parameter(Mandatory = $true)]$Settings,
+        [Parameter(Mandatory = $true)]$MappingState
+    )
+
+    [void](Assert-AIChatConnectorMappingState `
+        -MappingState $MappingState `
+        -Settings $Settings)
+    $path = Join-Path $Paths.ConnectorDataRoot ([string]$MappingState.state_basename)
+    $resolved = Assert-AIChatPathWithinRoot -Path $path -Root $Paths.ConnectorDataRoot
+    if ((Split-Path -Leaf $resolved) -ne [string]$MappingState.state_basename) {
+        throw "Connector mapping state path must be a direct child of the data root"
+    }
+    return $resolved
+}
+
 function Assert-AIChatSupervisedResultEgressCheckpoint {
     param(
         [Parameter(Mandatory = $true)]$Settings,
@@ -1659,6 +1767,7 @@ function Get-AIChatConnectorPaths {
         ProtectedRoot = $protectedRoot
         StateRoot = [IO.Path]::GetFullPath($state)
         SettingsPath = Join-Path $state "settings.json"
+        MappingStatePath = Join-Path $state "mapping-state.json"
         LauncherPath = Join-Path $state "launcher.ps1"
         CommonPath = Join-Path $state "common.ps1"
         ActiveReleasePath = Join-Path $state "active-release.json"
@@ -1668,7 +1777,7 @@ function Get-AIChatConnectorPaths {
         TransactionPath = Join-Path $state "transaction.json"
         StagingDirectory = Join-Path $state "staging"
         ConnectorDataRoot = Get-AIChatConnectorDataRoot
-        ConnectorStatePath = Join-Path (Get-AIChatConnectorDataRoot) "state.json"
+        ConnectorLegacyStatePath = Join-Path (Get-AIChatConnectorDataRoot) "state.json"
         TaskName = $taskName
         TaskPath = $taskPath
     }
@@ -2009,6 +2118,7 @@ function Get-AIChatDeploymentTargets {
         common = $Paths.CommonPath
         launcher = $Paths.LauncherPath
         settings = $Paths.SettingsPath
+        mapping_state = $Paths.MappingStatePath
         active_release = $Paths.ActiveReleasePath
     }
 }
@@ -2072,7 +2182,7 @@ function Assert-AIChatTransactionManifest {
     $schemaVersion = if ($Manifest.PSObject.Properties["schema_version"]) {
         [int]$Manifest.schema_version
     } else { 0 }
-    if ($schemaVersion -notin @(1, 2) -or
+    if ($schemaVersion -notin @(1, 2, 3) -or
         -not $Manifest.PSObject.Properties["kind"] -or
         [string]$Manifest.kind -ne "aichat-windows-connector-transaction" -or
         -not $Manifest.PSObject.Properties["transaction_id"] -or
@@ -2105,7 +2215,24 @@ function Assert-AIChatTransactionManifest {
             }
         }
     }
-    if ($seen.Count -ne $targets.Count) {
+    $hasMappingState = $seen.Contains("mapping_state")
+    $hasConnectorAcl = $null -ne $Manifest.PSObject.Properties["connector_data_acl"]
+    $legacyV1 = $schemaVersion -eq 1 -and
+        -not $hasMappingState -and -not $hasConnectorAcl -and
+        $seen.Count -eq ($targets.Count - 1)
+    # Two schema-v2 builds existed independently before integration. Accept
+    # either historical shape fail-closed, but emit only schema v3 below.
+    $aclOnlyV2 = $schemaVersion -eq 2 -and
+        -not $hasMappingState -and $hasConnectorAcl -and
+        $seen.Count -eq ($targets.Count - 1)
+    $mappingOnlyV2 = $schemaVersion -eq 2 -and
+        $hasMappingState -and -not $hasConnectorAcl -and
+        $seen.Count -eq $targets.Count
+    $integratedV3 = $schemaVersion -eq 3 -and
+        $hasMappingState -and $hasConnectorAcl -and
+        $seen.Count -eq $targets.Count
+    if (-not $legacyV1 -and -not $aclOnlyV2 -and
+        -not $mappingOnlyV2 -and -not $integratedV3) {
         throw "Windows connector transaction does not cover every fixed file target"
     }
     if (-not $Manifest.PSObject.Properties["task"] -or
@@ -2113,13 +2240,8 @@ function Assert-AIChatTransactionManifest {
         [string]$Manifest.new_release_id -ne [string]$Manifest.transaction_id) {
         throw "Windows connector transaction task/release snapshot is invalid"
     }
-    if ($schemaVersion -eq 2) {
-        if (-not $Manifest.PSObject.Properties["connector_data_acl"]) {
-            throw "Windows connector transaction is missing its ACL rollback snapshot"
-        }
+    if ($hasConnectorAcl) {
         Assert-AIChatConnectorDataAclSnapshot -Snapshot $Manifest.connector_data_acl
-    } elseif ($Manifest.PSObject.Properties["connector_data_acl"]) {
-        throw "Legacy Windows connector transaction has unexpected ACL rollback data"
     }
     if ([bool]$Manifest.task.existed) {
         if ([bool]$Manifest.task.enabled -or
@@ -2150,6 +2272,9 @@ function Invoke-AIChatManifestRollback {
     }
     $targets = Get-AIChatDeploymentTargets -Paths $Paths
     $entries = @($Manifest.files)
+    $manifestHasMappingState = @(
+        $entries | Where-Object { [string]$_.id -eq "mapping_state" }
+    ).Count -eq 1
     [array]::Reverse($entries)
     foreach ($entry in $entries) {
         $target = [string]$targets[[string]$entry.id]
@@ -2162,6 +2287,13 @@ function Invoke-AIChatManifestRollback {
             [void](Assert-AIChatPrivateFile -Path $target -ProtectedRoot $Paths.ProtectedRoot)
             Remove-Item -LiteralPath $target -Force
         }
+    }
+    if (-not $manifestHasMappingState -and
+        (Test-Path -LiteralPath $Paths.MappingStatePath)) {
+        [void](Assert-AIChatPrivateFile `
+            -Path $Paths.MappingStatePath `
+            -ProtectedRoot $Paths.ProtectedRoot)
+        Remove-Item -LiteralPath $Paths.MappingStatePath -Force
     }
 
     $release = Join-Path $Paths.ReleasesDirectory ([string]$Manifest.new_release_id)
@@ -2179,7 +2311,8 @@ function Invoke-AIChatManifestRollback {
         Move-Item -LiteralPath $release -Destination $failed
     }
     Restore-AIChatTaskSnapshot -Snapshot $Manifest.task -Paths $Paths
-    if ($RestoreConnectorDataAcl -and [int]$Manifest.schema_version -eq 2) {
+    if ($RestoreConnectorDataAcl -and
+        $Manifest.PSObject.Properties["connector_data_acl"]) {
         Restore-AIChatConnectorDataAclSnapshot `
             -Snapshot $Manifest.connector_data_acl `
             -Path $Paths.ConnectorDataRoot

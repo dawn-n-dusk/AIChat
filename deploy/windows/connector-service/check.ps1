@@ -36,6 +36,7 @@ if (Test-Path -LiteralPath $paths.TransactionPath) {
 }
 
 $settings = $null
+$mappingState = $null
 try {
     $settings = Get-AIChatConnectorSettings `
         -Path $paths.SettingsPath `
@@ -44,6 +45,22 @@ try {
     Report-AIChatCheck "settings" $true "fixed mapping and binary hashes validated; values suppressed"
 } catch {
     Report-AIChatCheck "settings" $false $_.Exception.Message
+}
+if ($null -ne $settings) {
+    try {
+        $mappingState = Read-AIChatPrivateJson `
+            -Path $paths.MappingStatePath `
+            -ProtectedRoot $paths.ProtectedRoot
+        [void](Get-AIChatConnectorStatePath `
+            -Paths $paths `
+            -Settings $settings `
+            -MappingState $mappingState)
+        Report-AIChatCheck "mapping-state" $true "trusted mapping digest selects the local connector state namespace"
+    } catch {
+        Report-AIChatCheck "mapping-state" $false $_.Exception.Message
+    }
+} else {
+    Report-AIChatCheck "mapping-state" $false "settings unavailable"
 }
 
 try {
@@ -60,10 +77,11 @@ try {
         $launcherOutput -notmatch "(?m)^deliver_types=$([regex]::Escape($expectedDeliverTypes))\s*`$" -or
         $launcherOutput -notmatch "(?m)^automatic_egress=$expectedEgress\s*`$" -or
         $launcherOutput -notmatch '(?m)^lifecycle_status_egress=false\s*$' -or
-        $launcherOutput -notmatch '(?m)^state_file_fixed=true\s*$') {
+        $launcherOutput -notmatch '(?m)^state_file_fixed=true\s*$' -or
+        $launcherOutput -notmatch '(?m)^state_file_mapping_scoped=true\s*$') {
         throw "installed launcher did not report the fixed connector contract"
     }
-    Report-AIChatCheck "launcher" $true "fixed inbound types ($expectedDeliverTypes), request-only reply eligibility, controlled result egress, WebSocket, fixed state, app-server"
+    Report-AIChatCheck "launcher" $true "fixed inbound types ($expectedDeliverTypes), request-only reply eligibility, controlled result egress, WebSocket, mapping-scoped state, app-server"
 } catch {
     Report-AIChatCheck "launcher" $false $_.Exception.Message
 }

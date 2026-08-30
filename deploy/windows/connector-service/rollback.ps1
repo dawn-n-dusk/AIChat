@@ -13,6 +13,8 @@ Write-Host "token_read=false"
 if (-not $Apply -or $WhatIfPreference) {
     Write-Host "dry_run=true"
     Write-Host "mutation_performed=false"
+    Write-Host "mapping_state_rollback=deferred_until_apply"
+    Write-Host "connector_data_mutated=false"
     exit 0
 }
 

@@ -74,6 +74,8 @@ WebSocket delivery is only a low-latency wake signal. Startup, reconnect, releva
 
 The connector core owns Relay cursoring, exact sender and message-type allowlists, deduplication, persisted per-sender turn budgets, idempotent delivery receipts, length-delimited untrusted-content envelopes, and model-declared structured replies. A separately installed driver owns the Codex-specific delivery surface. Remote message text, references, or metadata cannot choose the target session, host, IPC endpoint, working directory, approval policy, sandbox, or fallback mode.
 
+The Windows package also namespaces connector cursor/receipt state by a stable SHA-256 digest of its trusted local app-server, Agent identity, channel, and task binding. Its instance-lock metadata is derived from that selected state path; app-server driver receipts keep their independent binding-scoped filenames. An unchanged pre-namespace installation may continue using legacy `state.json`, but changing the fixed mapping creates a new digest-scoped file and never moves or deletes the legacy state.
+
 Drivers with their own durable receipt capacity participate in connector-first release: the connector persists a deterministic victim or operator drop before the driver handles the idempotent `delivered`, `dropped`, or `evicted` resolution. Fresh permanent egress-policy failures enter connector-owned durable quarantine before the driver stops replaying them.
 
 Both built-in drivers require a connector-owned session marker, one fixed absolute working directory, `approvalPolicy=never`, and either `readOnly` or bounded `workspaceWrite` with `networkAccess=false`. These controls constrain unattended work; they do not make files readable by the same OS user confidential from the model.
