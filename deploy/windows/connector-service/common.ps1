@@ -359,15 +359,19 @@ function Assert-AIChatConnectorDataAcl {
     ))
     $expectedSids = @($currentSid, $script:AIChatLocalSystemSid)
     $actualSids = @($rules | ForEach-Object { $_.IdentityReference.Value })
-    $legacy = $AllowLegacyCurrentSidOnly -and
+    $legacyCurrentSidOnly = $AllowLegacyCurrentSidOnly -and
         $rules.Count -eq 1 -and
         $actualSids[0] -eq $currentSid
-    if (-not $legacy -and
-        ($rules.Count -ne 2 -or
-         @($expectedSids | Where-Object { $actualSids -notcontains $_ }).Count -ne 0)) {
+    $trustedPair = $rules.Count -eq 2 -and
+        @($expectedSids | Where-Object { $actualSids -notcontains $_ }).Count -eq 0
+    $migratableInherited = $AllowLegacyCurrentSidOnly -and
+        -not $acl.AreAccessRulesProtected -and
+        ($legacyCurrentSidOnly -or $trustedPair) -and
+        @($rules | Where-Object { -not $_.IsInherited }).Count -eq 0
+    if (-not $legacyCurrentSidOnly -and -not $trustedPair) {
         throw "Connector state/receipt ACL contains an untrusted or missing principal: $Path"
     }
-    if (-not $legacy -and -not $acl.AreAccessRulesProtected) {
+    if (-not $acl.AreAccessRulesProtected -and -not $migratableInherited) {
         throw "Connector state/receipt ACL inheritance is not protected: $Path"
     }
 
@@ -384,7 +388,7 @@ function Assert-AIChatConnectorDataAcl {
             $rule.PropagationFlags -ne [Security.AccessControl.PropagationFlags]::None) {
             throw "Connector state/receipt ACL grants unexpected rights: $Path"
         }
-        if ($legacy -and $rule.IsInherited) { continue }
+        if ($migratableInherited) { continue }
         if ($rule.IsInherited -or $rule.InheritanceFlags -ne $expectedInheritance) {
             throw "Connector state/receipt ACL inheritance contract is invalid: $Path"
         }
