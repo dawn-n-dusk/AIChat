@@ -367,6 +367,7 @@ def test_connector_atomic_windows_writes_protect_acl_before_rename() -> None:
     rename_at = source.index("await rename(temporary, path)")
     assert protect_at < rename_at
     assert '"icacls.exe"' in source
+    assert '"/setowner"' in source
     assert '"/inheritance:r"' in source
     assert '"/grant:r"' in source
     assert "WINDOWS_SYSTEM_SID" in source

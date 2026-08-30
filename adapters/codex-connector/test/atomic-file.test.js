@@ -13,6 +13,11 @@ test("Windows private writes remove inheritance and allow only the user and Loca
   assert.deepEqual(calls, [
     [
       "icacls.exe",
+      ["C:\\private\\state.tmp", "/setowner", "*S-1-5-21-100-200-300-400"],
+      { windowsHide: true },
+    ],
+    [
+      "icacls.exe",
       [
         "C:\\private\\state.tmp",
         "/inheritance:r",

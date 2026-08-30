@@ -46,6 +46,7 @@ $junctionPath = Join-Path $protectedRoot "ci-connector-junction-$testId"
 $aclProbe = Join-Path $protectedRoot "ci-connector-acl-$testId.json"
 $inheritedDataProbe = Join-Path $paths.ConnectorDataRoot "ci-inherited-$testId.json"
 $broadDataProbe = Join-Path $paths.ConnectorDataRoot "ci-broad-$testId.json"
+$nodeDataProbe = Join-Path $paths.ConnectorDataRoot "ci-node-$testId.json"
 $allOutput = [Text.StringBuilder]::new()
 $codexHome = Join-Path (Get-AIChatUserProfile) ".codex"
 $createdCodexHome = -not (Test-Path -LiteralPath $codexHome)
@@ -459,6 +460,31 @@ public static class Program {
         -Action { Initialize-AIChatConnectorDataDirectory -Path $paths.ConnectorDataRoot }
     Set-AIChatConnectorDataAcl -Path $broadDataProbe
     Remove-Item -LiteralPath $broadDataProbe -Force
+
+    $env:AICHAT_WINDOWS_PRIVATE_SID = Get-AIChatCurrentSid
+    & $nodePath `
+        (Join-Path $PSScriptRoot "fixtures\write_connector_checkpoint.mjs") `
+        $nodeDataProbe
+    $env:AICHAT_WINDOWS_PRIVATE_SID = $null
+    if ($LASTEXITCODE -ne 0) { throw "Node Windows checkpoint ACL probe failed" }
+    [void](Assert-AIChatConnectorDataFile -Path $nodeDataProbe)
+    $nodeProbeAcl = Get-Acl -LiteralPath $nodeDataProbe
+    $nodeProbeOwner = $nodeProbeAcl.GetOwner(
+        [Security.Principal.SecurityIdentifier]
+    ).Value
+    $nodeProbeSids = @($nodeProbeAcl.GetAccessRules(
+        $true,
+        $true,
+        [Security.Principal.SecurityIdentifier]
+    ) | ForEach-Object { $_.IdentityReference.Value })
+    if ($nodeProbeOwner -ne (Get-AIChatCurrentSid) -or
+        -not $nodeProbeAcl.AreAccessRulesProtected -or
+        $nodeProbeSids.Count -ne 2 -or
+        $nodeProbeSids -notcontains (Get-AIChatCurrentSid) -or
+        $nodeProbeSids -notcontains "S-1-5-18") {
+        throw "Node Windows checkpoint ACL probe did not persist the exact trusted contract"
+    }
+    Remove-Item -LiteralPath $nodeDataProbe -Force
     $launcherOutput = & $paths.LauncherPath `
         -StateRoot $paths.StateRoot `
         -CheckSettings *>&1 | Out-String
@@ -679,6 +705,7 @@ public static class Program {
 } finally {
     $env:AICHAT_WINDOWS_CONNECTOR_TEST_FAILURE = $null
     $env:AICHAT_CI_CODEX_EXEC_CANARY = $null
+    $env:AICHAT_WINDOWS_PRIVATE_SID = $null
     if ($null -ne (Get-AIChatConnectorTask)) {
         try {
             $task = Get-AIChatConnectorTask
@@ -695,6 +722,7 @@ public static class Program {
     foreach ($path in @(
         $inheritedDataProbe,
         $broadDataProbe,
+        $nodeDataProbe,
         $hardlinkAlias,
         $unsafeSettingsPath,
         $settingsPath,

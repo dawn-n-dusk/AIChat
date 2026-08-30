@@ -57,6 +57,11 @@ export async function protectWindowsPrivateFile(
   try {
     await execFileImpl(
       "icacls.exe",
+      [path, "/setowner", `*${currentSid}`],
+      { windowsHide: true },
+    );
+    await execFileImpl(
+      "icacls.exe",
       [
         path,
         "/inheritance:r",
