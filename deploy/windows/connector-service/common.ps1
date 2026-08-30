@@ -2,6 +2,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $script:AIChatConnectorTaskDescriptionPrefix = "AIChat Windows Codex Connector; managed-by=AIChat; sid="
+$script:AIChatLocalSystemSid = "S-1-5-18"
 
 function Get-AIChatCurrentSid {
     if ($env:OS -ne "Windows_NT") {
@@ -331,6 +332,147 @@ function Set-AIChatCurrentSidOnlyAcl {
     }
 }
 
+function Assert-AIChatConnectorDataAcl {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [switch]$AllowLegacyCurrentSidOnly
+    )
+
+    $currentSid = Get-AIChatCurrentSid
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+        throw "Connector state/receipt paths must not be reparse points: $Path"
+    }
+    if (-not $item.PSIsContainer -and (Get-AIChatHardLinkCount -Path $Path) -ne 1) {
+        throw "Connector state/receipt files must not have hardlink aliases: $Path"
+    }
+
+    $acl = Get-Acl -LiteralPath $Path
+    $ownerSid = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+    if ($ownerSid -ne $currentSid) {
+        throw "Connector state/receipt path owner must be the current Windows SID: $Path"
+    }
+    $rules = @($acl.GetAccessRules(
+        $true,
+        $true,
+        [Security.Principal.SecurityIdentifier]
+    ))
+    $expectedSids = @($currentSid, $script:AIChatLocalSystemSid)
+    $actualSids = @($rules | ForEach-Object { $_.IdentityReference.Value })
+    $legacy = $AllowLegacyCurrentSidOnly -and
+        $rules.Count -eq 1 -and
+        $actualSids[0] -eq $currentSid
+    if (-not $legacy -and
+        ($rules.Count -ne 2 -or
+         @($expectedSids | Where-Object { $actualSids -notcontains $_ }).Count -ne 0)) {
+        throw "Connector state/receipt ACL contains an untrusted or missing principal: $Path"
+    }
+    if (-not $legacy -and -not $acl.AreAccessRulesProtected) {
+        throw "Connector state/receipt ACL inheritance is not protected: $Path"
+    }
+
+    $fullControl = [Security.AccessControl.FileSystemRights]::FullControl
+    $expectedInheritance = if ($item.PSIsContainer) {
+        [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+            [Security.AccessControl.InheritanceFlags]::ObjectInherit
+    } else {
+        [Security.AccessControl.InheritanceFlags]::None
+    }
+    foreach ($rule in $rules) {
+        if ($rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or
+            $rule.FileSystemRights -ne $fullControl -or
+            $rule.PropagationFlags -ne [Security.AccessControl.PropagationFlags]::None) {
+            throw "Connector state/receipt ACL grants unexpected rights: $Path"
+        }
+        if ($legacy -and $rule.IsInherited) { continue }
+        if ($rule.IsInherited -or $rule.InheritanceFlags -ne $expectedInheritance) {
+            throw "Connector state/receipt ACL inheritance contract is invalid: $Path"
+        }
+    }
+}
+
+function Set-AIChatConnectorDataAcl {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+        throw "Refusing to protect a connector state/receipt reparse point: $Path"
+    }
+    if (-not $item.PSIsContainer -and (Get-AIChatHardLinkCount -Path $Path) -ne 1) {
+        throw "Refusing to protect a connector state/receipt file with hardlink aliases: $Path"
+    }
+    $security = if ($item.PSIsContainer) {
+        [Security.AccessControl.DirectorySecurity]::new()
+    } else {
+        [Security.AccessControl.FileSecurity]::new()
+    }
+    $security.SetOwner($identity.User)
+    $security.SetAccessRuleProtection($true, $false)
+    foreach ($sidValue in @($identity.User.Value, $script:AIChatLocalSystemSid)) {
+        $sid = [Security.Principal.SecurityIdentifier]::new($sidValue)
+        $rule = if ($item.PSIsContainer) {
+            $inheritance = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+                [Security.AccessControl.InheritanceFlags]::ObjectInherit
+            [Security.AccessControl.FileSystemAccessRule]::new(
+                $sid,
+                [Security.AccessControl.FileSystemRights]::FullControl,
+                $inheritance,
+                [Security.AccessControl.PropagationFlags]::None,
+                [Security.AccessControl.AccessControlType]::Allow
+            )
+        } else {
+            [Security.AccessControl.FileSystemAccessRule]::new(
+                $sid,
+                [Security.AccessControl.FileSystemRights]::FullControl,
+                [Security.AccessControl.AccessControlType]::Allow
+            )
+        }
+        [void]$security.AddAccessRule($rule)
+    }
+    Set-Acl -LiteralPath $Path -AclObject $security
+    Assert-AIChatConnectorDataAcl -Path $Path
+}
+
+function Initialize-AIChatConnectorDataDirectory {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $profile = Get-AIChatUserProfile
+    $privateRoot = Join-Path $profile ".aichat"
+    $target = Assert-AIChatPathWithinRoot -Path $Path -Root $privateRoot
+    if (-not $target.Equals((Get-AIChatConnectorDataRoot), [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Connector state/receipt directory must use the fixed user-profile path"
+    }
+    [void](Initialize-AIChatPrivateDirectory `
+        -Path $privateRoot `
+        -ProtectedRoot $privateRoot `
+        -AnchorRoot $profile)
+    [void](Assert-AIChatNoReparsePath -Path $target -StopAt $profile -LeafMayBeMissing)
+
+    $existing = Get-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue
+    if ($null -eq $existing) {
+        New-Item -ItemType Directory -Path $target | Out-Null
+    } elseif (-not $existing.PSIsContainer) {
+        throw "Connector state/receipt path is occupied by a file"
+    } else {
+        Assert-AIChatConnectorDataAcl -Path $target -AllowLegacyCurrentSidOnly
+    }
+
+    $items = @(Get-ChildItem -LiteralPath $target -Force)
+    foreach ($item in $items) {
+        if ($item.PSIsContainer) {
+            throw "Connector state/receipt directory must not contain subdirectories"
+        }
+        Assert-AIChatConnectorDataAcl -Path $item.FullName -AllowLegacyCurrentSidOnly
+    }
+    Set-AIChatConnectorDataAcl -Path $target
+    foreach ($item in $items) {
+        Set-AIChatConnectorDataAcl -Path $item.FullName
+    }
+    [void](Assert-AIChatConnectorDataTree -Path $target)
+    return $target
+}
+
 function Initialize-AIChatPrivateDirectory {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -399,7 +541,17 @@ function Assert-AIChatPrivateDirectoryTree {
 function Assert-AIChatConnectorDataTree {
     param([Parameter(Mandatory = $true)][string]$Path)
     $privateRoot = Join-Path (Get-AIChatUserProfile) ".aichat"
-    $root = Assert-AIChatPrivateDirectoryTree -Path $Path -ProtectedRoot $privateRoot
+    [void](Assert-AIChatPrivateDirectoryTree -Path $privateRoot -ProtectedRoot $privateRoot)
+    $root = Assert-AIChatPathWithinRoot -Path $Path -Root $privateRoot
+    if (-not $root.Equals((Get-AIChatConnectorDataRoot), [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Connector state/receipt directory must use the fixed user-profile path"
+    }
+    [void](Assert-AIChatNoReparsePath -Path $root -StopAt (Get-AIChatUserProfile))
+    $rootItem = Get-Item -LiteralPath $root -Force -ErrorAction Stop
+    if (-not $rootItem.PSIsContainer) {
+        throw "Connector state/receipt root must be a directory"
+    }
+    Assert-AIChatConnectorDataAcl -Path $root
     foreach ($item in @(Get-ChildItem -LiteralPath $root -Force)) {
         if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
             throw "Connector state/receipt directory contains a reparse point"
@@ -410,29 +562,7 @@ function Assert-AIChatConnectorDataTree {
         if ((Get-AIChatHardLinkCount -Path $item.FullName) -ne 1) {
             throw "Connector state/receipt file has a hardlink alias"
         }
-        $acl = Get-Acl -LiteralPath $item.FullName
-        $ownerSid = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
-        $rules = @($acl.GetAccessRules(
-            $true,
-            $true,
-            [Security.Principal.SecurityIdentifier]
-        ))
-        if ($ownerSid -ne (Get-AIChatCurrentSid) -or $rules.Count -ne 1) {
-            throw "Connector state/receipt file ACL is not current-SID-only"
-        }
-        $rule = $rules[0]
-        if ($rule.IdentityReference.Value -ne (Get-AIChatCurrentSid) -or
-            $rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or
-            $rule.FileSystemRights -ne [Security.AccessControl.FileSystemRights]::FullControl) {
-            throw "Connector state/receipt file ACL is not current-SID-only"
-        }
-        if ($rule.IsInherited) {
-            if ($acl.AreAccessRulesProtected) {
-                throw "Connector state/receipt file reports inconsistent ACL inheritance"
-            }
-        } elseif (-not $acl.AreAccessRulesProtected) {
-            throw "Connector state/receipt file ACL is unexpectedly inheritable"
-        }
+        Assert-AIChatConnectorDataAcl -Path $item.FullName
     }
     return $root
 }

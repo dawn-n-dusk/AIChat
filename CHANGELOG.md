@@ -8,6 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Protect Windows connector state, app-server receipt, and lock-metadata files
+  before atomic rename with explicit current-user and LocalSystem ACLs; migrate
+  only the narrow legacy current-user ACL shape during install, upgrade, or
+  rollback, and reject inherited broad principals fail-closed.
 - Windows supervised one-shot acceptance now distinguishes a model-declared
   Relay `result` from a locally suppressed lifecycle completion when automatic
   result egress is enabled, binds the driver event to the persisted Relay

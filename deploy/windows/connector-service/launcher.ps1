@@ -174,6 +174,7 @@ $processInfo.EnvironmentVariables["AICHAT_MAX_TURNS_PER_SENDER_PER_HOUR"] = `
 $processInfo.EnvironmentVariables["AICHAT_MAX_DELIVERIES_PER_RECOVERY"] = `
     [string]$settings.max_deliveries_per_recovery
 $processInfo.EnvironmentVariables["AICHAT_STATE_FILE"] = $paths.ConnectorStatePath
+$processInfo.EnvironmentVariables["AICHAT_WINDOWS_PRIVATE_SID"] = Get-AIChatCurrentSid
 $processInfo.EnvironmentVariables["CODEX_APP_SERVER_RECEIPT_DIR"] = $paths.ConnectorDataRoot
 $processInfo.EnvironmentVariables["CODEX_DRIVER"] = "app-server"
 $processInfo.EnvironmentVariables["CODEX_CONNECTOR_TASK_OWNED"] = "true"

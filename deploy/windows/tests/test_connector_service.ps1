@@ -44,6 +44,8 @@ $hardlinkAlias = Join-Path $protectedRoot "ci-connector-hardlink-$testId.json"
 $junctionTarget = Join-Path $protectedRoot "ci-connector-junction-target-$testId"
 $junctionPath = Join-Path $protectedRoot "ci-connector-junction-$testId"
 $aclProbe = Join-Path $protectedRoot "ci-connector-acl-$testId.json"
+$inheritedDataProbe = Join-Path $paths.ConnectorDataRoot "ci-inherited-$testId.json"
+$broadDataProbe = Join-Path $paths.ConnectorDataRoot "ci-broad-$testId.json"
 $allOutput = [Text.StringBuilder]::new()
 $codexHome = Join-Path (Get-AIChatUserProfile) ".codex"
 $createdCodexHome = -not (Test-Path -LiteralPath $codexHome)
@@ -419,6 +421,36 @@ public static class Program {
         -Path $paths.StateRoot `
         -ProtectedRoot $paths.ProtectedRoot)
     [void](Assert-AIChatConnectorDataTree -Path $paths.ConnectorDataRoot)
+    $connectorDataAcl = Get-Acl -LiteralPath $paths.ConnectorDataRoot
+    $connectorDataSids = @($connectorDataAcl.GetAccessRules(
+        $true,
+        $true,
+        [Security.Principal.SecurityIdentifier]
+    ) | ForEach-Object { $_.IdentityReference.Value })
+    if (-not $connectorDataAcl.AreAccessRulesProtected -or
+        $connectorDataSids.Count -ne 2 -or
+        $connectorDataSids -notcontains (Get-AIChatCurrentSid) -or
+        $connectorDataSids -notcontains "S-1-5-18") {
+        throw "Connector data root does not have the protected user and LocalSystem ACL"
+    }
+
+    [IO.File]::WriteAllText($inheritedDataProbe, "{}`n", [Text.UTF8Encoding]::new($false))
+    Invoke-ExpectedFailure `
+        -Label "inherited connector data ACL check" `
+        -Action { Assert-AIChatConnectorDataTree -Path $paths.ConnectorDataRoot }
+    [void](Initialize-AIChatConnectorDataDirectory -Path $paths.ConnectorDataRoot)
+    [void](Assert-AIChatConnectorDataTree -Path $paths.ConnectorDataRoot)
+    Remove-Item -LiteralPath $inheritedDataProbe -Force
+
+    [IO.File]::WriteAllText($broadDataProbe, "{}`n", [Text.UTF8Encoding]::new($false))
+    Set-AIChatConnectorDataAcl -Path $broadDataProbe
+    icacls.exe $broadDataProbe /grant "*S-1-1-0:(R)" | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Could not create broad connector ACL probe" }
+    Invoke-ExpectedFailure `
+        -Label "broad connector data ACL migration check" `
+        -Action { Initialize-AIChatConnectorDataDirectory -Path $paths.ConnectorDataRoot }
+    Set-AIChatConnectorDataAcl -Path $broadDataProbe
+    Remove-Item -LiteralPath $broadDataProbe -Force
     $launcherOutput = & $paths.LauncherPath `
         -StateRoot $paths.StateRoot `
         -CheckSettings *>&1 | Out-String
@@ -646,6 +678,8 @@ public static class Program {
         & cmd.exe /d /c "rmdir `"$junctionPath`"" | Out-Null
     }
     foreach ($path in @(
+        $inheritedDataProbe,
+        $broadDataProbe,
         $hardlinkAlias,
         $unsafeSettingsPath,
         $settingsPath,

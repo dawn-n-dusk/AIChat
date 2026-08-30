@@ -1,6 +1,12 @@
 import { randomUUID } from "node:crypto";
+import { execFile as execFileCallback } from "node:child_process";
 import { chmod, lstat, mkdir, open, rename, unlink } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
+import { promisify } from "node:util";
+
+const execFile = promisify(execFileCallback);
+const WINDOWS_SYSTEM_SID = "S-1-5-18";
+const WINDOWS_SID = /^S-1-(?:\d+-)+\d+$/;
 
 export async function atomicWritePrivateFile(path, payload) {
   const directory = dirname(path);
@@ -24,6 +30,7 @@ export async function atomicWritePrivateFile(path, payload) {
     await handle.sync();
     await handle.close();
     handle = null;
+    await protectWindowsPrivateFile(temporary);
     await rename(temporary, path);
     if (process.platform !== "win32") await chmod(path, 0o600);
     await syncDirectory(directory);
@@ -31,6 +38,37 @@ export async function atomicWritePrivateFile(path, payload) {
     await handle?.close().catch(() => {});
     await unlink(temporary).catch(() => {});
     throw error;
+  }
+}
+
+export async function protectWindowsPrivateFile(
+  path,
+  {
+    platform = process.platform,
+    env = process.env,
+    execFileImpl = execFile,
+  } = {},
+) {
+  if (platform !== "win32") return;
+  const currentSid = env.AICHAT_WINDOWS_PRIVATE_SID?.trim();
+  if (!currentSid) return;
+  if (!WINDOWS_SID.test(currentSid) || currentSid === WINDOWS_SYSTEM_SID) {
+    throw new Error("Windows private-file SID binding is missing or invalid");
+  }
+  try {
+    await execFileImpl(
+      "icacls.exe",
+      [
+        path,
+        "/inheritance:r",
+        "/grant:r",
+        `*${currentSid}:(F)`,
+        `*${WINDOWS_SYSTEM_SID}:(F)`,
+      ],
+      { windowsHide: true },
+    );
+  } catch {
+    throw new Error("Windows private-file ACL protection failed");
   }
 }
 
