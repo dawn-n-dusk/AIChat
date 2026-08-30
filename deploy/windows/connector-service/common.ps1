@@ -2272,6 +2272,9 @@ function Invoke-AIChatManifestRollback {
     }
     $targets = Get-AIChatDeploymentTargets -Paths $Paths
     $entries = @($Manifest.files)
+    $manifestHasMappingState = @(
+        $entries | Where-Object { [string]$_.id -eq "mapping_state" }
+    ).Count -eq 1
     [array]::Reverse($entries)
     foreach ($entry in $entries) {
         $target = [string]$targets[[string]$entry.id]
@@ -2285,7 +2288,7 @@ function Invoke-AIChatManifestRollback {
             Remove-Item -LiteralPath $target -Force
         }
     }
-    if (-not $seen.Contains("mapping_state") -and
+    if (-not $manifestHasMappingState -and
         (Test-Path -LiteralPath $Paths.MappingStatePath)) {
         [void](Assert-AIChatPrivateFile `
             -Path $Paths.MappingStatePath `
