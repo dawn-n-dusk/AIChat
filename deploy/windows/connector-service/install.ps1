@@ -94,8 +94,6 @@ try {
             -Path $directory `
             -ProtectedRoot $paths.ProtectedRoot)
     }
-    [void](Initialize-AIChatConnectorDataDirectory -Path $paths.ConnectorDataRoot)
-
     if (Test-Path -LiteralPath $paths.TransactionPath -PathType Leaf) {
         $unfinished = Read-AIChatPrivateJson `
             -Path $paths.TransactionPath `
@@ -126,7 +124,8 @@ try {
             Invoke-AIChatManifestRollback `
                 -Manifest $unfinished `
                 -Paths $paths `
-                -BackupDirectory $unfinishedBackup
+                -BackupDirectory $unfinishedBackup `
+                -RestoreConnectorDataAcl
         }
         [void](Assert-AIChatPrivateFile `
             -Path $paths.TransactionPath `
@@ -143,6 +142,9 @@ try {
     if ($null -ne $existingTask) {
         Assert-AIChatTaskContract -Task $existingTask -Paths $paths
     }
+
+    $connectorDataAclSnapshot = Get-AIChatConnectorDataAclSnapshot `
+        -Path $paths.ConnectorDataRoot
 
     $transactionId = (Get-Date).ToUniversalTime().ToString("yyyyMMddTHHmmssZ") +
         "-" + [Guid]::NewGuid().ToString("N").Substring(0, 8)
@@ -178,7 +180,7 @@ try {
         }
     }
     $transaction = [pscustomobject][ordered]@{
-        schema_version = 1
+        schema_version = 2
         kind = "aichat-windows-connector-transaction"
         transaction_id = $transactionId
         created_at = (Get-Date).ToUniversalTime().ToString("o")
@@ -186,12 +188,19 @@ try {
         files = @($fileEntries)
         task = $taskSnapshot
         new_release_id = $transactionId
+        connector_data_acl = $connectorDataAclSnapshot
     }
     Write-AIChatPrivateJson `
         -Path $paths.TransactionPath `
         -Value $transaction `
         -ProtectedRoot $paths.ProtectedRoot
     Invoke-AIChatInstallFailurePoint -Name "after-journal"
+
+    # The shared connector-data ACL migration is intentionally journaled. It
+    # only tightens a prevalidated current-SID/SYSTEM DACL and never reads or
+    # rewrites an existing mapping state file.
+    [void](Initialize-AIChatConnectorDataDirectory -Path $paths.ConnectorDataRoot)
+    Invoke-AIChatInstallFailurePoint -Name "after-connector-data-acl"
 
     $stage = Initialize-AIChatPrivateDirectory `
         -Path (Join-Path $paths.StagingDirectory $transactionId) `
@@ -327,7 +336,8 @@ try {
             Invoke-AIChatManifestRollback `
                 -Manifest $transaction `
                 -Paths $paths `
-                -BackupDirectory $backupDirectory
+                -BackupDirectory $backupDirectory `
+                -RestoreConnectorDataAcl
             if (Test-Path -LiteralPath $paths.TransactionPath) {
                 Remove-Item -LiteralPath $paths.TransactionPath -Force
             }

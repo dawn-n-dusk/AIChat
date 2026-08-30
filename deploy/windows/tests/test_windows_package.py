@@ -356,6 +356,13 @@ def test_connector_service_private_path_and_hardlink_contracts_are_fail_closed()
     assert 'S-1-5-18' in common
     assert "ACL contains an untrusted or missing principal" in common
     assert "ACL inheritance is not protected" in common
+    assert "SetNamedSecurityInfo" in common
+    assert "OWNER_SECURITY_INFORMATION" in common
+    assert "DACL_SECURITY_INFORMATION" in common
+    assert "PROTECTED_DACL_SECURITY_INFORMATION" in common
+    assert "SACL_SECURITY_INFORMATION" not in common
+    assert "Set-Acl -LiteralPath $Path" not in common
+    assert "accept only the fixed private ACL contracts" in common
 
 
 def test_connector_atomic_windows_writes_protect_acl_before_rename() -> None:
@@ -402,12 +409,23 @@ def test_connector_service_journal_uses_fixed_ids_hashes_and_inverse_rollback() 
     common = (root / "common.ps1").read_text(encoding="utf-8")
     install = (root / "install.ps1").read_text(encoding="utf-8")
     rollback = (root / "rollback.ps1").read_text(encoding="utf-8")
-    assert 'schema_version = 1' in install
+    assert 'schema_version = 2' in install
     assert 'kind = "aichat-windows-connector-transaction"' in install
     assert 'status = "prepared"' in install
     assert 'Set-AIChatTransactionStatus -Status "applying"' in install
     assert 'Set-AIChatTransactionStatus -Status "applied"' in install
     assert 'Set-AIChatTransactionStatus -Status "committed"' in install
+    journal_write = install.index("-Path $paths.TransactionPath")
+    data_acl_migration = install.index(
+        "Initialize-AIChatConnectorDataDirectory -Path $paths.ConnectorDataRoot"
+    )
+    assert journal_write < data_acl_migration
+    assert 'Invoke-AIChatInstallFailurePoint -Name "after-connector-data-acl"' in install
+    assert "Get-AIChatConnectorDataAclSnapshot" in install
+    assert "connector_data_acl = $connectorDataAclSnapshot" in install
+    assert "Restore-AIChatConnectorDataAclSnapshot" in common
+    assert "-RestoreConnectorDataAcl" in install
+    assert "UNPROTECTED_DACL_SECURITY_INFORMATION" in common
     assert "Get-AIChatDeploymentTargets" in common
     assert 'common = $Paths.CommonPath' in common
     assert 'active_release = $Paths.ActiveReleasePath' in common

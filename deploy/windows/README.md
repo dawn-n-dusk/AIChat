@@ -176,11 +176,15 @@ entire installed connector runtime tree.
 The connector state root is `%USERPROFILE%\.aichat\codex-connector`. On a
 fresh profile the installer creates `%USERPROFILE%\.aichat` with a
 current-SID-only protected ACL, then gives the dedicated connector subdirectory
-exactly two protected FullControl rules: the current SID and LocalSystem. The
-connector writes state, app-server receipts, and transient lock metadata through
-an atomic Windows path that removes inheritance from every temporary file before
-rename. This prevents a durable checkpoint from becoming unreadable merely
-because the newly renamed file inherited its parent DACL.
+exactly two protected FullControl rules: the current SID and LocalSystem. ACL
+normalization uses an owner-and-DACL-only Win32 update. It never requests or
+writes a SACL, so this does not require `SeSecurityPrivilege`; the owner remains
+the current SID, inheritance remains protected, and no additional principal is
+accepted. The migration runs only after the deployment transaction journal is
+durable. The connector writes state, app-server receipts, and transient lock
+metadata through an atomic Windows path that removes inheritance from every
+temporary file before rename. This prevents a durable checkpoint from becoming
+unreadable merely because the newly renamed file inherited its parent DACL.
 
 Apply-mode install, upgrade, and rollback normalize a legacy connector data
 tree only when every existing entry is a regular, single-link file owned by the

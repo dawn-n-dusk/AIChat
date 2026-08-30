@@ -21,6 +21,9 @@ $paths = Get-AIChatConnectorPaths
 if (Test-Path -LiteralPath $paths.StateRoot) {
     throw "Refusing connector service CI because the fixed state root already exists"
 }
+if (Test-Path -LiteralPath $paths.ConnectorDataRoot) {
+    throw "Refusing connector service CI because the fixed connector data root already exists"
+}
 if ($null -ne (Get-AIChatConnectorTask)) {
     throw "Refusing connector service CI because the fixed Scheduled Task already exists"
 }
@@ -385,6 +388,17 @@ public static class Program {
         throw "Connector service WhatIf produced a side effect"
     }
 
+    $env:AICHAT_WINDOWS_CONNECTOR_TEST_FAILURE = "after-connector-data-acl"
+    Invoke-ExpectedFailure `
+        -Label "first-install connector ACL rollback" `
+        -Action { & $installer -SettingsPath $settingsPath -RepositoryRoot $repositoryRoot -Apply }
+    $env:AICHAT_WINDOWS_CONNECTOR_TEST_FAILURE = $null
+    if ((Test-Path -LiteralPath $paths.ConnectorDataRoot) -or
+        (Test-Path -LiteralPath $paths.TransactionPath) -or
+        $null -ne (Get-AIChatConnectorTask)) {
+        throw "First-install ACL failure did not restore the absent connector data root"
+    }
+
     $env:PATH = "$mockBin;$oldPath"
     $installAOutput = & $installer `
         -SettingsPath $settingsPath `
@@ -459,6 +473,33 @@ public static class Program {
         -Label "broad connector data ACL migration check" `
         -Action { Initialize-AIChatConnectorDataDirectory -Path $paths.ConnectorDataRoot }
     Set-AIChatConnectorDataAcl -Path $broadDataProbe
+    $trustedProbeSddl = (Get-Acl -LiteralPath $broadDataProbe).Sddl
+    Invoke-ExpectedFailure `
+        -Label "owner/DACL fixed-contract check" `
+        -Action {
+            Set-AIChatOwnerAndDacl `
+                -Path $broadDataProbe `
+                -AllowedSids @((Get-AIChatCurrentSid), "S-1-1-0") `
+                -IsDirectory $false
+        }
+    if ((Get-Acl -LiteralPath $broadDataProbe).Sddl -ne $trustedProbeSddl) {
+        throw "Rejected owner/DACL contract changed the protected file"
+    }
+    Remove-Item -LiteralPath $broadDataProbe -Force
+
+    [IO.File]::WriteAllText($broadDataProbe, "{}`n", [Text.UTF8Encoding]::new($false))
+    Set-AIChatCurrentSidOnlyAcl -Path $broadDataProbe
+    $legacyAclSddl = Get-AIChatOwnerAndDaclSddl -Path $broadDataProbe
+    $env:AICHAT_WINDOWS_CONNECTOR_TEST_FAILURE = "after-connector-data-acl"
+    Invoke-ExpectedFailure `
+        -Label "legacy connector ACL rollback" `
+        -Action { & $installer -SettingsPath $settingsPath -RepositoryRoot $repositoryRoot -Apply }
+    $env:AICHAT_WINDOWS_CONNECTOR_TEST_FAILURE = $null
+    if ((Get-AIChatOwnerAndDaclSddl -Path $broadDataProbe) -ne $legacyAclSddl -or
+        (Test-Path -LiteralPath $paths.TransactionPath)) {
+        throw "Connector ACL failure did not restore the exact legacy owner/DACL"
+    }
+    Assert-AIChatConnectorDataAcl -Path $broadDataProbe -AllowLegacyCurrentSidOnly
     Remove-Item -LiteralPath $broadDataProbe -Force
 
     $env:AICHAT_WINDOWS_PRIVATE_SID = Get-AIChatCurrentSid
