@@ -167,22 +167,7 @@ function Convert-AIChatIdentityReferenceToSid {
     }
 }
 
-function Set-AIChatOwnerAndDacl {
-    param(
-        [Parameter(Mandatory = $true)][string]$Path,
-        [Parameter(Mandatory = $true)][string[]]$AllowedSids,
-        [Parameter(Mandatory = $true)][bool]$IsDirectory
-    )
-
-    $ownerSid = Get-AIChatCurrentSid
-    $currentOnly = $AllowedSids.Count -eq 1 -and $AllowedSids[0] -eq $ownerSid
-    $connectorData = $AllowedSids.Count -eq 2 -and
-        $AllowedSids[0] -eq $ownerSid -and
-        $AllowedSids[1] -eq $script:AIChatLocalSystemSid
-    if (-not $currentOnly -and -not $connectorData) {
-        throw "AIChat owner/DACL updates accept only the fixed private ACL contracts"
-    }
-
+function Initialize-AIChatOwnerDaclNative {
     if (-not ("AIChat.Windows.OwnerDacl" -as [type])) {
         Add-Type -TypeDefinition @'
 using System;
@@ -196,7 +181,9 @@ namespace AIChat.Windows {
         private const uint SE_FILE_OBJECT = 1;
         private const uint OWNER_SECURITY_INFORMATION = 0x00000001;
         private const uint DACL_SECURITY_INFORMATION = 0x00000004;
+        private const uint UNPROTECTED_DACL_SECURITY_INFORMATION = 0x20000000;
         private const uint PROTECTED_DACL_SECURITY_INFORMATION = 0x80000000;
+        private const string LOCAL_SYSTEM_SID = "S-1-5-18";
 
         [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern uint SetNamedSecurityInfo(
@@ -224,37 +211,74 @@ namespace AIChat.Windows {
             out bool daclDefaulted
         );
 
-        public static void Apply(
-            string path,
-            string ownerSidValue,
-            string[] allowedSidValues,
+        private static SecurityIdentifier CurrentSid() {
+            SecurityIdentifier current = WindowsIdentity.GetCurrent().User;
+            if (current == null) throw new InvalidOperationException("Current Windows SID is unavailable");
+            return current;
+        }
+
+        private static void ValidateFixedPrincipals(
+            SecurityIdentifier owner,
+            SecurityIdentifier[] allowed
+        ) {
+            SecurityIdentifier current = CurrentSid();
+            if (!owner.Equals(current)) {
+                throw new InvalidOperationException("AIChat ACL owner must be the current Windows SID");
+            }
+            bool currentOnly = allowed.Length == 1 && allowed[0].Equals(current);
+            bool connectorData = allowed.Length == 2 &&
+                ((allowed[0].Equals(current) && allowed[1].Value == LOCAL_SYSTEM_SID) ||
+                 (allowed[1].Equals(current) && allowed[0].Value == LOCAL_SYSTEM_SID));
+            if (!currentOnly && !connectorData) {
+                throw new InvalidOperationException("AIChat ACL principals do not match a fixed private contract");
+            }
+        }
+
+        private static RawSecurityDescriptor ValidateSnapshot(
+            string sddl,
             bool isDirectory
         ) {
-            SecurityIdentifier owner = new SecurityIdentifier(ownerSidValue);
-            RawAcl dacl = new RawAcl(GenericAcl.AclRevision, allowedSidValues.Length);
-            AceFlags flags = isDirectory
-                ? AceFlags.ContainerInherit | AceFlags.ObjectInherit
-                : AceFlags.None;
-            for (int index = 0; index < allowedSidValues.Length; index++) {
-                SecurityIdentifier sid = new SecurityIdentifier(allowedSidValues[index]);
-                dacl.InsertAce(index, new CommonAce(
-                    flags,
-                    AceQualifier.AccessAllowed,
-                    (int)FileSystemRights.FullControl,
-                    sid,
-                    false,
-                    null
-                ));
+            RawSecurityDescriptor descriptor = new RawSecurityDescriptor(sddl);
+            if (descriptor.Owner == null || descriptor.DiscretionaryAcl == null ||
+                descriptor.SystemAcl != null) {
+                throw new InvalidOperationException("AIChat ACL snapshot contains unsupported security sections");
             }
-            RawSecurityDescriptor descriptor = new RawSecurityDescriptor(
-                ControlFlags.DiscretionaryAclPresent |
-                    ControlFlags.DiscretionaryAclProtected |
-                    ControlFlags.SelfRelative,
-                owner,
-                null,
-                null,
-                dacl
-            );
+            RawAcl dacl = descriptor.DiscretionaryAcl;
+            SecurityIdentifier[] allowed = new SecurityIdentifier[dacl.Count];
+            bool isProtected =
+                (descriptor.ControlFlags & ControlFlags.DiscretionaryAclProtected) != 0;
+            AceFlags inheritanceMask = AceFlags.ContainerInherit | AceFlags.ObjectInherit;
+            AceFlags expectedProtectedFlags = isDirectory ? inheritanceMask : AceFlags.None;
+            for (int index = 0; index < dacl.Count; index++) {
+                CommonAce ace = dacl[index] as CommonAce;
+                if (ace == null || ace.IsCallback ||
+                    ace.AceQualifier != AceQualifier.AccessAllowed ||
+                    ace.AccessMask != (int)FileSystemRights.FullControl) {
+                    throw new InvalidOperationException("AIChat ACL snapshot contains an unsupported ACE");
+                }
+                AceFlags flags = ace.AceFlags;
+                if (isProtected) {
+                    if (flags != expectedProtectedFlags) {
+                        throw new InvalidOperationException("AIChat protected ACL snapshot flags are invalid");
+                    }
+                } else {
+                    AceFlags allowedFlags = inheritanceMask | AceFlags.Inherited;
+                    if ((flags & AceFlags.Inherited) == AceFlags.None ||
+                        (flags & ~allowedFlags) != AceFlags.None) {
+                        throw new InvalidOperationException("AIChat inherited ACL snapshot flags are invalid");
+                    }
+                }
+                allowed[index] = ace.SecurityIdentifier;
+            }
+            ValidateFixedPrincipals(descriptor.Owner, allowed);
+            return descriptor;
+        }
+
+        private static void ApplyDescriptor(
+            string path,
+            RawSecurityDescriptor descriptor,
+            uint protectionInformation
+        ) {
             byte[] binary = new byte[descriptor.BinaryLength];
             descriptor.GetBinaryForm(binary, 0);
             GCHandle pinned = GCHandle.Alloc(binary, GCHandleType.Pinned);
@@ -282,7 +306,7 @@ namespace AIChat.Windows {
                     SE_FILE_OBJECT,
                     OWNER_SECURITY_INFORMATION |
                         DACL_SECURITY_INFORMATION |
-                        PROTECTED_DACL_SECURITY_INFORMATION,
+                        protectionInformation,
                     ownerPointer,
                     IntPtr.Zero,
                     daclPointer,
@@ -293,10 +317,78 @@ namespace AIChat.Windows {
                 pinned.Free();
             }
         }
+
+        public static void Apply(
+            string path,
+            string ownerSidValue,
+            string[] allowedSidValues,
+            bool isDirectory
+        ) {
+            SecurityIdentifier owner = new SecurityIdentifier(ownerSidValue);
+            SecurityIdentifier[] allowed = new SecurityIdentifier[allowedSidValues.Length];
+            RawAcl dacl = new RawAcl(GenericAcl.AclRevision, allowedSidValues.Length);
+            AceFlags flags = isDirectory
+                ? AceFlags.ContainerInherit | AceFlags.ObjectInherit
+                : AceFlags.None;
+            for (int index = 0; index < allowedSidValues.Length; index++) {
+                SecurityIdentifier sid = new SecurityIdentifier(allowedSidValues[index]);
+                allowed[index] = sid;
+                dacl.InsertAce(index, new CommonAce(
+                    flags,
+                    AceQualifier.AccessAllowed,
+                    (int)FileSystemRights.FullControl,
+                    sid,
+                    false,
+                    null
+                ));
+            }
+            ValidateFixedPrincipals(owner, allowed);
+            RawSecurityDescriptor descriptor = new RawSecurityDescriptor(
+                ControlFlags.DiscretionaryAclPresent |
+                    ControlFlags.DiscretionaryAclProtected |
+                    ControlFlags.SelfRelative,
+                owner,
+                null,
+                null,
+                dacl
+            );
+            ApplyDescriptor(path, descriptor, PROTECTED_DACL_SECURITY_INFORMATION);
+        }
+
+        public static void ValidateSnapshotSddl(string sddl, bool isDirectory) {
+            ValidateSnapshot(sddl, isDirectory);
+        }
+
+        public static void RestoreSnapshot(string path, string sddl, bool isDirectory) {
+            RawSecurityDescriptor descriptor = ValidateSnapshot(sddl, isDirectory);
+            uint protectionInformation =
+                (descriptor.ControlFlags & ControlFlags.DiscretionaryAclProtected) != 0
+                    ? PROTECTED_DACL_SECURITY_INFORMATION
+                    : UNPROTECTED_DACL_SECURITY_INFORMATION;
+            ApplyDescriptor(path, descriptor, protectionInformation);
+        }
     }
 }
 '@
     }
+}
+
+function Set-AIChatOwnerAndDacl {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string[]]$AllowedSids,
+        [Parameter(Mandatory = $true)][bool]$IsDirectory
+    )
+
+    $ownerSid = Get-AIChatCurrentSid
+    $currentOnly = $AllowedSids.Count -eq 1 -and $AllowedSids[0] -eq $ownerSid
+    $connectorData = $AllowedSids.Count -eq 2 -and
+        $AllowedSids[0] -eq $ownerSid -and
+        $AllowedSids[1] -eq $script:AIChatLocalSystemSid
+    if (-not $currentOnly -and -not $connectorData) {
+        throw "AIChat owner/DACL updates accept only the fixed private ACL contracts"
+    }
+    Initialize-AIChatOwnerDaclNative
 
     [AIChat.Windows.OwnerDacl]::Apply(
         [IO.Path]::GetFullPath($Path),
@@ -528,6 +620,199 @@ function Set-AIChatConnectorDataAcl {
         -AllowedSids @($identity.User.Value, $script:AIChatLocalSystemSid) `
         -IsDirectory $item.PSIsContainer
     Assert-AIChatConnectorDataAcl -Path $Path
+}
+
+function Get-AIChatOwnerAndDaclSddl {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $acl = Get-Acl -LiteralPath $Path
+    $sections = [Security.AccessControl.AccessControlSections]::Owner -bor
+        [Security.AccessControl.AccessControlSections]::Access
+    return $acl.GetSecurityDescriptorSddlForm($sections)
+}
+
+function Assert-AIChatConnectorDataAclSnapshot {
+    param([Parameter(Mandatory = $true)]$Snapshot)
+
+    if (-not $Snapshot.PSObject.Properties["schema_version"] -or
+        [int]$Snapshot.schema_version -ne 1 -or
+        -not $Snapshot.PSObject.Properties["existed"] -or
+        -not $Snapshot.PSObject.Properties["private_root_existed"] -or
+        -not $Snapshot.PSObject.Properties["entries"]) {
+        throw "Connector data ACL rollback snapshot schema is invalid"
+    }
+    $entries = @($Snapshot.entries)
+    if (-not [bool]$Snapshot.existed) {
+        if ($entries.Count -ne 0) {
+            throw "Missing connector data root cannot have ACL snapshot entries"
+        }
+        return
+    }
+    if (-not [bool]$Snapshot.private_root_existed -or $entries.Count -lt 1) {
+        throw "Existing connector data root requires a parent and ACL entries"
+    }
+
+    Initialize-AIChatOwnerDaclNative
+    $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($entry in $entries) {
+        if (-not $entry.PSObject.Properties["name"] -or
+            -not $entry.PSObject.Properties["is_directory"] -or
+            -not $entry.PSObject.Properties["sddl"] -or
+            -not $entry.PSObject.Properties["sddl_sha256"]) {
+            throw "Connector data ACL rollback entry schema is invalid"
+        }
+        $name = [string]$entry.name
+        $isRoot = $name -eq "."
+        if (-not $isRoot -and
+            ($name.Length -eq 0 -or
+             [IO.Path]::GetFileName($name) -ne $name -or
+             $name.IndexOfAny([IO.Path]::GetInvalidFileNameChars()) -ge 0)) {
+            throw "Connector data ACL rollback entry name is invalid"
+        }
+        if (-not $seen.Add($name) -or [bool]$entry.is_directory -ne $isRoot) {
+            throw "Connector data ACL rollback entries are duplicated or have an invalid type"
+        }
+        $sddl = [string]$entry.sddl
+        if ((Get-AIChatSha256Text -Value $sddl) -ne
+            ([string]$entry.sddl_sha256).ToLowerInvariant()) {
+            throw "Connector data ACL rollback entry hash is invalid"
+        }
+        [AIChat.Windows.OwnerDacl]::ValidateSnapshotSddl($sddl, $isRoot)
+    }
+    if (-not $seen.Contains(".")) {
+        throw "Connector data ACL rollback snapshot is missing the root entry"
+    }
+}
+
+function Get-AIChatConnectorDataAclSnapshot {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $profile = Get-AIChatUserProfile
+    $privateRoot = Join-Path $profile ".aichat"
+    $target = Assert-AIChatPathWithinRoot -Path $Path -Root $privateRoot
+    if (-not $target.Equals((Get-AIChatConnectorDataRoot), [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Connector data ACL snapshot must use the fixed user-profile path"
+    }
+    [void](Assert-AIChatNoReparsePath -Path $target -StopAt $profile -LeafMayBeMissing)
+
+    $privateRootItem = Get-Item -LiteralPath $privateRoot -Force -ErrorAction SilentlyContinue
+    if ($null -ne $privateRootItem) {
+        if (-not $privateRootItem.PSIsContainer) {
+            throw "Connector data private root is occupied by a file"
+        }
+        [void](Assert-AIChatPrivateDirectoryTree -Path $privateRoot -ProtectedRoot $privateRoot)
+    }
+    $existing = Get-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue
+    if ($null -eq $existing) {
+        return [pscustomobject][ordered]@{
+            schema_version = 1
+            existed = $false
+            private_root_existed = $null -ne $privateRootItem
+            entries = @()
+        }
+    }
+    if (-not $existing.PSIsContainer) {
+        throw "Connector data ACL snapshot target is occupied by a file"
+    }
+    Assert-AIChatConnectorDataAcl -Path $target -AllowLegacyCurrentSidOnly
+    $items = @(Get-ChildItem -LiteralPath $target -Force | Sort-Object Name)
+    $entries = [Collections.Generic.List[object]]::new()
+    foreach ($item in @($existing) + $items) {
+        if ($item -ne $existing) {
+            if ($item.PSIsContainer) {
+                throw "Connector data ACL snapshot does not accept subdirectories"
+            }
+            Assert-AIChatConnectorDataAcl -Path $item.FullName -AllowLegacyCurrentSidOnly
+        }
+        $name = if ($item -eq $existing) { "." } else { [string]$item.Name }
+        $sddl = Get-AIChatOwnerAndDaclSddl -Path $item.FullName
+        $entries.Add([pscustomobject][ordered]@{
+            name = $name
+            is_directory = [bool]$item.PSIsContainer
+            sddl = $sddl
+            sddl_sha256 = Get-AIChatSha256Text -Value $sddl
+        })
+    }
+    $snapshot = [pscustomobject][ordered]@{
+        schema_version = 1
+        existed = $true
+        private_root_existed = $true
+        entries = @($entries)
+    }
+    Assert-AIChatConnectorDataAclSnapshot -Snapshot $snapshot
+    return $snapshot
+}
+
+function Restore-AIChatConnectorDataAclSnapshot {
+    param(
+        [Parameter(Mandatory = $true)]$Snapshot,
+        [Parameter(Mandatory = $true)][string]$Path
+    )
+
+    Assert-AIChatConnectorDataAclSnapshot -Snapshot $Snapshot
+    $profile = Get-AIChatUserProfile
+    $privateRoot = Join-Path $profile ".aichat"
+    $target = Assert-AIChatPathWithinRoot -Path $Path -Root $privateRoot
+    if (-not $target.Equals((Get-AIChatConnectorDataRoot), [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Connector data ACL rollback must use the fixed user-profile path"
+    }
+
+    if (-not [bool]$Snapshot.existed) {
+        if (Test-Path -LiteralPath $target) {
+            [void](Assert-AIChatConnectorDataTree -Path $target)
+            if (@(Get-ChildItem -LiteralPath $target -Force).Count -ne 0) {
+                throw "Refusing to remove a connector data root that acquired runtime files"
+            }
+            Remove-Item -LiteralPath $target -Force
+        }
+        if (-not [bool]$Snapshot.private_root_existed -and
+            (Test-Path -LiteralPath $privateRoot -PathType Container)) {
+            [void](Assert-AIChatPrivateDirectoryTree -Path $privateRoot -ProtectedRoot $privateRoot)
+            if (@(Get-ChildItem -LiteralPath $privateRoot -Force).Count -ne 0) {
+                throw "Refusing to remove a connector private root that acquired other files"
+            }
+            Remove-Item -LiteralPath $privateRoot -Force
+        }
+        return
+    }
+
+    [void](Assert-AIChatConnectorDataTree -Path $target)
+    $expectedFiles = @($Snapshot.entries | Where-Object { [string]$_.name -ne "." })
+    $actualFiles = @(Get-ChildItem -LiteralPath $target -Force)
+    if ($actualFiles.Count -ne $expectedFiles.Count) {
+        throw "Connector data tree changed after its ACL snapshot"
+    }
+    foreach ($item in $actualFiles) {
+        if ($item.PSIsContainer -or
+            @($expectedFiles | Where-Object { [string]$_.name -ieq $item.Name }).Count -ne 1) {
+            throw "Connector data tree no longer matches its ACL snapshot"
+        }
+    }
+
+    $rootEntry = @($Snapshot.entries | Where-Object { [string]$_.name -eq "." })[0]
+    [AIChat.Windows.OwnerDacl]::RestoreSnapshot(
+        $target,
+        [string]$rootEntry.sddl,
+        $true
+    )
+    foreach ($entry in $expectedFiles) {
+        $entryPath = Join-Path $target ([string]$entry.name)
+        [AIChat.Windows.OwnerDacl]::RestoreSnapshot(
+            $entryPath,
+            [string]$entry.sddl,
+            $false
+        )
+    }
+    foreach ($entry in @($rootEntry) + $expectedFiles) {
+        $entryPath = if ([string]$entry.name -eq ".") {
+            $target
+        } else {
+            Join-Path $target ([string]$entry.name)
+        }
+        if ((Get-AIChatOwnerAndDaclSddl -Path $entryPath) -ne [string]$entry.sddl) {
+            throw "Connector data ACL rollback did not restore the exact owner/DACL"
+        }
+    }
 }
 
 function Initialize-AIChatConnectorDataDirectory {
@@ -1784,8 +2069,10 @@ function Assert-AIChatTransactionManifest {
         [Parameter(Mandatory = $true)][string]$BackupDirectory,
         [string[]]$AllowedStatuses = @("prepared", "applying", "applied", "committed", "rollback_incomplete")
     )
-    if (-not $Manifest.PSObject.Properties["schema_version"] -or
-        [int]$Manifest.schema_version -ne 1 -or
+    $schemaVersion = if ($Manifest.PSObject.Properties["schema_version"]) {
+        [int]$Manifest.schema_version
+    } else { 0 }
+    if ($schemaVersion -notin @(1, 2) -or
         -not $Manifest.PSObject.Properties["kind"] -or
         [string]$Manifest.kind -ne "aichat-windows-connector-transaction" -or
         -not $Manifest.PSObject.Properties["transaction_id"] -or
@@ -1826,6 +2113,14 @@ function Assert-AIChatTransactionManifest {
         [string]$Manifest.new_release_id -ne [string]$Manifest.transaction_id) {
         throw "Windows connector transaction task/release snapshot is invalid"
     }
+    if ($schemaVersion -eq 2) {
+        if (-not $Manifest.PSObject.Properties["connector_data_acl"]) {
+            throw "Windows connector transaction is missing its ACL rollback snapshot"
+        }
+        Assert-AIChatConnectorDataAclSnapshot -Snapshot $Manifest.connector_data_acl
+    } elseif ($Manifest.PSObject.Properties["connector_data_acl"]) {
+        throw "Legacy Windows connector transaction has unexpected ACL rollback data"
+    }
     if ([bool]$Manifest.task.existed) {
         if ([bool]$Manifest.task.enabled -or
             -not $Manifest.task.PSObject.Properties["xml"] -or
@@ -1841,7 +2136,8 @@ function Invoke-AIChatManifestRollback {
     param(
         [Parameter(Mandatory = $true)]$Manifest,
         [Parameter(Mandatory = $true)]$Paths,
-        [Parameter(Mandatory = $true)][string]$BackupDirectory
+        [Parameter(Mandatory = $true)][string]$BackupDirectory,
+        [switch]$RestoreConnectorDataAcl
     )
     Assert-AIChatTransactionManifest `
         -Manifest $Manifest `
@@ -1883,4 +2179,9 @@ function Invoke-AIChatManifestRollback {
         Move-Item -LiteralPath $release -Destination $failed
     }
     Restore-AIChatTaskSnapshot -Snapshot $Manifest.task -Paths $Paths
+    if ($RestoreConnectorDataAcl -and [int]$Manifest.schema_version -eq 2) {
+        Restore-AIChatConnectorDataAclSnapshot `
+            -Snapshot $Manifest.connector_data_acl `
+            -Path $Paths.ConnectorDataRoot
+    }
 }

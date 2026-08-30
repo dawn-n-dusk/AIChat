@@ -409,7 +409,7 @@ def test_connector_service_journal_uses_fixed_ids_hashes_and_inverse_rollback() 
     common = (root / "common.ps1").read_text(encoding="utf-8")
     install = (root / "install.ps1").read_text(encoding="utf-8")
     rollback = (root / "rollback.ps1").read_text(encoding="utf-8")
-    assert 'schema_version = 1' in install
+    assert 'schema_version = 2' in install
     assert 'kind = "aichat-windows-connector-transaction"' in install
     assert 'status = "prepared"' in install
     assert 'Set-AIChatTransactionStatus -Status "applying"' in install
@@ -421,6 +421,11 @@ def test_connector_service_journal_uses_fixed_ids_hashes_and_inverse_rollback() 
     )
     assert journal_write < data_acl_migration
     assert 'Invoke-AIChatInstallFailurePoint -Name "after-connector-data-acl"' in install
+    assert "Get-AIChatConnectorDataAclSnapshot" in install
+    assert "connector_data_acl = $connectorDataAclSnapshot" in install
+    assert "Restore-AIChatConnectorDataAclSnapshot" in common
+    assert "-RestoreConnectorDataAcl" in install
+    assert "UNPROTECTED_DACL_SECURITY_INFORMATION" in common
     assert "Get-AIChatDeploymentTargets" in common
     assert 'common = $Paths.CommonPath' in common
     assert 'active_release = $Paths.ActiveReleasePath' in common
