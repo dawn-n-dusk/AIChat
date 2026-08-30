@@ -94,8 +94,6 @@ try {
             -Path $directory `
             -ProtectedRoot $paths.ProtectedRoot)
     }
-    [void](Initialize-AIChatConnectorDataDirectory -Path $paths.ConnectorDataRoot)
-
     if (Test-Path -LiteralPath $paths.TransactionPath -PathType Leaf) {
         $unfinished = Read-AIChatPrivateJson `
             -Path $paths.TransactionPath `
@@ -192,6 +190,12 @@ try {
         -Value $transaction `
         -ProtectedRoot $paths.ProtectedRoot
     Invoke-AIChatInstallFailurePoint -Name "after-journal"
+
+    # The shared connector-data ACL migration is intentionally journaled. It
+    # only tightens a prevalidated current-SID/SYSTEM DACL and never reads or
+    # rewrites an existing mapping state file.
+    [void](Initialize-AIChatConnectorDataDirectory -Path $paths.ConnectorDataRoot)
+    Invoke-AIChatInstallFailurePoint -Name "after-connector-data-acl"
 
     $stage = Initialize-AIChatPrivateDirectory `
         -Path (Join-Path $paths.StagingDirectory $transactionId) `

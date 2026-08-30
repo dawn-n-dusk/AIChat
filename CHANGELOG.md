@@ -8,6 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Apply Windows connector private ACLs through an owner-and-DACL-only native
+  update that never requests SACL access or `SeSecurityPrivilege`, while
+  preserving the exact current-user-only and current-user-plus-LocalSystem
+  contracts and journaling connector-data migration before deployment changes.
 - Protect Windows connector state, app-server receipt, and lock-metadata files
   before atomic rename with explicit current-user and LocalSystem ACLs; migrate
   only the narrow legacy current-user ACL shape during install, upgrade, or

@@ -167,6 +167,145 @@ function Convert-AIChatIdentityReferenceToSid {
     }
 }
 
+function Set-AIChatOwnerAndDacl {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string[]]$AllowedSids,
+        [Parameter(Mandatory = $true)][bool]$IsDirectory
+    )
+
+    $ownerSid = Get-AIChatCurrentSid
+    $currentOnly = $AllowedSids.Count -eq 1 -and $AllowedSids[0] -eq $ownerSid
+    $connectorData = $AllowedSids.Count -eq 2 -and
+        $AllowedSids[0] -eq $ownerSid -and
+        $AllowedSids[1] -eq $script:AIChatLocalSystemSid
+    if (-not $currentOnly -and -not $connectorData) {
+        throw "AIChat owner/DACL updates accept only the fixed private ACL contracts"
+    }
+
+    if (-not ("AIChat.Windows.OwnerDacl" -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Security.AccessControl;
+using System.Security.Principal;
+
+namespace AIChat.Windows {
+    public static class OwnerDacl {
+        private const uint SE_FILE_OBJECT = 1;
+        private const uint OWNER_SECURITY_INFORMATION = 0x00000001;
+        private const uint DACL_SECURITY_INFORMATION = 0x00000004;
+        private const uint PROTECTED_DACL_SECURITY_INFORMATION = 0x80000000;
+
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern uint SetNamedSecurityInfo(
+            string objectName,
+            uint objectType,
+            uint securityInformation,
+            IntPtr owner,
+            IntPtr group,
+            IntPtr dacl,
+            IntPtr sacl
+        );
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        private static extern bool GetSecurityDescriptorOwner(
+            IntPtr securityDescriptor,
+            out IntPtr owner,
+            out bool ownerDefaulted
+        );
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        private static extern bool GetSecurityDescriptorDacl(
+            IntPtr securityDescriptor,
+            out bool daclPresent,
+            out IntPtr dacl,
+            out bool daclDefaulted
+        );
+
+        public static void Apply(
+            string path,
+            string ownerSidValue,
+            string[] allowedSidValues,
+            bool isDirectory
+        ) {
+            SecurityIdentifier owner = new SecurityIdentifier(ownerSidValue);
+            RawAcl dacl = new RawAcl(GenericAcl.AclRevision, allowedSidValues.Length);
+            AceFlags flags = isDirectory
+                ? AceFlags.ContainerInherit | AceFlags.ObjectInherit
+                : AceFlags.None;
+            for (int index = 0; index < allowedSidValues.Length; index++) {
+                SecurityIdentifier sid = new SecurityIdentifier(allowedSidValues[index]);
+                dacl.InsertAce(index, new CommonAce(
+                    flags,
+                    AceQualifier.AccessAllowed,
+                    (int)FileSystemRights.FullControl,
+                    sid,
+                    false,
+                    null
+                ));
+            }
+            RawSecurityDescriptor descriptor = new RawSecurityDescriptor(
+                ControlFlags.DiscretionaryAclPresent |
+                    ControlFlags.DiscretionaryAclProtected |
+                    ControlFlags.SelfRelative,
+                owner,
+                null,
+                null,
+                dacl
+            );
+            byte[] binary = new byte[descriptor.BinaryLength];
+            descriptor.GetBinaryForm(binary, 0);
+            GCHandle pinned = GCHandle.Alloc(binary, GCHandleType.Pinned);
+            try {
+                IntPtr pointer = pinned.AddrOfPinnedObject();
+                IntPtr ownerPointer;
+                bool ownerDefaulted;
+                if (!GetSecurityDescriptorOwner(pointer, out ownerPointer, out ownerDefaulted)) {
+                    throw new Win32Exception(Marshal.GetLastWin32Error());
+                }
+                bool daclPresent;
+                IntPtr daclPointer;
+                bool daclDefaulted;
+                if (!GetSecurityDescriptorDacl(
+                    pointer,
+                    out daclPresent,
+                    out daclPointer,
+                    out daclDefaulted
+                ) || !daclPresent || daclPointer == IntPtr.Zero) {
+                    int error = Marshal.GetLastWin32Error();
+                    throw new Win32Exception(error == 0 ? 1338 : error);
+                }
+                uint result = SetNamedSecurityInfo(
+                    path,
+                    SE_FILE_OBJECT,
+                    OWNER_SECURITY_INFORMATION |
+                        DACL_SECURITY_INFORMATION |
+                        PROTECTED_DACL_SECURITY_INFORMATION,
+                    ownerPointer,
+                    IntPtr.Zero,
+                    daclPointer,
+                    IntPtr.Zero
+                );
+                if (result != 0) throw new Win32Exception((int)result);
+            } finally {
+                pinned.Free();
+            }
+        }
+    }
+}
+'@
+    }
+
+    [AIChat.Windows.OwnerDacl]::Apply(
+        [IO.Path]::GetFullPath($Path),
+        $ownerSid,
+        $AllowedSids,
+        $IsDirectory
+    )
+}
+
 function Assert-AIChatCurrentSidOnlyAcl {
     param([Parameter(Mandatory = $true)][string]$Path)
 
@@ -300,32 +439,10 @@ function Set-AIChatCurrentSidOnlyAcl {
     if (-not $item.PSIsContainer -and (Get-AIChatHardLinkCount -Path $Path) -ne 1) {
         throw "Refusing to protect a file with hardlink aliases: $Path"
     }
-    $security = if ($item.PSIsContainer) {
-        [Security.AccessControl.DirectorySecurity]::new()
-    } else {
-        [Security.AccessControl.FileSecurity]::new()
-    }
-    $security.SetOwner($identity.User)
-    $security.SetAccessRuleProtection($true, $false)
-    $rule = if ($item.PSIsContainer) {
-        $inheritance = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
-            [Security.AccessControl.InheritanceFlags]::ObjectInherit
-        [Security.AccessControl.FileSystemAccessRule]::new(
-            $identity.User,
-            [Security.AccessControl.FileSystemRights]::FullControl,
-            $inheritance,
-            [Security.AccessControl.PropagationFlags]::None,
-            [Security.AccessControl.AccessControlType]::Allow
-        )
-    } else {
-        [Security.AccessControl.FileSystemAccessRule]::new(
-            $identity.User,
-            [Security.AccessControl.FileSystemRights]::FullControl,
-            [Security.AccessControl.AccessControlType]::Allow
-        )
-    }
-    [void]$security.AddAccessRule($rule)
-    Set-Acl -LiteralPath $Path -AclObject $security
+    Set-AIChatOwnerAndDacl `
+        -Path $Path `
+        -AllowedSids @($identity.User.Value) `
+        -IsDirectory $item.PSIsContainer
     Assert-AIChatCurrentSidOnlyAcl -Path $Path
     if (-not $item.PSIsContainer -and (Get-AIChatHardLinkCount -Path $Path) -ne 1) {
         throw "AIChat private file acquired a hardlink alias while applying ACLs: $Path"
@@ -406,35 +523,10 @@ function Set-AIChatConnectorDataAcl {
     if (-not $item.PSIsContainer -and (Get-AIChatHardLinkCount -Path $Path) -ne 1) {
         throw "Refusing to protect a connector state/receipt file with hardlink aliases: $Path"
     }
-    $security = if ($item.PSIsContainer) {
-        [Security.AccessControl.DirectorySecurity]::new()
-    } else {
-        [Security.AccessControl.FileSecurity]::new()
-    }
-    $security.SetOwner($identity.User)
-    $security.SetAccessRuleProtection($true, $false)
-    foreach ($sidValue in @($identity.User.Value, $script:AIChatLocalSystemSid)) {
-        $sid = [Security.Principal.SecurityIdentifier]::new($sidValue)
-        $rule = if ($item.PSIsContainer) {
-            $inheritance = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
-                [Security.AccessControl.InheritanceFlags]::ObjectInherit
-            [Security.AccessControl.FileSystemAccessRule]::new(
-                $sid,
-                [Security.AccessControl.FileSystemRights]::FullControl,
-                $inheritance,
-                [Security.AccessControl.PropagationFlags]::None,
-                [Security.AccessControl.AccessControlType]::Allow
-            )
-        } else {
-            [Security.AccessControl.FileSystemAccessRule]::new(
-                $sid,
-                [Security.AccessControl.FileSystemRights]::FullControl,
-                [Security.AccessControl.AccessControlType]::Allow
-            )
-        }
-        [void]$security.AddAccessRule($rule)
-    }
-    Set-Acl -LiteralPath $Path -AclObject $security
+    Set-AIChatOwnerAndDacl `
+        -Path $Path `
+        -AllowedSids @($identity.User.Value, $script:AIChatLocalSystemSid) `
+        -IsDirectory $item.PSIsContainer
     Assert-AIChatConnectorDataAcl -Path $Path
 }
 

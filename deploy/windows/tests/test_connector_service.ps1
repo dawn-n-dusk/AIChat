@@ -459,6 +459,18 @@ public static class Program {
         -Label "broad connector data ACL migration check" `
         -Action { Initialize-AIChatConnectorDataDirectory -Path $paths.ConnectorDataRoot }
     Set-AIChatConnectorDataAcl -Path $broadDataProbe
+    $trustedProbeSddl = (Get-Acl -LiteralPath $broadDataProbe).Sddl
+    Invoke-ExpectedFailure `
+        -Label "owner/DACL fixed-contract check" `
+        -Action {
+            Set-AIChatOwnerAndDacl `
+                -Path $broadDataProbe `
+                -AllowedSids @((Get-AIChatCurrentSid), "S-1-1-0") `
+                -IsDirectory $false
+        }
+    if ((Get-Acl -LiteralPath $broadDataProbe).Sddl -ne $trustedProbeSddl) {
+        throw "Rejected owner/DACL contract changed the protected file"
+    }
     Remove-Item -LiteralPath $broadDataProbe -Force
 
     $env:AICHAT_WINDOWS_PRIVATE_SID = Get-AIChatCurrentSid
