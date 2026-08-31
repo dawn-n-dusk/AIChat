@@ -15,6 +15,7 @@ $installer = Join-Path $serviceRoot "install.ps1"
 $checker = Join-Path $serviceRoot "check.ps1"
 $rollback = Join-Path $serviceRoot "rollback.ps1"
 $uninstaller = Join-Path $serviceRoot "uninstall.ps1"
+$recoveryRunner = Join-Path $serviceRoot "invoke-recovery-json.ps1"
 . (Join-Path $serviceRoot "common.ps1")
 
 $paths = Get-AIChatConnectorPaths
@@ -70,6 +71,45 @@ if (-not (Test-AIChatTaskSchedulerNotFoundException -Exception $taskMissing) -or
 function Add-CapturedOutput {
     param($Value)
     if ($null -ne $Value) { [void]$allOutput.AppendLine([string]$Value) }
+}
+
+function Invoke-RealRecoveryOperation {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("verify", "repair", "finalize")]
+        [string]$Operation
+    )
+
+    $output = & powershell.exe `
+        -NoLogo `
+        -NoProfile `
+        -NonInteractive `
+        -ExecutionPolicy Bypass `
+        -File $recoveryRunner `
+        $Operation *>&1 | Out-String
+    $exitCode = $LASTEXITCODE
+    Add-CapturedOutput $output
+    if ($exitCode -ne 0) {
+        throw "Real recovery operation failed: $Operation"
+    }
+    return $output.Trim() | ConvertFrom-Json
+}
+
+function Invoke-StageOnlyRecoveryGate {
+    $output = & powershell.exe `
+        -NoLogo `
+        -NoProfile `
+        -NonInteractive `
+        -ExecutionPolicy Bypass `
+        -File $checker `
+        -StageOnly `
+        -RecoveryGateOnly *>&1 | Out-String
+    $exitCode = $LASTEXITCODE
+    Add-CapturedOutput $output
+    return [pscustomobject]@{
+        ExitCode = [int]$exitCode
+        Output = $output
+    }
 }
 
 function Invoke-ExpectedFailure {
@@ -672,6 +712,153 @@ public static class Program {
         } else { "unclassified" }
         throw "Connector service check failed after first install; failed_checks=$failedCheckSummary"
     }
+
+    # Exercise the real schema-v3 rollback_incomplete recovery chain against
+    # the installed package and fixed connector state. This uses the production
+    # common.ps1, protected files, Task Scheduler snapshot, and native ACL
+    # implementation; no synthetic recovery helper replaces those boundaries.
+    $recoveryTask = Get-AIChatConnectorTask
+    $recoveryTaskXml = [string]$recoveryTask.Xml
+    $recoveryTransactionId = (Get-Date).ToUniversalTime().ToString("yyyyMMddTHHmmssZ") +
+        "-" + [Guid]::NewGuid().ToString("N").Substring(0, 8)
+    $recoveryBackupDirectory = Initialize-AIChatPrivateDirectory `
+        -Path (Join-Path $paths.BackupsDirectory $recoveryTransactionId) `
+        -ProtectedRoot $paths.ProtectedRoot
+    $recoveryFiles = [Collections.Generic.List[object]]::new()
+    $recoveryTargets = Get-AIChatDeploymentTargets -Paths $paths
+    foreach ($targetId in @($recoveryTargets.Keys)) {
+        $targetPath = [string]$recoveryTargets[$targetId]
+        if (-not (Test-Path -LiteralPath $targetPath -PathType Leaf)) {
+            throw "Real recovery fixture target is absent: $targetId"
+        }
+        $backupPath = Join-Path $recoveryBackupDirectory "$targetId.bak"
+        Copy-AIChatPrivateFileAtomic `
+            -Source $targetPath `
+            -Destination $backupPath `
+            -ProtectedRoot $paths.ProtectedRoot
+        $recoveryFiles.Add([pscustomobject][ordered]@{
+            id = [string]$targetId
+            existed = $true
+            sha256 = (Get-FileHash `
+                -LiteralPath $backupPath `
+                -Algorithm SHA256).Hash.ToLowerInvariant()
+        })
+    }
+
+    $connectorItems = @(
+        Get-Item -LiteralPath $paths.ConnectorDataRoot -Force
+    ) + @(
+        Get-ChildItem -LiteralPath $paths.ConnectorDataRoot -Force
+    )
+    foreach ($connectorItem in $connectorItems) {
+        Set-AIChatCurrentSidOnlyAcl -Path $connectorItem.FullName
+    }
+    $recoveryExpectedAcl = Get-AIChatConnectorDataAclSnapshot `
+        -Path $paths.ConnectorDataRoot
+    foreach ($connectorItem in $connectorItems) {
+        Set-AIChatConnectorDataAcl -Path $connectorItem.FullName
+    }
+    $recoveryForwardAcl = Get-AIChatConnectorDataAclSnapshot `
+        -Path $paths.ConnectorDataRoot
+    [void](Assert-AIChatConnectorDataAclRepairEligible `
+        -Expected $recoveryExpectedAcl `
+        -Actual $recoveryForwardAcl)
+
+    $recoveryJournal = [pscustomobject][ordered]@{
+        schema_version = 3
+        kind = "aichat-windows-connector-transaction"
+        transaction_id = $recoveryTransactionId
+        status = "rollback_incomplete"
+        files = @($recoveryFiles)
+        task = [pscustomobject][ordered]@{
+            existed = $true
+            enabled = $false
+            xml = $recoveryTaskXml
+            xml_sha256 = Get-AIChatSha256Text -Value $recoveryTaskXml
+        }
+        new_release_id = $recoveryTransactionId
+        connector_data_acl = $recoveryExpectedAcl
+    }
+    Write-AIChatPrivateJson `
+        -Path $paths.TransactionPath `
+        -Value $recoveryJournal `
+        -ProtectedRoot $paths.ProtectedRoot
+    [void](Assert-AIChatTransactionManifest `
+        -Manifest $recoveryJournal `
+        -Paths $paths `
+        -BackupDirectory $recoveryBackupDirectory `
+        -AllowedStatuses @("rollback_incomplete"))
+
+    $env:AICHAT_WINDOWS_CONNECTOR_TEST_TASK_ACCESS = "deny"
+    try {
+        $blockedRecoveryGate = Invoke-StageOnlyRecoveryGate
+    } finally {
+        $env:AICHAT_WINDOWS_CONNECTOR_TEST_TASK_ACCESS = $null
+    }
+    if ($blockedRecoveryGate.ExitCode -ne 1 -or
+        $blockedRecoveryGate.Output -notmatch '(?m)^\[FAIL\] transaction:' -or
+        $blockedRecoveryGate.Output -notmatch '(?m)^task_scheduler_accessed=false\s*$' -or
+        $blockedRecoveryGate.Output -notmatch '(?m)^mutation_performed=false\s*$') {
+        throw "StageOnly recovery gate did not block the real managed journal"
+    }
+
+    $recoveryDiagnose = Invoke-RealRecoveryOperation -Operation "verify"
+    if (-not $recoveryDiagnose.success -or
+        [string]$recoveryDiagnose.status -ne "repair_ready" -or
+        [bool]$recoveryDiagnose.mutation_performed -or
+        -not [bool]$recoveryDiagnose.journal_retained) {
+        throw "Real recovery diagnose did not report repair_ready"
+    }
+    $recoveryRepair = Invoke-RealRecoveryOperation -Operation "repair"
+    if (-not $recoveryRepair.success -or
+        [string]$recoveryRepair.status -ne "acl_repaired" -or
+        -not [bool]$recoveryRepair.connector_acl_mutated -or
+        -not [bool]$recoveryRepair.journal_retained) {
+        throw "Real recovery repair did not restore the snapshotted ACL"
+    }
+    $recoveryVerify = Invoke-RealRecoveryOperation -Operation "verify"
+    if (-not $recoveryVerify.success -or
+        [string]$recoveryVerify.status -ne "rollback_exact" -or
+        -not [bool]$recoveryVerify.rollback_exact -or
+        [bool]$recoveryVerify.mutation_performed) {
+        throw "Real recovery reverify did not report rollback_exact"
+    }
+    $recoveryFinalize = Invoke-RealRecoveryOperation -Operation "finalize"
+    $recoveryArchive = Join-Path `
+        $recoveryBackupDirectory `
+        "rollback-incomplete.finalized.json"
+    if (-not $recoveryFinalize.success -or
+        [string]$recoveryFinalize.status -ne "finalized" -or
+        -not [bool]$recoveryFinalize.finalize_performed -or
+        [bool]$recoveryFinalize.journal_retained -or
+        (Test-Path -LiteralPath $paths.TransactionPath) -or
+        -not (Test-Path -LiteralPath $recoveryArchive -PathType Leaf) -or
+        [string](Get-AIChatConnectorTask).Xml -ne $recoveryTaskXml) {
+        throw "Real recovery finalization did not clear only the journal blocker"
+    }
+    [void](Assert-AIChatPrivateFile `
+        -Path $recoveryArchive `
+        -ProtectedRoot $paths.ProtectedRoot)
+
+    $env:AICHAT_WINDOWS_CONNECTOR_TEST_TASK_ACCESS = "deny"
+    try {
+        $clearRecoveryGate = Invoke-StageOnlyRecoveryGate
+    } finally {
+        $env:AICHAT_WINDOWS_CONNECTOR_TEST_TASK_ACCESS = $null
+    }
+    if ($clearRecoveryGate.ExitCode -ne 0 -or
+        $clearRecoveryGate.Output -notmatch '(?m)^\[PASS\] transaction:' -or
+        $clearRecoveryGate.Output -notmatch '(?m)^recovery_gate_clear=true\s*$' -or
+        $clearRecoveryGate.Output -notmatch '(?m)^mutation_performed=false\s*$') {
+        throw "StageOnly recovery gate did not admit the finalized real state"
+    }
+
+    # Return the isolated fixture to the current package ACL contract before
+    # the existing StageOnly install/check/rollback coverage continues.
+    foreach ($connectorItem in $connectorItems) {
+        Set-AIChatConnectorDataAcl -Path $connectorItem.FullName
+    }
+    [void](Assert-AIChatConnectorDataTree -Path $paths.ConnectorDataRoot)
 
     # Stage-only upgrade is the foreground acceptance path for hosts where
     # Task Scheduler registration is unavailable. The synthetic denial makes

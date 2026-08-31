@@ -12,7 +12,6 @@ if ($env:OS -ne "Windows_NT" -or
 
 $sourceRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\connector-service")).Path
 $sourceRecovery = Join-Path $sourceRoot "recover-transaction.ps1"
-$sourceInstall = Join-Path $sourceRoot "install.ps1"
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) "aichat-recovery-json-$([Guid]::NewGuid().ToString('N'))"
 New-Item -ItemType Directory -Path $testRoot | Out-Null
 
@@ -111,8 +110,7 @@ function Assert-AIChatManifestRollbackComplete {
     if (($scenario -eq "repair_ready" -or
         $scenario -eq "repair" -or
         $scenario -eq "repair_apply_failure" -or
-        $scenario -eq "acl_repair_ineligible" -or
-        $scenario -eq "stateful_recovery") -and
+        $scenario -eq "acl_repair_ineligible") -and
         -not (Test-SyntheticRepaired)) {
         Set-SyntheticDiagnosticCode $DiagnosticCodeSink "acl_snapshot_mismatch"
         throw "synthetic ACL mismatch"
@@ -677,66 +675,6 @@ try {
         }
     }
 
-    $statefulKey = "managed-recovery-to-stage-only"
-    $statefulDiagnose = Invoke-RecoveryCase `
-        -Name "stateful-diagnose" `
-        -StateKey $statefulKey `
-        -Scenario "stateful_recovery" `
-        -Arguments @("-OutputFormat", "Json") `
-        -ExpectedOperation "verify" `
-        -ExpectedMode "read_only"
-    if ($statefulDiagnose.status -ne "repair_ready") {
-        throw "Stateful managed recovery did not diagnose repair readiness"
-    }
-    $statefulRepair = Invoke-RecoveryCase `
-        -Name "stateful-repair" `
-        -StateKey $statefulKey `
-        -ReuseState `
-        -Scenario "stateful_recovery" `
-        -Arguments @("-RepairConnectorAcl", "-Apply", "-OutputFormat", "Json") `
-        -ExpectedOperation "repair" `
-        -ExpectedMode "apply" `
-        -ExpectedMutationPerformed $true `
-        -ExpectedConnectorAclMutated $true
-    if ($statefulRepair.status -ne "acl_repaired") {
-        throw "Stateful managed recovery did not repair the ACL"
-    }
-    $statefulVerify = Invoke-RecoveryCase `
-        -Name "stateful-verify" `
-        -StateKey $statefulKey `
-        -ReuseState `
-        -Scenario "stateful_recovery" `
-        -Arguments @("-OutputFormat", "Json") `
-        -ExpectedOperation "verify" `
-        -ExpectedMode "read_only"
-    if ($statefulVerify.status -ne "rollback_exact") {
-        throw "Stateful managed recovery did not reverify exact rollback"
-    }
-    $statefulFinalize = Invoke-RecoveryCase `
-        -Name "stateful-finalize" `
-        -StateKey $statefulKey `
-        -ReuseState `
-        -Scenario "stateful_recovery" `
-        -Arguments @("-Finalize", "-Apply", "-OutputFormat", "Json") `
-        -ExpectedOperation "finalize" `
-        -ExpectedMode "apply" `
-        -ExpectedMutationPerformed $true `
-        -ExpectedJournalRetained $false `
-        -ExpectedFinalizePerformed $true
-    $statefulRoot = Join-Path (Join-Path $testRoot $statefulKey) "private-sensitive"
-    if ($statefulFinalize.status -ne "finalized" -or
-        (Test-Path -LiteralPath (Join-Path $statefulRoot "transaction.json"))) {
-        throw "Stateful managed recovery did not clear the finalized blocker"
-    }
-    $stageOnlyDryRun = & $sourceInstall `
-        -SettingsPath (Join-Path $statefulRoot "not-read-in-whatif.json") `
-        -RepositoryRoot (Resolve-Path (Join-Path $PSScriptRoot "..\..\..")).Path `
-        -StageOnly -Apply -WhatIf *>&1 | Out-String
-    if ($LASTEXITCODE -ne 0 -or
-        $stageOnlyDryRun -notmatch '(?m)^stage_only=true\s*$' -or
-        $stageOnlyDryRun -notmatch '(?m)^mutation_performed=false\s*$') {
-        throw "StageOnly dry-run was not admissible after managed recovery finalization"
-    }
 } finally {
     if (Test-Path -LiteralPath $testRoot) {
         Remove-Item -LiteralPath $testRoot -Recurse -Force

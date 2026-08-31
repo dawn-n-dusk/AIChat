@@ -28,6 +28,12 @@ schema-v4 stage-only journals require the exact `task.mode=untouched` shape and
 never invoke Task Scheduler during either verification pass. It never performs
 a Task Scheduler write.
 
+`check.ps1 -StageOnly -RecoveryGateOnly` is the narrow read-only admission
+gate for this flow. It checks the protected fixed state root and unfinished
+transaction marker, exits before ConnectorData, settings, launcher,
+credentials, or Task Scheduler checks, and reports no mutation. It does not
+replace the full StageOnly package check.
+
 The default output remains the existing Human key/value stream. Automation
 must invoke `invoke-recovery-json.ps1` with exactly one operation: `verify`,
 `repair`, or `finalize`. The runner owns the Windows PowerShell 5.1 subprocess,

@@ -677,7 +677,6 @@ def test_recovery_json_contract_is_single_ascii_safe_and_versioned() -> None:
     assert '"path-initialization-failure"' in contract_test
     assert '"repair-apply-failure"' in contract_test
     assert '"finalize-apply-failure"' in contract_test
-    assert '"managed-recovery-to-stage-only"' in contract_test
     assert '"diagnostic_code"' in contract_test
     assert "stdout.EndsWith" in contract_test
     assert "duplicate key" in contract_test
@@ -815,11 +814,16 @@ def test_online_identity_check_validates_transport_before_authorization() -> Non
 
 def test_ci_runs_windows_connector_service_functional_test() -> None:
     functional = ROOT / "tests" / "test_connector_service.ps1"
+    real_recovery = ROOT / "tests" / "test_recovery_real_state_e2e.ps1"
     legacy = ROOT / "tests" / "test_legacy_codex_runner_disabled.ps1"
     wrapper = ROOT / "tests" / "test_plugin_mcp_autoload.ps1"
     assert functional.is_file()
+    assert real_recovery.is_file()
     assert legacy.is_file()
     functional_text = functional.read_text(encoding="utf-8")
+    checker_text = (ROOT / "connector-service" / "check.ps1").read_text(
+        encoding="utf-8"
+    )
     assert "*>&1 | Out-String" in functional_text
     assert "2>&1 | Out-String" not in functional_text
     check_failure = functional_text.index("if ($LASTEXITCODE -ne 0) {", functional_text.index("$checkOutput ="))
@@ -831,14 +835,38 @@ def test_ci_runs_windows_connector_service_functional_test() -> None:
     assert "after first install:`n$checkOutput" not in functional_text
     assert "allowedFailedChecks" in functional_text[check_failure:check_diagnostic]
     assert "[string]$Matches[1]" in functional_text[check_failure:check_diagnostic]
+    assert "Invoke-RealRecoveryOperation" in functional_text
+    assert 'status -ne "repair_ready"' in functional_text
+    assert 'status -ne "acl_repaired"' in functional_text
+    assert 'status -ne "rollback_exact"' in functional_text
+    assert 'status -ne "finalized"' in functional_text
+    assert functional_text.count("Invoke-StageOnlyRecoveryGate") >= 3
+    assert "RecoveryGateOnly" in checker_text
+    recovery_gate = checker_text.index("if ($RecoveryGateOnly) {")
+    assert checker_text.index('Report-AIChatCheck "transaction"') < recovery_gate
+    assert "recovery_gate_clear=true" in checker_text[recovery_gate:]
+    assert "task_scheduler_accessed=false" in checker_text[recovery_gate:]
     created_codex_home = functional_text.index("if ($createdCodexHome) {")
     set_codex_owner = functional_text.index("$codexHomeAcl.SetOwner(", created_codex_home)
     assert set_codex_owner < functional_text.index("Set-Acl -LiteralPath $codexHome", set_codex_owner)
     wrapper_text = wrapper.read_text(encoding="utf-8")
+    real_recovery_text = real_recovery.read_text(encoding="utf-8")
+    workflow_text = (REPOSITORY_ROOT / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    )
     assert "test_connector_service.ps1" in wrapper_text
     assert "test_legacy_codex_runner_disabled.ps1" in wrapper_text
     assert "$protectedRootExisted = Test-Path" in wrapper_text
     assert "test-created AIChat root because it is no longer empty" in wrapper_text
+    assert 'Join-Path $serviceRoot "common.ps1"' in real_recovery_text
+    assert "syntheticCommon" not in real_recovery_text
+    assert "RedirectStandardOutput = $true" in real_recovery_text
+    assert "RedirectStandardError = $true" in real_recovery_text
+    assert 'status -cne "repair_ready"' in real_recovery_text
+    assert 'status -cne "acl_repaired"' in real_recovery_text
+    assert 'status -cne "rollback_exact"' in real_recovery_text
+    assert 'status -cne "finalized"' in real_recovery_text
+    assert "test_recovery_real_state_e2e.ps1" in workflow_text
     assert wrapper_text.index("Remove-Item -LiteralPath $protectedRoot -Force") < wrapper_text.index(
         "$connectorServiceTest ="
     )

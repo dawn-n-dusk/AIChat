@@ -272,6 +272,21 @@ credential-bound online check; `-StageOnly -Online` is rejected. The connector
 remains stopped until the operator explicitly runs the installed launcher in
 the foreground.
 
+To check only whether the fixed StageOnly state root is free of an unfinished
+transaction, without reading ConnectorData, credentials, or Task Scheduler,
+run:
+
+```powershell
+.\deploy\windows\connector-service\check.ps1 `
+  -StageOnly -RecoveryGateOnly
+```
+
+This read-only gate validates the protected state root and reports
+`recovery_gate_clear=true` only when `transaction.json` is absent. It reports
+`mutation_performed=false` on both pass and failure paths. It is not a package,
+ACL, settings, or launcher acceptance check; run the normal `check.ps1
+-StageOnly` after installation for those checks.
+
 If Task Scheduler rejects a rollback write with `E_ACCESSDENIED`, the journal
 correctly remains a blocker even when the files and task already appear
 restored. A visible prior task or matching filenames are insufficient proof.

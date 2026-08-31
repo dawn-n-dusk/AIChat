@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [switch]$Online,
-    [switch]$StageOnly
+    [switch]$StageOnly,
+    [switch]$RecoveryGateOnly
 )
 
 Set-StrictMode -Version Latest
@@ -10,6 +11,9 @@ $ErrorActionPreference = "Stop"
 
 if ($Online -and $StageOnly) {
     throw "Stage-only validation does not read the Relay credential; omit -Online"
+}
+if ($RecoveryGateOnly -and -not $StageOnly) {
+    throw "RecoveryGateOnly requires StageOnly"
 }
 
 $failures = [Collections.Generic.List[string]]::new()
@@ -29,17 +33,31 @@ try {
 } catch {
     Report-AIChatCheck "state-acl" $false $_.Exception.Message
 }
+if (Test-Path -LiteralPath $paths.TransactionPath) {
+    Report-AIChatCheck "transaction" $false "unfinished protected transaction journal exists"
+} else {
+    Report-AIChatCheck "transaction" $true "no unfinished transaction"
+}
+
+if ($RecoveryGateOnly) {
+    Write-Host "task_scheduler_accessed=false"
+    Write-Host "task_mutation_performed=false"
+    Write-Host "token_read=false"
+    Write-Host "connector_state_mutated=false"
+    Write-Host "mutation_performed=false"
+    if ($failures.Count -gt 0) {
+        Write-Host "AIChat Windows StageOnly recovery gate found $($failures.Count) failure(s)."
+        exit 1
+    }
+    Write-Host "recovery_gate_clear=true"
+    exit 0
+}
+
 try {
     [void](Assert-AIChatConnectorDataTree -Path $paths.ConnectorDataRoot)
     Report-AIChatCheck "connector-state-acl" $true "protected current-SID and LocalSystem state/receipt directory"
 } catch {
     Report-AIChatCheck "connector-state-acl" $false $_.Exception.Message
-}
-
-if (Test-Path -LiteralPath $paths.TransactionPath) {
-    Report-AIChatCheck "transaction" $false "unfinished protected transaction journal exists"
-} else {
-    Report-AIChatCheck "transaction" $true "no unfinished transaction"
 }
 
 $settings = $null
