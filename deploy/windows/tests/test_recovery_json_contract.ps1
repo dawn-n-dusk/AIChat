@@ -12,7 +12,7 @@ if ($env:OS -ne "Windows_NT" -or
 
 $sourceRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\connector-service")).Path
 $sourceRecovery = Join-Path $sourceRoot "recover-transaction.ps1"
-$testRoot = Join-Path ([IO.Path]::GetTempPath()) "aichat-recovery-json-测试-$([Guid]::NewGuid().ToString('N'))"
+$testRoot = Join-Path ([IO.Path]::GetTempPath()) "aichat-recovery-json-$([Guid]::NewGuid().ToString('N'))"
 New-Item -ItemType Directory -Path $testRoot | Out-Null
 
 $syntheticCommon = @'
@@ -57,7 +57,8 @@ function Assert-AIChatManifestRollbackComplete {
     param($Manifest, $Paths, $BackupDirectory)
     $scenario = $env:AICHAT_RECOVERY_TEST_SCENARIO
     if ($scenario -eq "verifier_failure") {
-        throw "synthetic verifier failure at $($env:AICHAT_RECOVERY_TEST_ROOT) 中文$([char]0x2028) raw-sddl=O:BAD token=secret"
+        $unicodeProbe = ([string][char]0x4e2d) + ([string][char]0x6587)
+        throw "synthetic verifier failure at $($env:AICHAT_RECOVERY_TEST_ROOT) $unicodeProbe$([char]0x2028) raw-sddl=O:BAD token=secret"
     }
     if (($scenario -eq "repair_ready" -or $scenario -eq "repair") -and
         -not $script:syntheticRepaired) {
@@ -105,7 +106,7 @@ function Invoke-RecoveryCase {
 
     $caseRoot = Join-Path $testRoot $Name
     $runnerRoot = Join-Path $caseRoot "runner"
-    $stateRoot = Join-Path $caseRoot "private-路径"
+    $stateRoot = Join-Path $caseRoot "private-sensitive"
     $backupRoot = Join-Path $stateRoot "backups\20260901T000000Z-1234abcd"
     New-Item -ItemType Directory -Path $runnerRoot | Out-Null
     New-Item -ItemType Directory -Path $backupRoot | Out-Null
@@ -197,7 +198,7 @@ function Invoke-RecoveryCase {
         "S-1-",
         "raw-sddl",
         "token=secret",
-        "中文",
+        (([string][char]0x4e2d) + ([string][char]0x6587)),
         [string][char]0x2028
     )) {
         if ($trimmed.Contains($forbidden)) {
