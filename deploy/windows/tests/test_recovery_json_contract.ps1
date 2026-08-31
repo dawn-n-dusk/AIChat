@@ -22,6 +22,10 @@ $script:syntheticRepaired = $false
 
 function Get-AIChatConnectorPaths {
     $root = $env:AICHAT_RECOVERY_TEST_ROOT
+    if ($env:AICHAT_RECOVERY_TEST_SCENARIO -eq "path_initialization_failure") {
+        $unicodeProbe = ([string][char]0x4e2d) + ([string][char]0x6587)
+        throw "synthetic path initialization failure at $root $unicodeProbe raw-sddl=O:BAD token=secret"
+    }
     return [pscustomobject]@{
         StateRoot = $root
         ProtectedRoot = $root
@@ -60,7 +64,9 @@ function Assert-AIChatManifestRollbackComplete {
         $unicodeProbe = ([string][char]0x4e2d) + ([string][char]0x6587)
         throw "synthetic verifier failure at $($env:AICHAT_RECOVERY_TEST_ROOT) $unicodeProbe$([char]0x2028) raw-sddl=O:BAD token=secret"
     }
-    if (($scenario -eq "repair_ready" -or $scenario -eq "repair") -and
+    if (($scenario -eq "repair_ready" -or
+        $scenario -eq "repair" -or
+        $scenario -eq "repair_apply_failure") -and
         -not $script:syntheticRepaired) {
         throw "synthetic ACL mismatch"
     }
@@ -87,10 +93,16 @@ function Invoke-AIChatConnectorDataAclSnapshotRepair {
         [scriptblock]$PostCompensationVerifier
     )
     $script:syntheticRepaired = $true
+    if ($env:AICHAT_RECOVERY_TEST_SCENARIO -eq "repair_apply_failure") {
+        throw "synthetic repair failure at $($env:AICHAT_RECOVERY_TEST_ROOT) raw-sddl=O:BAD token=secret"
+    }
     return & $PostRepairVerifier
 }
 function Copy-AIChatPrivateFileAtomic {
     param($Source, $Destination, $ProtectedRoot)
+    if ($env:AICHAT_RECOVERY_TEST_SCENARIO -eq "finalize_apply_failure") {
+        throw "synthetic finalize failure at $Source raw-sddl=O:BAD token=secret"
+    }
     Copy-Item -LiteralPath $Source -Destination $Destination
 }
 '@
@@ -101,7 +113,15 @@ function Invoke-RecoveryCase {
         [Parameter(Mandatory = $true)][string]$Scenario,
         [string[]]$Arguments = @(),
         [int]$ExpectedExitCode = 0,
-        [switch]$Human
+        [switch]$Human,
+        [ValidateSet("valid", "missing", "syntax_error")]
+        [string]$CommonFixture = "valid",
+        [string]$ExpectedOperation = "",
+        [string]$ExpectedMode = "",
+        [bool]$ExpectedMutationPerformed = $false,
+        [bool]$ExpectedJournalRetained = $true,
+        [bool]$ExpectedConnectorAclMutated = $false,
+        [bool]$ExpectedFinalizePerformed = $false
     )
 
     $caseRoot = Join-Path $testRoot $Name
@@ -112,11 +132,20 @@ function Invoke-RecoveryCase {
     New-Item -ItemType Directory -Path $backupRoot | Out-Null
     New-Item -ItemType Directory -Path (Join-Path $stateRoot "connector-data") | Out-Null
     Copy-Item -LiteralPath $sourceRecovery -Destination (Join-Path $runnerRoot "recover-transaction.ps1")
-    [IO.File]::WriteAllText(
-        (Join-Path $runnerRoot "common.ps1"),
-        $syntheticCommon,
-        [Text.UTF8Encoding]::new($false)
-    )
+    $commonPath = Join-Path $runnerRoot "common.ps1"
+    if ($CommonFixture -eq "valid") {
+        [IO.File]::WriteAllText(
+            $commonPath,
+            $syntheticCommon,
+            [Text.UTF8Encoding]::new($false)
+        )
+    } elseif ($CommonFixture -eq "syntax_error") {
+        [IO.File]::WriteAllText(
+            $commonPath,
+            'function Broken-SyntheticCommon { if (',
+            [Text.UTF8Encoding]::new($false)
+        )
+    }
     [IO.File]::WriteAllText(
         (Join-Path $stateRoot "transaction.json"),
         '{"transaction_id":"20260901T000000Z-1234abcd","connector_data_acl":{}}',
@@ -182,11 +211,24 @@ function Invoke-RecoveryCase {
     if ($stderr.Trim()) {
         throw "$Name leaked stderr output"
     }
-    $trimmed = $stdout.Trim()
-    if (-not $trimmed -or $trimmed.Contains("`n") -or $trimmed.Contains("`r")) {
-        throw "$Name did not emit exactly one compact JSON line"
+    if ($stdout.EndsWith("`r`n")) {
+        $jsonText = $stdout.Substring(0, $stdout.Length - 2)
+        $expectedStdout = $jsonText + "`r`n"
+    } elseif ($stdout.EndsWith("`n")) {
+        $jsonText = $stdout.Substring(0, $stdout.Length - 1)
+        $expectedStdout = $jsonText + "`n"
+    } else {
+        throw "$Name stdout did not end with exactly one native newline"
     }
-    foreach ($character in $trimmed.ToCharArray()) {
+    if (-not $jsonText -or
+        $stdout -cne $expectedStdout -or
+        $jsonText.Contains("`n") -or
+        $jsonText.Contains("`r") -or
+        -not $jsonText.StartsWith("{") -or
+        -not $jsonText.EndsWith("}")) {
+        throw "$Name did not emit exactly JSON plus one native newline"
+    }
+    foreach ($character in $jsonText.ToCharArray()) {
         if ([int][char]$character -gt 0x7f) {
             throw "$Name JSON output was not ASCII-safe"
         }
@@ -201,17 +243,39 @@ function Invoke-RecoveryCase {
         (([string][char]0x4e2d) + ([string][char]0x6587)),
         [string][char]0x2028
     )) {
-        if ($trimmed.Contains($forbidden)) {
+        if ($jsonText.Contains($forbidden)) {
             throw "$Name JSON output contained forbidden diagnostic content"
         }
     }
-    $parsed = $trimmed | ConvertFrom-Json
+    $keyMatches = [regex]::Matches(
+        $jsonText,
+        '(?<=[{,])"(?<key>(?:\\["\\/bfnrt]|\\u[0-9a-fA-F]{4}|[^"\\])+)":'
+    )
+    $seenKeys = @{}
+    foreach ($keyMatch in $keyMatches) {
+        $key = $keyMatch.Groups["key"].Value
+        if ($seenKeys.ContainsKey($key)) {
+            throw "$Name JSON output contained duplicate key $key"
+        }
+        $seenKeys[$key] = $true
+    }
+    $parsed = $jsonText | ConvertFrom-Json
+    if ($keyMatches.Count -ne @($parsed.PSObject.Properties).Count) {
+        throw "$Name JSON key scanner did not match the parsed field set"
+    }
     if ([int]$parsed.contract_version -ne 1 -or
         $null -eq $parsed.success -or
         -not [string]$parsed.operation -or
         -not [string]$parsed.mode -or
         -not [string]$parsed.status) {
         throw "$Name JSON contract envelope is incomplete"
+    }
+    if (-not $ExpectedOperation -or -not $ExpectedMode) {
+        throw "$Name test case omitted expected operation or mode"
+    }
+    if ($parsed.operation -ne $ExpectedOperation -or
+        $parsed.mode -ne $ExpectedMode) {
+        throw "$Name operation or mode is invalid"
     }
     if ([bool]$parsed.success) {
         $successFields = @(
@@ -278,6 +342,12 @@ function Invoke-RecoveryCase {
             }
         }
     }
+    if ([bool]$parsed.mutation_performed -ne $ExpectedMutationPerformed -or
+        [bool]$parsed.journal_retained -ne $ExpectedJournalRetained -or
+        [bool]$parsed.connector_acl_mutated -ne $ExpectedConnectorAclMutated -or
+        [bool]$parsed.finalize_performed -ne $ExpectedFinalizePerformed) {
+        throw "$Name critical mutation flags are invalid"
+    }
     return $parsed
 }
 
@@ -287,8 +357,13 @@ try {
     $repairReady = Invoke-RecoveryCase `
         -Name "repair-ready" `
         -Scenario "repair_ready" `
-        -Arguments @("-OutputFormat", "Json")
-    if (-not $repairReady.success -or $repairReady.status -ne "repair_ready" -or
+        -Arguments @("-OutputFormat", "Json") `
+        -ExpectedOperation "verify" `
+        -ExpectedMode "read_only"
+    if (-not $repairReady.success -or
+        $repairReady.operation -ne "verify" -or
+        $repairReady.mode -ne "read_only" -or
+        $repairReady.status -ne "repair_ready" -or
         -not $repairReady.repair_ready -or $repairReady.rollback_exact) {
         throw "Read-only repair-ready JSON result is invalid"
     }
@@ -296,18 +371,36 @@ try {
     $exact = Invoke-RecoveryCase `
         -Name "exact" `
         -Scenario "exact" `
-        -Arguments @("-OutputFormat", "Json")
-    if (-not $exact.success -or $exact.status -ne "rollback_exact" -or
-        -not $exact.rollback_exact -or $exact.mutation_performed) {
+        -Arguments @("-OutputFormat", "Json") `
+        -ExpectedOperation "verify" `
+        -ExpectedMode "read_only"
+    if (-not $exact.success -or
+        $exact.operation -ne "verify" -or
+        $exact.mode -ne "read_only" -or
+        $exact.status -ne "rollback_exact" -or
+        -not $exact.rollback_exact -or
+        $exact.mutation_performed -or
+        -not $exact.journal_retained) {
         throw "Read-only exact JSON result is invalid"
     }
 
     $repair = Invoke-RecoveryCase `
         -Name "repair" `
         -Scenario "repair" `
-        -Arguments @("-RepairConnectorAcl", "-Apply", "-OutputFormat", "Json")
-    if (-not $repair.success -or $repair.status -ne "acl_repaired" -or
-        -not $repair.acl_repaired -or -not $repair.connector_acl_mutated -or
+        -Arguments @("-RepairConnectorAcl", "-Apply", "-OutputFormat", "Json") `
+        -ExpectedOperation "repair" `
+        -ExpectedMode "apply" `
+        -ExpectedMutationPerformed $true `
+        -ExpectedConnectorAclMutated $true
+    if (-not $repair.success -or
+        $repair.operation -ne "repair" -or
+        $repair.mode -ne "apply" -or
+        $repair.status -ne "acl_repaired" -or
+        -not $repair.rollback_exact -or
+        -not $repair.acl_repaired -or
+        -not $repair.mutation_performed -or
+        -not $repair.journal_retained -or
+        -not $repair.connector_acl_mutated -or
         $repair.connector_state_content_mutated) {
         throw "ACL repair JSON result is invalid"
     }
@@ -315,9 +408,21 @@ try {
     $finalize = Invoke-RecoveryCase `
         -Name "finalize" `
         -Scenario "exact" `
-        -Arguments @("-Finalize", "-Apply", "-OutputFormat", "Json")
-    if (-not $finalize.success -or $finalize.status -ne "finalized" -or
-        -not $finalize.finalize_performed -or $finalize.journal_retained) {
+        -Arguments @("-Finalize", "-Apply", "-OutputFormat", "Json") `
+        -ExpectedOperation "finalize" `
+        -ExpectedMode "apply" `
+        -ExpectedMutationPerformed $true `
+        -ExpectedJournalRetained $false `
+        -ExpectedFinalizePerformed $true
+    if (-not $finalize.success -or
+        $finalize.operation -ne "finalize" -or
+        $finalize.mode -ne "apply" -or
+        $finalize.status -ne "finalized" -or
+        -not $finalize.rollback_exact -or
+        -not $finalize.finalize_performed -or
+        -not $finalize.mutation_performed -or
+        $finalize.journal_retained -or
+        $finalize.connector_acl_mutated) {
         throw "Finalization JSON result is invalid"
     }
 
@@ -328,17 +433,114 @@ try {
             "-Finalize", "-RepairConnectorAcl", "-Apply",
             "-OutputFormat", "Json"
         ) `
-        -ExpectedExitCode 1
+        -ExpectedExitCode 1 `
+        -ExpectedOperation "repair" `
+        -ExpectedMode "apply"
     if ($invalid.success -or $invalid.error_code -ne "invalid_arguments" -or
         $invalid.mutation_performed) {
         throw "Invalid-arguments JSON failure is invalid"
+    }
+
+    $invalidFormat = Invoke-RecoveryCase `
+        -Name "invalid-output-format" `
+        -Scenario "exact" `
+        -Arguments @("-OutputFormat", "Xml") `
+        -ExpectedExitCode 1 `
+        -ExpectedOperation "verify" `
+        -ExpectedMode "read_only"
+    if ($invalidFormat.success -or
+        $invalidFormat.error_code -ne "invalid_arguments" -or
+        $invalidFormat.mutation_performed) {
+        throw "Invalid-output-format JSON failure is invalid"
+    }
+
+    $missingCommon = Invoke-RecoveryCase `
+        -Name "missing-common" `
+        -Scenario "exact" `
+        -Arguments @("-OutputFormat", "Json") `
+        -ExpectedExitCode 1 `
+        -CommonFixture "missing" `
+        -ExpectedOperation "verify" `
+        -ExpectedMode "read_only"
+    if ($missingCommon.success -or
+        $missingCommon.error_code -ne "initialization_failed" -or
+        $missingCommon.mutation_performed) {
+        throw "Missing-common JSON failure is invalid"
+    }
+
+    $brokenCommon = Invoke-RecoveryCase `
+        -Name "broken-common" `
+        -Scenario "exact" `
+        -Arguments @("-OutputFormat", "Json") `
+        -ExpectedExitCode 1 `
+        -CommonFixture "syntax_error" `
+        -ExpectedOperation "verify" `
+        -ExpectedMode "read_only"
+    if ($brokenCommon.success -or
+        $brokenCommon.error_code -ne "initialization_failed" -or
+        $brokenCommon.mutation_performed) {
+        throw "Broken-common JSON failure is invalid"
+    }
+
+    $pathInitializationFailure = Invoke-RecoveryCase `
+        -Name "path-initialization-failure" `
+        -Scenario "path_initialization_failure" `
+        -Arguments @("-OutputFormat", "Json") `
+        -ExpectedExitCode 1 `
+        -ExpectedOperation "verify" `
+        -ExpectedMode "read_only"
+    if ($pathInitializationFailure.success -or
+        $pathInitializationFailure.error_code -ne "initialization_failed" -or
+        $pathInitializationFailure.mutation_performed) {
+        throw "Path-initialization JSON failure is invalid"
+    }
+
+    $repairApplyFailure = Invoke-RecoveryCase `
+        -Name "repair-apply-failure" `
+        -Scenario "repair_apply_failure" `
+        -Arguments @("-RepairConnectorAcl", "-Apply", "-OutputFormat", "Json") `
+        -ExpectedExitCode 1 `
+        -ExpectedOperation "repair" `
+        -ExpectedMode "apply" `
+        -ExpectedMutationPerformed $true `
+        -ExpectedConnectorAclMutated $true
+    if ($repairApplyFailure.success -or
+        $repairApplyFailure.operation -ne "repair" -or
+        $repairApplyFailure.mode -ne "apply" -or
+        $repairApplyFailure.error_code -ne "acl_repair_failed" -or
+        -not $repairApplyFailure.mutation_performed -or
+        -not $repairApplyFailure.journal_retained -or
+        -not $repairApplyFailure.connector_acl_mutated -or
+        $repairApplyFailure.finalize_performed) {
+        throw "Repair-apply JSON failure is invalid"
+    }
+
+    $finalizeApplyFailure = Invoke-RecoveryCase `
+        -Name "finalize-apply-failure" `
+        -Scenario "finalize_apply_failure" `
+        -Arguments @("-Finalize", "-Apply", "-OutputFormat", "Json") `
+        -ExpectedExitCode 1 `
+        -ExpectedOperation "finalize" `
+        -ExpectedMode "apply" `
+        -ExpectedMutationPerformed $true
+    if ($finalizeApplyFailure.success -or
+        $finalizeApplyFailure.operation -ne "finalize" -or
+        $finalizeApplyFailure.mode -ne "apply" -or
+        $finalizeApplyFailure.error_code -ne "finalization_failed" -or
+        -not $finalizeApplyFailure.mutation_performed -or
+        -not $finalizeApplyFailure.journal_retained -or
+        $finalizeApplyFailure.connector_acl_mutated -or
+        $finalizeApplyFailure.finalize_performed) {
+        throw "Finalize-apply JSON failure is invalid"
     }
 
     $failure = Invoke-RecoveryCase `
         -Name "verifier-failure" `
         -Scenario "verifier_failure" `
         -Arguments @("-OutputFormat", "Json") `
-        -ExpectedExitCode 1
+        -ExpectedExitCode 1 `
+        -ExpectedOperation "verify" `
+        -ExpectedMode "read_only"
     if ($failure.success -or $failure.error_code -ne "verification_failed" -or
         $failure.mutation_performed) {
         throw "Verifier-failure JSON result is invalid"

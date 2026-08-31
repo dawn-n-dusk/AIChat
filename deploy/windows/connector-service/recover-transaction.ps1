@@ -8,7 +8,6 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-. (Join-Path $PSScriptRoot "common.ps1")
 
 $script:AIChatRecoveryJsonMode = $OutputFormat -ine "Human"
 $script:AIChatRecoveryJsonEmitted = $false
@@ -160,6 +159,8 @@ if ($script:AIChatRecoveryJsonMode) {
     Assert-AIChatRecoveryArguments
 }
 
+$script:AIChatRecoveryStage = "initialization"
+. (Join-Path $PSScriptRoot "common.ps1")
 $paths = Get-AIChatConnectorPaths
 Write-AIChatRecoveryHuman "state_root=$($paths.StateRoot)"
 Write-AIChatRecoveryHuman "task=\AIChat\CodexConnector"
@@ -476,6 +477,7 @@ Complete-AIChatRecoverySuccess -Value (New-AIChatRecoveryJsonSuccess `
     }
     $errorCode = switch ($script:AIChatRecoveryStage) {
         "arguments" { "invalid_arguments"; break }
+        "initialization" { "initialization_failed"; break }
         "repair_apply" { "acl_repair_failed"; break }
         "finalize_apply" { "finalization_failed"; break }
         "verification" { "verification_failed"; break }

@@ -34,7 +34,9 @@ ASCII-safe JSON object on stdout. Success objects contain fixed operation/mode,
 status, and native boolean fields. Failures exit nonzero with a fixed
 `error_code`, suppress human lines and raw exceptions, keep stderr free of
 diagnostics, and never include paths, credential values, SID/SDDL data, or
-untrusted text. Failure mutation flags mean the run may already have attempted
-or performed that mutation even if compensation restored the final ACL; they
-do not describe a final-state diff. See the parent README for the full field
-and operator-flow contract.
+untrusted text. Missing or invalid shared helpers and protected-path bootstrap
+failures use `initialization_failed`; unsupported format values use
+`invalid_arguments`. Failure mutation flags mean the run may already have
+attempted or performed that mutation even if compensation restored the final
+ACL; they do not describe a final-state diff. See the parent README for the
+full field and operator-flow contract.

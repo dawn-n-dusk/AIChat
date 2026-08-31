@@ -628,8 +628,16 @@ def test_recovery_json_contract_is_single_ascii_safe_and_versioned() -> None:
     assert 'if ($code -gt 0x7f)' in recovery
     assert "function Write-AIChatRecoveryJson" in recovery
     assert "function Complete-AIChatRecoverySuccess" in recovery
+    json_try = recovery.index("try {\nif ($OutputFormat")
+    initialization_stage = recovery.index(
+        '$script:AIChatRecoveryStage = "initialization"'
+    )
+    common_load = recovery.index('. (Join-Path $PSScriptRoot "common.ps1")')
+    path_initialization = recovery.index("$paths = Get-AIChatConnectorPaths")
+    assert json_try < initialization_stage < common_load < path_initialization
     assert recovery.count("contract_version = 1") == 2
     assert '"invalid_arguments"' in recovery
+    assert '"initialization_failed"' in recovery
     assert '"verification_failed"' in recovery
     assert '"acl_repair_failed"' in recovery
     assert '"finalization_failed"' in recovery
@@ -641,7 +649,16 @@ def test_recovery_json_contract_is_single_ascii_safe_and_versioned() -> None:
     assert '"acl_repaired"' in contract_test
     assert '"finalized"' in contract_test
     assert '"invalid_arguments"' in contract_test
+    assert '"initialization_failed"' in contract_test
     assert '"verification_failed"' in contract_test
+    assert '"invalid-output-format"' in contract_test
+    assert '"missing-common"' in contract_test
+    assert '"broken-common"' in contract_test
+    assert '"path-initialization-failure"' in contract_test
+    assert '"repair-apply-failure"' in contract_test
+    assert '"finalize-apply-failure"' in contract_test
+    assert "stdout.EndsWith" in contract_test
+    assert "duplicate key" in contract_test
     assert "0x2028" in contract_test
     assert "state_root=" in contract_test
     assert "test_recovery_json_contract.ps1" in workflow
