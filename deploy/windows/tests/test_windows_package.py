@@ -757,6 +757,10 @@ def test_recovery_json_runner_owns_the_powershell_51_launch_boundary() -> None:
     assert "mutation_possible" in runner
     assert "[Console]::Out.Write($stdout)" in runner
     assert "test_recovery_json_runner.ps1" in workflow
+    assert '$sourceRecovery = Join-Path $serviceRoot "recover-transaction.ps1"' in runner_test
+    assert '"real-protected-paths-$operation"' in runner_test
+    assert "Assert-RealProtectedPathFailure" in runner_test
+    assert "was not forwarded byte-exactly" in runner_test
 
     for marker in (
         '"success-$operation"',

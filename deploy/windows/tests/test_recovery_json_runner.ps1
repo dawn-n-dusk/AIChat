@@ -12,6 +12,7 @@ if ($env:OS -ne "Windows_NT" -or
 
 $serviceRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\connector-service")).Path
 $sourceRunner = Join-Path $serviceRoot "invoke-recovery-json.ps1"
+$sourceRecovery = Join-Path $serviceRoot "recover-transaction.ps1"
 $unicodeProbe = ([string][char]0x4e2d) + ([string][char]0x6587)
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) "aichat runner (&) $unicodeProbe $([Guid]::NewGuid().ToString('N'))"
 New-Item -ItemType Directory -Path $testRoot | Out-Null
@@ -239,6 +240,27 @@ switch ($scenario) {
 }
 '@
 
+$realRecoveryCommonFixture = @'
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
+
+function Get-AIChatConnectorPaths {
+    $root = [string]$env:AICHAT_RUNNER_REAL_RECOVERY_ROOT
+    return [pscustomobject]@{
+        StateRoot = $root
+        ProtectedRoot = $root
+        TransactionPath = Join-Path $root "transaction.json"
+        BackupsDirectory = Join-Path $root "backups"
+        ConnectorDataRoot = Join-Path $root "connector-data"
+    }
+}
+
+function Assert-AIChatPrivateDirectoryTree {
+    param($Path, $ProtectedRoot)
+    throw "synthetic protected path failure at C:\private token=secret SID=S-1-5 SDDL=O:BAD"
+}
+'@
+
 function New-RunnerCase {
     param(
         [Parameter(Mandatory = $true)][string]$Name,
@@ -288,9 +310,152 @@ function New-RunnerCase {
     return $caseRoot
 }
 
+function New-RealRecoveryRunnerCase {
+    param([Parameter(Mandatory = $true)][string]$Name)
+
+    $caseRoot = New-RunnerCase `
+        -Name $Name `
+        -TargetText (Get-Content -LiteralPath $sourceRecovery -Raw)
+    [IO.File]::WriteAllText(
+        (Join-Path $caseRoot "common.ps1"),
+        $realRecoveryCommonFixture,
+        [Text.UTF8Encoding]::new($false)
+    )
+    $stateRoot = Join-Path $caseRoot "protected-state"
+    New-Item -ItemType Directory -Path $stateRoot | Out-Null
+    return [pscustomobject]@{
+        CaseRoot = $caseRoot
+        StateRoot = $stateRoot
+    }
+}
+
 function Quote-WindowsArgument {
     param([Parameter(Mandatory = $true)][string]$Value)
     return '"' + $Value.Replace('"', '\"') + '"'
+}
+
+function Invoke-RealRecoveryTargetCase {
+    param(
+        [Parameter(Mandatory = $true)][string]$CaseRoot,
+        [Parameter(Mandatory = $true)][string]$StateRoot,
+        [Parameter(Mandatory = $true)][string]$Operation
+    )
+
+    $targetPath = Join-Path $CaseRoot "recover-transaction.ps1"
+    $targetArguments = switch ($Operation) {
+        "verify" { @("-OutputFormat", "Json"); break }
+        "repair" { @("-RepairConnectorAcl", "-Apply", "-OutputFormat", "Json"); break }
+        "finalize" { @("-Finalize", "-Apply", "-OutputFormat", "Json"); break }
+        default { throw "Unsupported real recovery operation" }
+    }
+    $arguments = @(
+        "-NoLogo", "-NoProfile", "-NonInteractive",
+        "-ExecutionPolicy", "Bypass", "-File", $targetPath
+    ) + $targetArguments
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = Join-Path $PSHOME "powershell.exe"
+    $startInfo.Arguments = @($arguments | ForEach-Object {
+        Quote-WindowsArgument ([string]$_)
+    }) -join " "
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $startInfo.EnvironmentVariables["AICHAT_RUNNER_REAL_RECOVERY_ROOT"] = $StateRoot
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    [void]$process.Start()
+    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+    $stderrTask = $process.StandardError.ReadToEndAsync()
+    if (-not $process.WaitForExit(15000)) {
+        try { $process.Kill() } catch {}
+        throw "Real recovery target case timed out"
+    }
+    return [pscustomobject]@{
+        ExitCode = [int]$process.ExitCode
+        Stdout = $stdoutTask.GetAwaiter().GetResult()
+        Stderr = $stderrTask.GetAwaiter().GetResult()
+    }
+}
+
+function Assert-RealProtectedPathFailure {
+    param(
+        [Parameter(Mandatory = $true)]$Result,
+        [Parameter(Mandatory = $true)][string]$Operation
+    )
+
+    if ($Result.ExitCode -ne 1 -or $Result.Stderr.Length -ne 0) {
+        throw "$Operation real protected-path failure did not use target exit 1"
+    }
+    if ($Result.Stdout.EndsWith("`r`n")) {
+        $jsonText = $Result.Stdout.Substring(0, $Result.Stdout.Length - 2)
+        $expectedStdout = $jsonText + "`r`n"
+    } elseif ($Result.Stdout.EndsWith("`n")) {
+        $jsonText = $Result.Stdout.Substring(0, $Result.Stdout.Length - 1)
+        $expectedStdout = $jsonText + "`n"
+    } else {
+        throw "$Operation real protected-path failure omitted its newline"
+    }
+    if (-not $jsonText -or
+        $Result.Stdout -cne $expectedStdout -or
+        $jsonText.Trim() -cne $jsonText -or
+        $jsonText.Contains("`r") -or
+        $jsonText.Contains("`n") -or
+        -not $jsonText.StartsWith("{") -or
+        -not $jsonText.EndsWith("}")) {
+        throw "$Operation real protected-path failure framing was invalid"
+    }
+    foreach ($forbidden in @(
+        "C:\private", "token=secret", "S-1-5", "SDDL=O:BAD",
+        "state_root=", "task=\AIChat\CodexConnector"
+    )) {
+        if ($Result.Stdout.Contains($forbidden) -or
+            $Result.Stderr.Contains($forbidden)) {
+            throw "$Operation real protected-path failure leaked diagnostics"
+        }
+    }
+    $parsed = $jsonText | ConvertFrom-Json
+    $actualFields = @($parsed.PSObject.Properties.Name)
+    $expectedFields = @(
+        "contract_version", "operation", "mode", "success", "status",
+        "error_code", "diagnostic_code", "mutation_performed",
+        "journal_retained", "token_read", "task_write_attempted",
+        "connector_state_mutated", "connector_state_content_mutated",
+        "connector_acl_mutated", "finalize_performed"
+    )
+    if ($actualFields.Count -ne $expectedFields.Count) {
+        throw "$Operation real protected-path field count changed"
+    }
+    for ($index = 0; $index -lt $expectedFields.Count; $index++) {
+        if ([string]$actualFields[$index] -cne [string]$expectedFields[$index]) {
+            throw "$Operation real protected-path field order changed"
+        }
+    }
+    $expectedMode = if ($Operation -eq "verify") { "read_only" } else { "apply" }
+    if ([int]$parsed.contract_version -ne 2 -or
+        [string]$parsed.operation -cne $Operation -or
+        [string]$parsed.mode -cne $expectedMode -or
+        $parsed.success -isnot [bool] -or
+        [bool]$parsed.success -or
+        [string]$parsed.status -cne "verification_failed" -or
+        [string]$parsed.error_code -cne "verification_failed" -or
+        [string]$parsed.diagnostic_code -cne "protected_paths_invalid") {
+        throw "$Operation real protected-path envelope was invalid"
+    }
+    foreach ($field in @(
+        "mutation_performed", "token_read", "task_write_attempted",
+        "connector_state_mutated", "connector_state_content_mutated",
+        "connector_acl_mutated", "finalize_performed"
+    )) {
+        if ($parsed.$field -isnot [bool] -or [bool]$parsed.$field) {
+            throw "$Operation real protected-path mutation flag $field was invalid"
+        }
+    }
+    if ($parsed.journal_retained -isnot [bool] -or
+        -not [bool]$parsed.journal_retained) {
+        throw "$Operation real protected-path journal flag was invalid"
+    }
+    return $parsed
 }
 
 function Invoke-RunnerCase {
@@ -475,6 +640,29 @@ try {
         if ($result.ExitCode -ne 0 -or $result.Stderr.Length -ne 0 -or
             $result.Stdout -cne $expected) {
             throw "$operation success was not forwarded exactly"
+        }
+    }
+
+    foreach ($operation in @("verify", "repair", "finalize")) {
+        $realCase = New-RealRecoveryRunnerCase `
+            -Name "real-protected-paths-$operation"
+        $environment = @{
+            AICHAT_RUNNER_REAL_RECOVERY_ROOT = [string]$realCase.StateRoot
+        }
+        $direct = Invoke-RealRecoveryTargetCase `
+            -CaseRoot ([string]$realCase.CaseRoot) `
+            -StateRoot ([string]$realCase.StateRoot) `
+            -Operation $operation
+        [void](Assert-RealProtectedPathFailure $direct $operation)
+        $forwarded = Invoke-RunnerCase `
+            -CaseRoot ([string]$realCase.CaseRoot) `
+            -Operation $operation `
+            -Environment $environment
+        [void](Assert-RealProtectedPathFailure $forwarded $operation)
+        if ($forwarded.ExitCode -ne $direct.ExitCode -or
+            $forwarded.Stdout -cne $direct.Stdout -or
+            $forwarded.Stderr -cne $direct.Stderr) {
+            throw "$operation real protected-path target was not forwarded byte-exactly"
         }
     }
 
