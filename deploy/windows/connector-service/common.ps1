@@ -1801,6 +1801,9 @@ function Test-AIChatTaskSchedulerNotFoundException {
 }
 
 function Get-AIChatConnectorTask {
+    if ($env:AICHAT_WINDOWS_CONNECTOR_TEST_TASK_ACCESS -eq "deny") {
+        throw "Synthetic Task Scheduler access denial"
+    }
     $service = New-Object -ComObject "Schedule.Service"
     $service.Connect()
     try {
@@ -1854,6 +1857,9 @@ function Get-AIChatTaskArguments {
 function Register-AIChatDisabledTask {
     param([Parameter(Mandatory = $true)]$Paths)
 
+    if ($env:AICHAT_WINDOWS_CONNECTOR_TEST_TASK_ACCESS -eq "deny") {
+        throw "Synthetic Task Scheduler access denial"
+    }
     $sid = Get-AIChatCurrentSid
     $escapedDescription = [Security.SecurityElement]::Escape((Get-AIChatTaskDescription))
     $escapedCommand = [Security.SecurityElement]::Escape((Get-AIChatPowerShellPath))
@@ -2128,6 +2134,14 @@ function Restore-AIChatTaskSnapshot {
         [Parameter(Mandatory = $true)]$Snapshot,
         [Parameter(Mandatory = $true)]$Paths
     )
+    $mode = if ($Snapshot.PSObject.Properties["mode"]) {
+        [string]$Snapshot.mode
+    } else { "managed" }
+    if ($mode -eq "untouched") { return }
+    if ($mode -ne "managed") {
+        throw "Scheduled Task rollback mode is invalid"
+    }
+
     $current = Get-AIChatConnectorTask
     if ($null -ne $current) {
         Assert-AIChatTaskContract -Task $current -Paths $Paths
@@ -2182,7 +2196,7 @@ function Assert-AIChatTransactionManifest {
     $schemaVersion = if ($Manifest.PSObject.Properties["schema_version"]) {
         [int]$Manifest.schema_version
     } else { 0 }
-    if ($schemaVersion -notin @(1, 2, 3) -or
+    if ($schemaVersion -notin @(1, 2, 3, 4) -or
         -not $Manifest.PSObject.Properties["kind"] -or
         [string]$Manifest.kind -ne "aichat-windows-connector-transaction" -or
         -not $Manifest.PSObject.Properties["transaction_id"] -or
@@ -2221,7 +2235,7 @@ function Assert-AIChatTransactionManifest {
         -not $hasMappingState -and -not $hasConnectorAcl -and
         $seen.Count -eq ($targets.Count - 1)
     # Two schema-v2 builds existed independently before integration. Accept
-    # either historical shape fail-closed, but emit only schema v3 below.
+    # either historical shape fail-closed; current installs emit schema v4.
     $aclOnlyV2 = $schemaVersion -eq 2 -and
         -not $hasMappingState -and $hasConnectorAcl -and
         $seen.Count -eq ($targets.Count - 1)
@@ -2231,8 +2245,12 @@ function Assert-AIChatTransactionManifest {
     $integratedV3 = $schemaVersion -eq 3 -and
         $hasMappingState -and $hasConnectorAcl -and
         $seen.Count -eq $targets.Count
+    $integratedV4 = $schemaVersion -eq 4 -and
+        $hasMappingState -and $hasConnectorAcl -and
+        $seen.Count -eq $targets.Count
     if (-not $legacyV1 -and -not $aclOnlyV2 -and
-        -not $mappingOnlyV2 -and -not $integratedV3) {
+        -not $mappingOnlyV2 -and -not $integratedV3 -and
+        -not $integratedV4) {
         throw "Windows connector transaction does not cover every fixed file target"
     }
     if (-not $Manifest.PSObject.Properties["task"] -or
@@ -2243,7 +2261,23 @@ function Assert-AIChatTransactionManifest {
     if ($hasConnectorAcl) {
         Assert-AIChatConnectorDataAclSnapshot -Snapshot $Manifest.connector_data_acl
     }
-    if ([bool]$Manifest.task.existed) {
+    $taskMode = if ($Manifest.task.PSObject.Properties["mode"]) {
+        [string]$Manifest.task.mode
+    } else { "managed" }
+    if ($taskMode -notin @("managed", "untouched") -or
+        ($schemaVersion -eq 4 -and
+            -not $Manifest.task.PSObject.Properties["mode"]) -or
+        ($schemaVersion -lt 4 -and $taskMode -ne "managed")) {
+        throw "Windows connector transaction task mode is invalid"
+    }
+    if ($taskMode -eq "untouched") {
+        if ($schemaVersion -ne 4 -or
+            @($Manifest.task.PSObject.Properties).Count -ne 1) {
+            throw "Stage-only transaction must not contain a Scheduled Task snapshot"
+        }
+    } elseif (-not $Manifest.task.PSObject.Properties["existed"]) {
+        throw "Windows connector transaction task snapshot is invalid"
+    } elseif ([bool]$Manifest.task.existed) {
         if ([bool]$Manifest.task.enabled -or
             -not $Manifest.task.PSObject.Properties["xml"] -or
             -not $Manifest.task.PSObject.Properties["xml_sha256"] -or
@@ -2266,9 +2300,14 @@ function Invoke-AIChatManifestRollback {
         -Paths $Paths `
         -BackupDirectory $BackupDirectory
 
-    $currentTask = Get-AIChatConnectorTask
-    if ($null -ne $currentTask) {
-        Assert-AIChatTaskContract -Task $currentTask -Paths $Paths
+    $taskMode = if ($Manifest.task.PSObject.Properties["mode"]) {
+        [string]$Manifest.task.mode
+    } else { "managed" }
+    if ($taskMode -eq "managed") {
+        $currentTask = Get-AIChatConnectorTask
+        if ($null -ne $currentTask) {
+            Assert-AIChatTaskContract -Task $currentTask -Paths $Paths
+        }
     }
     $targets = Get-AIChatDeploymentTargets -Paths $Paths
     $entries = @($Manifest.files)

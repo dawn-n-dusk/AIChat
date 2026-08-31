@@ -244,6 +244,34 @@ disabled. Any failure attempts an inverse rollback; an incomplete rollback
 leaves a protected journal and fails closed. `check.ps1` never displays a
 token. `-Online` performs only the credential-bound identity GET.
 
+For a supervised foreground acceptance on a host where Task Scheduler access
+is unavailable or intentionally out of scope, use the transactional stage-only
+mode:
+
+```powershell
+.\deploy\windows\connector-service\install.ps1 `
+  -SettingsPath $settings `
+  -RepositoryRoot $PWD `
+  -StageOnly -Apply -WhatIf
+
+.\deploy\windows\connector-service\install.ps1 `
+  -SettingsPath $settings `
+  -RepositoryRoot $PWD `
+  -StageOnly -Apply
+
+.\deploy\windows\connector-service\check.ps1 -StageOnly
+```
+
+`-StageOnly` installs and validates the same pinned package, protected settings,
+mapping metadata, and connector-data ACL contract, but it never opens Task
+Scheduler COM and never queries, creates, replaces, restores, or deletes
+`\AIChat\CodexConnector`. Its schema-v4 journal records `task.mode=untouched`,
+so install failure recovery and `rollback.ps1 -StageOnly -Apply` preserve the
+same no-task boundary. `check.ps1 -StageOnly` deliberately skips the task and
+credential-bound online check; `-StageOnly -Online` is rejected. The connector
+remains stopped until the operator explicitly runs the installed launcher in
+the foreground.
+
 The task remains disabled after a successful install. Do not enable it until
 the Mac/core PR is compatible and a supervised Windows acceptance verifies the
 native `codex.exe app-server` initialize handshake, signed-in identity, and
@@ -361,6 +389,8 @@ opt-in above; `request,result` inbound alone cannot create a relay loop.
 .\deploy\windows\connector-service\rollback.ps1
 .\deploy\windows\connector-service\rollback.ps1 -Apply -WhatIf
 .\deploy\windows\connector-service\rollback.ps1 -Apply
+.\deploy\windows\connector-service\rollback.ps1 -StageOnly -Apply -WhatIf
+.\deploy\windows\connector-service\rollback.ps1 -StageOnly -Apply
 
 .\deploy\windows\connector-service\uninstall.ps1
 .\deploy\windows\connector-service\uninstall.ps1 -Apply -WhatIf

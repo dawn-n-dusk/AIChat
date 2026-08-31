@@ -243,6 +243,32 @@ def test_connector_service_is_disabled_triggerless_and_current_user_only() -> No
     )
 
 
+def test_connector_service_stage_only_never_accesses_task_scheduler() -> None:
+    root = ROOT / "connector-service"
+    install = (root / "install.ps1").read_text(encoding="utf-8")
+    check = (root / "check.ps1").read_text(encoding="utf-8")
+    rollback = (root / "rollback.ps1").read_text(encoding="utf-8")
+    common = (root / "common.ps1").read_text(encoding="utf-8")
+    functional = (ROOT / "tests" / "test_connector_service.ps1").read_text(
+        encoding="utf-8"
+    )
+    assert "[switch]$StageOnly" in install
+    assert "if (-not $StageOnly) {\n        $existingTask = Get-AIChatConnectorTask" in install
+    assert "if (-not $StageOnly) {\n        Register-AIChatDisabledTask" in install
+    assert '[pscustomobject]@{ mode = "untouched" }' in install
+    assert 'Write-Host "task_scheduler_accessed=false"' in install
+    assert 'Write-Host "manual_launcher_ready=true"' in install
+    assert "[switch]$StageOnly" in check
+    assert "stage-only package validation does not access Task Scheduler" in check
+    assert "[switch]$StageOnly" in rollback
+    assert "Stage-only rollback refuses a deployment" in rollback
+    assert '$mode -eq "untouched"' in common
+    assert '$taskMode -eq "managed"' in common
+    assert "AICHAT_WINDOWS_CONNECTOR_TEST_TASK_ACCESS" in common
+    assert 'AICHAT_WINDOWS_CONNECTOR_TEST_TASK_ACCESS = "deny"' in functional
+    assert "-StageOnly" in functional
+
+
 def test_connector_service_launcher_fixes_security_and_environment_contract() -> None:
     root = ROOT / "connector-service"
     launcher = (root / "launcher.ps1").read_text(encoding="utf-8")
@@ -400,6 +426,7 @@ def test_connector_service_state_namespace_is_mapping_scoped_and_legacy_safe() -
     assert "$aclOnlyV2" in common
     assert "$mappingOnlyV2" in common
     assert "$integratedV3" in common
+    assert "$integratedV4" in common
     assert 'Remove-Item -LiteralPath $Paths.MappingStatePath -Force' in common
     assert "PreviousSettings" in install
     assert "PreviousMappingState" in install
@@ -437,7 +464,7 @@ def test_connector_service_journal_uses_fixed_ids_hashes_and_inverse_rollback() 
     common = (root / "common.ps1").read_text(encoding="utf-8")
     install = (root / "install.ps1").read_text(encoding="utf-8")
     rollback = (root / "rollback.ps1").read_text(encoding="utf-8")
-    assert 'schema_version = 3' in install
+    assert 'schema_version = 4' in install
     assert 'kind = "aichat-windows-connector-transaction"' in install
     assert 'status = "prepared"' in install
     assert 'Set-AIChatTransactionStatus -Status "applying"' in install
@@ -462,6 +489,7 @@ def test_connector_service_journal_uses_fixed_ids_hashes_and_inverse_rollback() 
     assert "Assert-AIChatTransactionManifest" in rollback
     assert "Invoke-AIChatManifestRollback" in rollback
     assert "Restore-AIChatTaskSnapshot" in common
+    assert 'mode = "untouched"' in install
     assert 'Write-Host "mapping_state_rollback=deferred_until_apply"' in rollback
     assert 'Write-Host "connector_data_mutated=false"' in rollback
 

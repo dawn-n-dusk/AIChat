@@ -673,6 +673,107 @@ public static class Program {
         throw "Connector service check failed after first install; failed_checks=$failedCheckSummary"
     }
 
+    # Stage-only upgrade is the foreground acceptance path for hosts where
+    # Task Scheduler registration is unavailable. The synthetic denial makes
+    # any accidental query, registration, restore, or delete fail immediately.
+    $stageOnlyTaskXml = [string](Get-AIChatConnectorTask).Xml
+    $stageOnlyActiveHash = (Get-FileHash `
+        -LiteralPath $paths.ActiveReleasePath `
+        -Algorithm SHA256).Hash
+    $stageOnlySettingsHash = (Get-FileHash `
+        -LiteralPath $paths.SettingsPath `
+        -Algorithm SHA256).Hash
+    $env:AICHAT_WINDOWS_CONNECTOR_TEST_TASK_ACCESS = "deny"
+    try {
+        $stageOnlyWhatIf = & $installer `
+            -SettingsPath $settingsPath `
+            -RepositoryRoot $repositoryRoot `
+            -StageOnly -Apply -WhatIf *>&1 | Out-String
+        Add-CapturedOutput $stageOnlyWhatIf
+        if ($LASTEXITCODE -ne 0 -or
+            $stageOnlyWhatIf -notmatch '(?m)^stage_only=true\s*$' -or
+            $stageOnlyWhatIf -notmatch '(?m)^mutation_performed=false\s*$' -or
+            $stageOnlyWhatIf -notmatch '(?m)^task_scheduler_accessed=false\s*$') {
+            throw "Stage-only WhatIf did not preserve the no-task boundary"
+        }
+
+        $env:AICHAT_WINDOWS_CONNECTOR_TEST_FAILURE = "after-files"
+        Invoke-ExpectedFailure `
+            -Label "stage-only failure rollback without Task Scheduler" `
+            -Action {
+                & $installer `
+                    -SettingsPath $settingsPath `
+                    -RepositoryRoot $repositoryRoot `
+                    -StageOnly -Apply
+            }
+        $env:AICHAT_WINDOWS_CONNECTOR_TEST_FAILURE = $null
+        if ((Test-Path -LiteralPath $paths.TransactionPath) -or
+            (Get-FileHash -LiteralPath $paths.ActiveReleasePath -Algorithm SHA256).Hash -ne
+                $stageOnlyActiveHash -or
+            (Get-FileHash -LiteralPath $paths.SettingsPath -Algorithm SHA256).Hash -ne
+                $stageOnlySettingsHash) {
+            throw "Stage-only failure recovery did not restore the prior package"
+        }
+
+        $stageOnlyInstall = & $installer `
+            -SettingsPath $settingsPath `
+            -RepositoryRoot $repositoryRoot `
+            -StageOnly -Apply *>&1 | Out-String
+        Add-CapturedOutput $stageOnlyInstall
+        if ($LASTEXITCODE -ne 0 -or
+            $stageOnlyInstall -notmatch '(?m)^manual_launcher_ready=true\s*$' -or
+            $stageOnlyInstall -notmatch '(?m)^task_scheduler_accessed=false\s*$' -or
+            $stageOnlyInstall -notmatch '(?m)^task_mutation_performed=false\s*$') {
+            throw "Stage-only install did not complete without Task Scheduler"
+        }
+        $stageOnlyManifestPointer = Read-AIChatPrivateJson `
+            -Path $paths.LastBackupPath `
+            -ProtectedRoot $paths.ProtectedRoot
+        $stageOnlyManifest = Read-AIChatPrivateJson `
+            -Path (Join-Path `
+                (Join-Path $paths.BackupsDirectory ([string]$stageOnlyManifestPointer.transaction_id)) `
+                "manifest.json") `
+            -ProtectedRoot $paths.ProtectedRoot
+        if ([int]$stageOnlyManifest.schema_version -ne 4 -or
+            [string]$stageOnlyManifest.task.mode -ne "untouched" -or
+            @($stageOnlyManifest.task.PSObject.Properties).Count -ne 1) {
+            throw "Stage-only journal captured Scheduled Task state"
+        }
+
+        $stageOnlyCheck = & $checker -StageOnly *>&1 | Out-String
+        Add-CapturedOutput $stageOnlyCheck
+        if ($LASTEXITCODE -ne 0 -or
+            $stageOnlyCheck -notmatch '(?m)^task_scheduler_accessed=false\s*$' -or
+            $stageOnlyCheck -notmatch '(?m)^expected_service_enabled=unchanged\s*$') {
+            throw "Stage-only package validation accessed Task Scheduler"
+        }
+
+        $stageOnlyRollbackWhatIf = & $rollback `
+            -StageOnly -Apply -WhatIf *>&1 | Out-String
+        Add-CapturedOutput $stageOnlyRollbackWhatIf
+        if ($LASTEXITCODE -ne 0 -or
+            $stageOnlyRollbackWhatIf -notmatch '(?m)^mutation_performed=false\s*$') {
+            throw "Stage-only rollback WhatIf was not inert"
+        }
+        $stageOnlyRollback = & $rollback -StageOnly -Apply *>&1 | Out-String
+        Add-CapturedOutput $stageOnlyRollback
+        if ($LASTEXITCODE -ne 0 -or
+            $stageOnlyRollback -notmatch '(?m)^task_scheduler_accessed=false\s*$' -or
+            $stageOnlyRollback -notmatch '(?m)^task_mutation_performed=false\s*$') {
+            throw "Stage-only rollback accessed Task Scheduler"
+        }
+    } finally {
+        $env:AICHAT_WINDOWS_CONNECTOR_TEST_FAILURE = $null
+        $env:AICHAT_WINDOWS_CONNECTOR_TEST_TASK_ACCESS = $null
+    }
+    if ([string](Get-AIChatConnectorTask).Xml -ne $stageOnlyTaskXml -or
+        (Get-FileHash -LiteralPath $paths.ActiveReleasePath -Algorithm SHA256).Hash -ne
+            $stageOnlyActiveHash -or
+        (Get-FileHash -LiteralPath $paths.SettingsPath -Algorithm SHA256).Hash -ne
+            $stageOnlySettingsHash) {
+        throw "Stage-only install/rollback changed the existing task or prior active package"
+    }
+
     New-Item -ItemType HardLink -Path $hardlinkAlias -Target $paths.SettingsPath | Out-Null
     Invoke-ExpectedFailure `
         -Label "hardlink alias check" `
@@ -872,6 +973,7 @@ public static class Program {
     Write-Host "Windows connector service functional test passed"
 } finally {
     $env:AICHAT_WINDOWS_CONNECTOR_TEST_FAILURE = $null
+    $env:AICHAT_WINDOWS_CONNECTOR_TEST_TASK_ACCESS = $null
     $env:AICHAT_CI_CODEX_EXEC_CANARY = $null
     $env:AICHAT_WINDOWS_PRIVATE_SID = $null
     if ($null -ne (Get-AIChatConnectorTask)) {
