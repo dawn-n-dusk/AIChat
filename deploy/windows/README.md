@@ -344,6 +344,27 @@ Run the verifier again as a separate operator decision:
 .\deploy\windows\connector-service\recover-transaction.ps1
 ```
 
+Automation may request the versioned machine-readable contract without
+changing the default human-facing output:
+
+```powershell
+.\deploy\windows\connector-service\recover-transaction.ps1 `
+  -OutputFormat Json
+```
+
+`-OutputFormat Json` writes exactly one compact ASCII-safe JSON object to
+stdout and no human `state_root`, task, or diagnostic lines. Contract version 1
+includes `operation`, `mode`, native JSON boolean outcome fields, `success`, and
+`status`; failures exit nonzero and return a fixed `error_code` instead of the
+raw exception. JSON output never includes filesystem paths, credential values,
+SIDs, SDDL, or untrusted exception text, and caught failures keep stderr empty.
+The same format is available for `-RepairConnectorAcl -Apply` and
+`-Finalize -Apply`. On a failure, `mutation_performed` and
+`connector_acl_mutated` mean that this invocation may already have attempted or
+performed the target mutation, even if compensation restored the final ACL;
+they are not a statement that final state still differs from the starting
+state. `journal_retained` reports whether the live blocker was cleared.
+
 Only after the verifier reports `rollback_exact=true` may the operator archive
 the original journal and clear the live blocker:
 

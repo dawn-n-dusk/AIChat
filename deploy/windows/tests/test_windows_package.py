@@ -526,10 +526,10 @@ def test_connector_service_incomplete_rollback_recovery_is_read_only_and_exact()
         "Start-ScheduledTask",
     ):
         assert forbidden not in recovery
-    assert 'Write-Host "task_write_attempted=false"' in recovery
-    assert 'Write-Host "task_mode=$($Value.task_mode)"' in recovery
-    assert 'Write-Host "task_scheduler_accessed=$($Value.task_scheduler_accessed' in recovery
-    assert 'Write-Host "connector_state_mutated=false"' in recovery
+    assert 'Write-AIChatRecoveryHuman "task_write_attempted=false"' in recovery
+    assert 'Write-AIChatRecoveryHuman "task_mode=$($Value.task_mode)"' in recovery
+    assert 'Write-AIChatRecoveryHuman "task_scheduler_accessed=$($Value.task_scheduler_accessed' in recovery
+    assert 'Write-AIChatRecoveryHuman "connector_state_mutated=false"' in recovery
     restore = common[common.index("function Restore-AIChatTaskSnapshot") :]
     assert restore.index("$null -ne $current") < restore.index(
         'New-Object -ComObject "Schedule.Service"'
@@ -577,12 +577,12 @@ def test_connector_service_acl_snapshot_repair_is_narrow_and_separate() -> None:
         "Invoke-AIChatConnectorDataAclSnapshotRepair"
     ) < repair.index("Assert-AIChatManifestRollbackComplete")
     assert repair.count("Get-AIChatConnectorDataContentSnapshot") >= 3
-    assert 'Write-Host "repair_ready=true"' in repair
-    assert 'Write-Host "acl_repaired=true"' in repair
-    assert 'Write-Host "journal_retained=true"' in repair
-    assert 'Write-Host "finalize_performed=false"' in repair
-    assert 'Write-Host "connector_state_content_mutated=false"' in repair
-    assert 'Write-Host "connector_acl_mutated=true"' in repair
+    assert 'Write-AIChatRecoveryHuman "repair_ready=true"' in repair
+    assert 'Write-AIChatRecoveryHuman "acl_repaired=true"' in repair
+    assert 'Write-AIChatRecoveryHuman "journal_retained=true"' in repair
+    assert 'Write-AIChatRecoveryHuman "finalize_performed=false"' in repair
+    assert 'Write-AIChatRecoveryHuman "connector_state_content_mutated=false"' in repair
+    assert 'Write-AIChatRecoveryHuman "connector_acl_mutated=true"' in repair
     assert repair.index("Read-AIChatRecoveryJournalUnchanged") < repair.index(
         "Invoke-AIChatConnectorDataAclSnapshotRepair"
     )
@@ -609,6 +609,61 @@ def test_connector_service_acl_snapshot_repair_is_narrow_and_separate() -> None:
     assert "PostCompensationVerifier" in repair_helper
     assert "exact pre-repair ACL restored; journal retained" in repair_helper
     assert "pre-repair ACL compensation failed; journal retained" in repair_helper
+
+
+def test_recovery_json_contract_is_single_ascii_safe_and_versioned() -> None:
+    root = ROOT / "connector-service"
+    recovery = (root / "recover-transaction.ps1").read_text(encoding="utf-8")
+    contract_test = (ROOT / "tests" / "test_recovery_json_contract.ps1").read_text(
+        encoding="utf-8"
+    )
+    workflow = (REPOSITORY_ROOT / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert '[string]$OutputFormat = "Human"' in recovery
+    assert '$OutputFormat -ine "Human"' in recovery
+    assert "function ConvertTo-AIChatAsciiJson" in recovery
+    assert 'ConvertTo-Json -Compress -Depth 8' in recovery
+    assert 'if ($code -gt 0x7f)' in recovery
+    assert "function Write-AIChatRecoveryJson" in recovery
+    assert "function Complete-AIChatRecoverySuccess" in recovery
+    assert recovery.count("contract_version = 1") == 2
+    assert '"invalid_arguments"' in recovery
+    assert '"verification_failed"' in recovery
+    assert '"acl_repair_failed"' in recovery
+    assert '"finalization_failed"' in recovery
+    assert "error_code = $errorCode" in recovery
+    assert "ReadToEnd()" in contract_test
+    assert "ConvertFrom-Json" in contract_test
+    assert '"repair_ready"' in contract_test
+    assert '"rollback_exact"' in contract_test
+    assert '"acl_repaired"' in contract_test
+    assert '"finalized"' in contract_test
+    assert '"invalid_arguments"' in contract_test
+    assert '"verification_failed"' in contract_test
+    assert "0x2028" in contract_test
+    assert "state_root=" in contract_test
+    assert "test_recovery_json_contract.ps1" in workflow
+
+    result_block = recovery[
+        recovery.index("$result = [pscustomobject][ordered]@{") :
+        recovery.index("function Write-AIChatRecoveryResult")
+    ]
+    for key in (
+        "transaction_id",
+        "schema_version",
+        "file_targets_exact",
+        "task_mode",
+        "task_snapshot_exact",
+        "task_untouched",
+        "task_scheduler_accessed",
+        "connector_data_acl_exact",
+        "live_release_absent",
+        "staging_absent",
+        "failed_release_preserved",
+    ):
+        assert result_block.count(f"{key} =") == 1
 
 
 def test_connector_service_pins_native_node_npm_and_codex_without_path_shim() -> None:

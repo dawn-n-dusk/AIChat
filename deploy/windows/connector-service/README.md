@@ -27,3 +27,14 @@ prior-state snapshot. Schema-v3 managed journals require exact task XML;
 schema-v4 stage-only journals require the exact `task.mode=untouched` shape and
 never invoke Task Scheduler during either verification pass. It never performs
 a Task Scheduler write.
+
+The default output remains the existing Human key/value stream. Automation can
+pass `-OutputFormat Json` to receive contract version 1 as exactly one compact,
+ASCII-safe JSON object on stdout. Success objects contain fixed operation/mode,
+status, and native boolean fields. Failures exit nonzero with a fixed
+`error_code`, suppress human lines and raw exceptions, keep stderr free of
+diagnostics, and never include paths, credential values, SID/SDDL data, or
+untrusted text. Failure mutation flags mean the run may already have attempted
+or performed that mutation even if compensation restored the final ACL; they
+do not describe a final-state diff. See the parent README for the full field
+and operator-flow contract.

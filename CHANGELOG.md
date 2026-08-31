@@ -8,6 +8,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Add a versioned `recover-transaction.ps1 -OutputFormat Json` contract while
+  preserving the default Human output. JSON mode emits one compact ASCII-safe
+  object with native booleans and fixed status/error codes, suppresses paths,
+  credentials, SID/SDDL data, and raw exceptions, and reports whether the run
+  may have performed a mutation even when ACL compensation restored the final
+  state. Windows PowerShell 5.1 subprocess tests cover repair-ready, exact,
+  repair, finalize, invalid-argument, and verifier-failure outcomes.
 - Add a narrowly allowlisted Windows schema-v3 `rollback_incomplete`
   ConnectorData ACL snapshot repair for the field case where sanitized Windows
   evidence showed the owner/DACL as the only verifier mismatch while protected
