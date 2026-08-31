@@ -15,8 +15,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   concurrent revalidation, ACL repair, and journal finalization without
   matching or returning exception text. The outer runner strictly validates
   the new enum and its operation/error pairing before forwarding it. Windows
-  PowerShell 5.1 coverage includes a managed rollback-incomplete diagnose,
-  repair, reverify, finalize, then StageOnly dry-run transition.
+  PowerShell 5.1 coverage now builds a valid protected schema-v3 managed
+  journal with real deployment backups, Task Scheduler XML, connector files,
+  and native owner/DACL snapshots, then executes the production diagnose,
+  repair, reverify, and finalize chain. A same-state-root StageOnly recovery
+  gate proves the blocker is rejected before finalization and cleared after it.
 - Add an ASCII-only, repository-owned Windows PowerShell 5.1 outer runner for
   transaction recovery automation. It accepts only fixed verify, repair, or
   finalize operations, prevents the native `powershell.exe -OutputFormat`

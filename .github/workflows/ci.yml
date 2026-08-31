@@ -99,6 +99,9 @@ jobs:
       - name: Run Codex plugin MCP refresh regression with Windows PowerShell 5.1
         shell: pwsh
         run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File deploy/windows/tests/test_plugin_mcp_autoload.ps1
+      - name: Run real-state recovery chain with Windows PowerShell 5.1
+        shell: pwsh
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File deploy/windows/tests/test_recovery_real_state_e2e.ps1
       - name: Run protected transaction recovery regression with Windows PowerShell 5.1
         shell: pwsh
         run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File deploy/windows/tests/test_transaction_recovery.ps1
