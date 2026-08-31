@@ -278,6 +278,13 @@ function Invoke-RecoveryCase {
         throw "$Name operation or mode is invalid"
     }
     if ([bool]$parsed.success) {
+        $successStatuses = @(
+            "repair_ready", "rollback_exact", "finalize_ready",
+            "acl_repaired", "finalized"
+        )
+        if ($successStatuses -notcontains [string]$parsed.status) {
+            throw "$Name success status is outside the fixed enum"
+        }
         $successFields = @(
             "contract_version", "operation", "mode", "success", "status",
             "transaction_id", "journal_schema", "file_targets_exact",
@@ -315,6 +322,15 @@ function Invoke-RecoveryCase {
             }
         }
     } else {
+        $failureCodes = @(
+            "invalid_arguments", "initialization_failed",
+            "verification_failed", "acl_repair_failed",
+            "finalization_failed", "internal_error"
+        )
+        if ([string]$parsed.status -cne [string]$parsed.error_code -or
+            $failureCodes -notcontains [string]$parsed.error_code) {
+            throw "$Name failure status or error_code is outside the fixed enum"
+        }
         $failureFields = @(
             "contract_version", "operation", "mode", "success", "status",
             "error_code", "mutation_performed", "journal_retained", "token_read",
