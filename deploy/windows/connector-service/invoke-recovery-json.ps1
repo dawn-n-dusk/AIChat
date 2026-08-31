@@ -262,8 +262,9 @@ $successFields = @(
 )
 $failureFields = @(
     "contract_version", "operation", "mode", "success", "status",
-    "error_code", "mutation_performed", "journal_retained", "token_read",
-    "task_write_attempted", "connector_state_mutated",
+    "error_code", "diagnostic_code", "mutation_performed",
+    "journal_retained", "token_read", "task_write_attempted",
+    "connector_state_mutated",
     "connector_state_content_mutated", "connector_acl_mutated",
     "finalize_performed"
 )
@@ -281,7 +282,7 @@ foreach ($envelopeField in @("contract_version", "operation", "mode", "success",
     }
 }
 if (-not (Test-AIChatInteger $parsed.contract_version) -or
-    [int]$parsed.contract_version -ne 1 -or
+    [int]$parsed.contract_version -ne 2 -or
     $parsed.operation -isnot [string] -or
     [string]$parsed.operation -cne $operation -or
     $parsed.mode -isnot [string] -or
@@ -394,6 +395,18 @@ if ([bool]$parsed.success) {
         "invalid_arguments", "initialization_failed", "verification_failed",
         "acl_repair_failed", "finalization_failed", "internal_error"
     )
+    $diagnosticCodes = @(
+        "arguments_invalid", "common_load_failed", "protected_paths_invalid",
+        "journal_invalid", "journal_backup_invalid", "manifest_invalid",
+        "file_snapshot_mismatch", "task_snapshot_mismatch",
+        "release_layout_mismatch", "acl_snapshot_mismatch",
+        "acl_repair_ineligible", "acl_repair_not_required",
+        "acl_repair_required", "concurrent_journal_change",
+        "concurrent_state_change", "concurrent_acl_change",
+        "concurrent_content_change", "acl_repair_apply_failed",
+        "finalize_archive_failed", "finalize_reverification_failed",
+        "finalize_clear_failed", "internal_error"
+    )
     $allowedFailureCodes = switch ($operation) {
         "verify" {
             @("initialization_failed", "verification_failed", "internal_error")
@@ -435,13 +448,88 @@ if ([bool]$parsed.success) {
             break
         }
     }
+    $diagnosticAllowed = switch ([string]$parsed.error_code) {
+        "invalid_arguments" {
+            [string]$parsed.diagnostic_code -ceq "arguments_invalid"
+            break
+        }
+        "initialization_failed" {
+            @("common_load_failed", "protected_paths_invalid") -ccontains
+                [string]$parsed.diagnostic_code
+            break
+        }
+        "verification_failed" {
+            @(
+                "journal_invalid", "journal_backup_invalid",
+                "manifest_invalid", "file_snapshot_mismatch",
+                "task_snapshot_mismatch", "release_layout_mismatch",
+                "acl_snapshot_mismatch", "acl_repair_ineligible",
+                "acl_repair_not_required", "acl_repair_required",
+                "concurrent_journal_change", "concurrent_state_change",
+                "concurrent_acl_change", "concurrent_content_change"
+            ) -ccontains [string]$parsed.diagnostic_code
+            break
+        }
+        "acl_repair_failed" {
+            @(
+                "concurrent_journal_change", "concurrent_state_change",
+                "concurrent_acl_change", "concurrent_content_change",
+                "acl_repair_apply_failed"
+            ) -ccontains [string]$parsed.diagnostic_code
+            break
+        }
+        "finalization_failed" {
+            @(
+                "finalize_archive_failed", "finalize_reverification_failed",
+                "finalize_clear_failed"
+            ) -ccontains [string]$parsed.diagnostic_code
+            break
+        }
+        "internal_error" {
+            [string]$parsed.diagnostic_code -ceq "internal_error"
+            break
+        }
+        default { $false; break }
+    }
+    $operationDiagnosticAllowed = if (
+        [string]$parsed.error_code -cne "verification_failed"
+    ) {
+        $true
+    } else {
+        $baseVerificationCodes = @(
+            "journal_invalid", "journal_backup_invalid", "manifest_invalid",
+            "file_snapshot_mismatch", "task_snapshot_mismatch",
+            "release_layout_mismatch", "acl_snapshot_mismatch",
+            "acl_repair_ineligible"
+        )
+        $operationVerificationCodes = switch ($operation) {
+            "verify" { $baseVerificationCodes; break }
+            "repair" {
+                $baseVerificationCodes + @(
+                    "acl_repair_not_required", "concurrent_journal_change",
+                    "concurrent_state_change", "concurrent_acl_change",
+                    "concurrent_content_change"
+                )
+                break
+            }
+            "finalize" {
+                $baseVerificationCodes + @("acl_repair_required")
+                break
+            }
+        }
+        $operationVerificationCodes -ccontains [string]$parsed.diagnostic_code
+    }
     if (-not (Test-AIChatExactFields $parsed $failureFields) -or
         -not (Test-AIChatBooleanFields $parsed $commonBooleanFields) -or
         $parsed.status -isnot [string] -or
         $parsed.error_code -isnot [string] -or
+        $parsed.diagnostic_code -isnot [string] -or
         [string]$parsed.status -cne [string]$parsed.error_code -or
         $failureCodes -cnotcontains [string]$parsed.error_code -or
         $allowedFailureCodes -cnotcontains [string]$parsed.error_code -or
+        $diagnosticCodes -cnotcontains [string]$parsed.diagnostic_code -or
+        -not $diagnosticAllowed -or
+        -not $operationDiagnosticAllowed -or
         $targetExitCode -ne 1 -or
         -not $failureMutationValid -or
         [bool]$parsed.token_read -or

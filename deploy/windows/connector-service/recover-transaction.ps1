@@ -11,6 +11,7 @@ $ErrorActionPreference = "Stop"
 
 $script:AIChatRecoveryJsonMode = $OutputFormat -ine "Human"
 $script:AIChatRecoveryJsonEmitted = $false
+$script:AIChatRecoveryContractVersion = 2
 $script:AIChatRecoveryOperation = if ($RepairConnectorAcl) {
     "repair"
 } elseif ($Finalize) {
@@ -26,9 +27,36 @@ $script:AIChatRecoveryMode = if ($WhatIfPreference) {
     "read_only"
 }
 $script:AIChatRecoveryStage = "arguments"
+$script:AIChatRecoveryDiagnosticCode = "arguments_invalid"
 $script:AIChatRecoveryMutationPerformed = $false
 $script:AIChatRecoveryJournalRetained = $true
 $script:AIChatRecoveryConnectorAclMutated = $false
+
+function Set-AIChatRecoveryDiagnosticCode {
+    param([Parameter(Mandatory = $true)][string]$Code)
+
+    $allowed = @(
+        "arguments_invalid", "common_load_failed", "protected_paths_invalid",
+        "journal_invalid", "journal_backup_invalid", "manifest_invalid",
+        "file_snapshot_mismatch", "task_snapshot_mismatch",
+        "release_layout_mismatch", "acl_snapshot_mismatch",
+        "acl_repair_ineligible", "acl_repair_not_required",
+        "acl_repair_required", "concurrent_journal_change",
+        "concurrent_state_change", "concurrent_acl_change",
+        "concurrent_content_change", "acl_repair_apply_failed",
+        "finalize_archive_failed", "finalize_reverification_failed",
+        "finalize_clear_failed", "internal_error"
+    )
+    if ($allowed -cnotcontains $Code) {
+        throw "Recovery diagnostic code is not allowlisted"
+    }
+    $script:AIChatRecoveryDiagnosticCode = $Code
+}
+
+$diagnosticCodeSink = {
+    param([Parameter(Mandatory = $true)][string]$Code)
+    Set-AIChatRecoveryDiagnosticCode -Code $Code
+}
 
 function Write-AIChatRecoveryHuman {
     param([Parameter(Mandatory = $true)][string]$Message)
@@ -79,7 +107,7 @@ function New-AIChatRecoveryJsonSuccess {
     )
 
     return [pscustomobject][ordered]@{
-        contract_version = 1
+        contract_version = $script:AIChatRecoveryContractVersion
         operation = $script:AIChatRecoveryOperation
         mode = $script:AIChatRecoveryMode
         success = $true
@@ -160,7 +188,9 @@ if ($script:AIChatRecoveryJsonMode) {
 }
 
 $script:AIChatRecoveryStage = "initialization"
+Set-AIChatRecoveryDiagnosticCode -Code "common_load_failed"
 . (Join-Path $PSScriptRoot "common.ps1")
+Set-AIChatRecoveryDiagnosticCode -Code "protected_paths_invalid"
 $paths = Get-AIChatConnectorPaths
 Write-AIChatRecoveryHuman "state_root=$($paths.StateRoot)"
 Write-AIChatRecoveryHuman "task=\AIChat\CodexConnector"
@@ -172,9 +202,11 @@ if (-not $script:AIChatRecoveryJsonMode) {
 }
 
 $script:AIChatRecoveryStage = "verification"
+Set-AIChatRecoveryDiagnosticCode -Code "protected_paths_invalid"
 [void](Assert-AIChatPrivateDirectoryTree `
     -Path $paths.StateRoot `
     -ProtectedRoot $paths.ProtectedRoot)
+Set-AIChatRecoveryDiagnosticCode -Code "journal_invalid"
 [void](Assert-AIChatPrivateFile `
     -Path $paths.TransactionPath `
     -ProtectedRoot $paths.ProtectedRoot)
@@ -186,6 +218,7 @@ $journal = Read-AIChatRecoveryJournalUnchanged `
     -ProtectedRoot $paths.ProtectedRoot `
     -ExpectedSha256 $journalHash
 $backupDirectory = Join-Path $paths.BackupsDirectory ([string]$journal.transaction_id)
+Set-AIChatRecoveryDiagnosticCode -Code "journal_backup_invalid"
 [void](Assert-AIChatPrivateDirectoryTree `
     -Path $backupDirectory `
     -ProtectedRoot $paths.ProtectedRoot)
@@ -196,20 +229,28 @@ try {
     $result = Assert-AIChatManifestRollbackComplete `
         -Manifest $journal `
         -Paths $paths `
-        -BackupDirectory $backupDirectory
+        -BackupDirectory $backupDirectory `
+        -DiagnosticCodeSink $diagnosticCodeSink
 } catch {
+    if ($script:AIChatRecoveryDiagnosticCode -cne "acl_snapshot_mismatch") {
+        throw
+    }
     # Do not classify an arbitrary verifier error as repairable. Re-run every
     # non-ACL invariant, then require a real ACL mismatch from the exact live
     # tree and both sides of the fixed repair allowlist.
     $nonAcl = Assert-AIChatManifestRollbackNonAclComplete `
         -Manifest $journal `
         -Paths $paths `
-        -BackupDirectory $backupDirectory
+        -BackupDirectory $backupDirectory `
+        -DiagnosticCodeSink $diagnosticCodeSink
+    Set-AIChatRecoveryDiagnosticCode -Code "acl_repair_ineligible"
     if ([int]$nonAcl.schema_version -ne 3 -or [string]$nonAcl.task_mode -ne "managed") {
         throw
     }
+    Set-AIChatRecoveryDiagnosticCode -Code "acl_snapshot_mismatch"
     $currentAclSnapshot = Get-AIChatConnectorDataAclSnapshot `
         -Path $paths.ConnectorDataRoot
+    Set-AIChatRecoveryDiagnosticCode -Code "acl_repair_ineligible"
     [void](Assert-AIChatConnectorDataAclRepairEligible `
         -Expected $journal.connector_data_acl `
         -Actual $currentAclSnapshot)
@@ -250,6 +291,7 @@ function Write-AIChatRecoveryResult {
 
 if ($repairEligible) {
     if ($Finalize) {
+        Set-AIChatRecoveryDiagnosticCode -Code "acl_repair_required"
         throw "Transaction finalization is blocked until Connector ACL repair is completed and reverified"
     }
     if (-not $RepairConnectorAcl -or $WhatIfPreference) {
@@ -279,14 +321,17 @@ if ($repairEligible) {
     # protected deployment targets. Re-read the journal only after proving its
     # original SHA-256 is unchanged; the ACL and file-content snapshots must
     # also be stable since the initial repair classification.
+    Set-AIChatRecoveryDiagnosticCode -Code "concurrent_journal_change"
     $journal = Read-AIChatRecoveryJournalUnchanged `
         -Path $paths.TransactionPath `
         -ProtectedRoot $paths.ProtectedRoot `
         -ExpectedSha256 $journalHash
+    Set-AIChatRecoveryDiagnosticCode -Code "concurrent_state_change"
     [void](Assert-AIChatManifestRollbackNonAclComplete `
         -Manifest $journal `
         -Paths $paths `
         -BackupDirectory $backupDirectory)
+    Set-AIChatRecoveryDiagnosticCode -Code "concurrent_acl_change"
     $aclBeforeMutation = Get-AIChatConnectorDataAclSnapshot `
         -Path $paths.ConnectorDataRoot
     Assert-AIChatConnectorDataAclMatchesSnapshot `
@@ -295,6 +340,7 @@ if ($repairEligible) {
     [void](Assert-AIChatConnectorDataAclRepairEligible `
         -Expected $journal.connector_data_acl `
         -Actual $aclBeforeMutation)
+    Set-AIChatRecoveryDiagnosticCode -Code "concurrent_content_change"
     $contentBefore = Get-AIChatConnectorDataContentSnapshot `
         -Path $paths.ConnectorDataRoot
     Assert-AIChatConnectorDataContentMatchesSnapshot `
@@ -306,6 +352,7 @@ if ($repairEligible) {
     # it compensates to the exact pre-mutation ACL snapshot and proves
     # content plus all non-ACL invariants again before returning an error.
     $script:AIChatRecoveryStage = "repair_apply"
+    Set-AIChatRecoveryDiagnosticCode -Code "acl_repair_apply_failed"
     $script:AIChatRecoveryMutationPerformed = $true
     $script:AIChatRecoveryConnectorAclMutated = $true
     try {
@@ -314,26 +361,32 @@ if ($repairEligible) {
             -CurrentSnapshot $aclBeforeMutation `
             -Path $paths.ConnectorDataRoot `
             -PostRepairVerifier {
+                Set-AIChatRecoveryDiagnosticCode -Code "concurrent_content_change"
                 Assert-AIChatConnectorDataContentMatchesSnapshot `
                     -Expected $contentBefore `
                     -Actual (Get-AIChatConnectorDataContentSnapshot -Path $paths.ConnectorDataRoot)
+                Set-AIChatRecoveryDiagnosticCode -Code "concurrent_journal_change"
                 $verifiedJournal = Read-AIChatRecoveryJournalUnchanged `
                     -Path $paths.TransactionPath `
                     -ProtectedRoot $paths.ProtectedRoot `
                     -ExpectedSha256 $journalHash
+                Set-AIChatRecoveryDiagnosticCode -Code "acl_repair_apply_failed"
                 return Assert-AIChatManifestRollbackComplete `
                     -Manifest $verifiedJournal `
                     -Paths $paths `
                     -BackupDirectory $backupDirectory
             } `
             -PostCompensationVerifier {
+                Set-AIChatRecoveryDiagnosticCode -Code "concurrent_content_change"
                 Assert-AIChatConnectorDataContentMatchesSnapshot `
                     -Expected $contentBefore `
                     -Actual (Get-AIChatConnectorDataContentSnapshot -Path $paths.ConnectorDataRoot)
+                Set-AIChatRecoveryDiagnosticCode -Code "concurrent_journal_change"
                 $verifiedJournal = Read-AIChatRecoveryJournalUnchanged `
                     -Path $paths.TransactionPath `
                     -ProtectedRoot $paths.ProtectedRoot `
                     -ExpectedSha256 $journalHash
+                Set-AIChatRecoveryDiagnosticCode -Code "concurrent_state_change"
                 [void](Assert-AIChatManifestRollbackNonAclComplete `
                     -Manifest $verifiedJournal `
                     -Paths $paths `
@@ -342,6 +395,7 @@ if ($repairEligible) {
     } catch {
         $repairMessage = $_.Exception.Message
         try {
+            Set-AIChatRecoveryDiagnosticCode -Code "concurrent_journal_change"
             [void](Read-AIChatRecoveryJournalUnchanged `
                 -Path $paths.TransactionPath `
                 -ProtectedRoot $paths.ProtectedRoot `
@@ -349,8 +403,10 @@ if ($repairEligible) {
         } catch {
             throw "Connector ACL repair failed and the transaction journal also changed; journal remains blocking; repair_error=$repairMessage; journal_error=$($_.Exception.Message)"
         }
+        Set-AIChatRecoveryDiagnosticCode -Code "acl_repair_apply_failed"
         throw "Connector ACL repair did not complete; original journal remains blocking and byte-identical; repair_error=$repairMessage"
     }
+    Set-AIChatRecoveryDiagnosticCode -Code "concurrent_journal_change"
     [void](Read-AIChatRecoveryJournalUnchanged `
         -Path $paths.TransactionPath `
         -ProtectedRoot $paths.ProtectedRoot `
@@ -380,6 +436,7 @@ if ($repairEligible) {
 }
 
 if ($RepairConnectorAcl) {
+    Set-AIChatRecoveryDiagnosticCode -Code "acl_repair_not_required"
     throw "Connector data ACL already matches its rollback snapshot; no repair is allowed"
 }
 
@@ -412,6 +469,7 @@ if (-not $Finalize -or -not $Apply -or $WhatIfPreference) {
 
 $archivePath = Join-Path $backupDirectory "rollback-incomplete.finalized.json"
 $script:AIChatRecoveryStage = "finalize_apply"
+Set-AIChatRecoveryDiagnosticCode -Code "finalize_archive_failed"
 if (Test-Path -LiteralPath $archivePath) {
     [void](Assert-AIChatPrivateFile `
         -Path $archivePath `
@@ -438,6 +496,7 @@ if ((Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvar
 # Re-read both protected artifacts and revalidate every prior-state invariant
 # immediately before clearing the live blocker. This path never registers,
 # deletes, enables, starts, or otherwise mutates the Scheduled Task.
+Set-AIChatRecoveryDiagnosticCode -Code "finalize_reverification_failed"
 $journal = Read-AIChatRecoveryJournalUnchanged `
     -Path $paths.TransactionPath `
     -ProtectedRoot $paths.ProtectedRoot `
@@ -447,6 +506,7 @@ $journal = Read-AIChatRecoveryJournalUnchanged `
     -Paths $paths `
     -BackupDirectory $backupDirectory)
 
+Set-AIChatRecoveryDiagnosticCode -Code "finalize_clear_failed"
 Remove-Item -LiteralPath $paths.TransactionPath -Force
 $script:AIChatRecoveryMutationPerformed = $true
 $script:AIChatRecoveryJournalRetained = $false
@@ -483,13 +543,17 @@ Complete-AIChatRecoverySuccess -Value (New-AIChatRecoveryJsonSuccess `
         "verification" { "verification_failed"; break }
         default { "internal_error"; break }
     }
+    if ($errorCode -ceq "internal_error") {
+        $script:AIChatRecoveryDiagnosticCode = "internal_error"
+    }
     $failure = [pscustomobject][ordered]@{
-        contract_version = 1
+        contract_version = $script:AIChatRecoveryContractVersion
         operation = $script:AIChatRecoveryOperation
         mode = $script:AIChatRecoveryMode
         success = $false
         status = $errorCode
         error_code = $errorCode
+        diagnostic_code = [string]$script:AIChatRecoveryDiagnosticCode
         mutation_performed = [bool]$script:AIChatRecoveryMutationPerformed
         journal_retained = [bool]$script:AIChatRecoveryJournalRetained
         token_read = $false

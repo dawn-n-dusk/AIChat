@@ -2587,8 +2587,12 @@ function Assert-AIChatTransactionManifest {
         [Parameter(Mandatory = $true)]$Manifest,
         [Parameter(Mandatory = $true)]$Paths,
         [Parameter(Mandatory = $true)][string]$BackupDirectory,
-        [string[]]$AllowedStatuses = @("prepared", "applying", "applied", "committed", "rollback_incomplete")
+        [string[]]$AllowedStatuses = @("prepared", "applying", "applied", "committed", "rollback_incomplete"),
+        [scriptblock]$DiagnosticCodeSink
     )
+    if ($null -ne $DiagnosticCodeSink) {
+        & $DiagnosticCodeSink "manifest_invalid"
+    }
     $schemaVersion = if ($Manifest.PSObject.Properties["schema_version"]) {
         [int]$Manifest.schema_version
     } else { 0 }
@@ -2607,6 +2611,9 @@ function Assert-AIChatTransactionManifest {
         [StringComparison]::OrdinalIgnoreCase
     )) {
         throw "Windows connector transaction backup directory is not fixed"
+    }
+    if ($null -ne $DiagnosticCodeSink) {
+        & $DiagnosticCodeSink "file_snapshot_mismatch"
     }
     $targets = Get-AIChatDeploymentTargets -Paths $Paths
     $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
@@ -2649,13 +2656,22 @@ function Assert-AIChatTransactionManifest {
         -not $integratedV4) {
         throw "Windows connector transaction does not cover every fixed file target"
     }
+    if ($null -ne $DiagnosticCodeSink) {
+        & $DiagnosticCodeSink "manifest_invalid"
+    }
     if (-not $Manifest.PSObject.Properties["task"] -or
         -not $Manifest.PSObject.Properties["new_release_id"] -or
         [string]$Manifest.new_release_id -ne [string]$Manifest.transaction_id) {
         throw "Windows connector transaction task/release snapshot is invalid"
     }
     if ($hasConnectorAcl) {
+        if ($null -ne $DiagnosticCodeSink) {
+            & $DiagnosticCodeSink "acl_snapshot_mismatch"
+        }
         Assert-AIChatConnectorDataAclSnapshot -Snapshot $Manifest.connector_data_acl
+    }
+    if ($null -ne $DiagnosticCodeSink) {
+        & $DiagnosticCodeSink "task_snapshot_mismatch"
     }
     $taskMode = if ($Manifest.task.PSObject.Properties["mode"]) {
         [string]$Manifest.task.mode
@@ -2759,14 +2775,19 @@ function Assert-AIChatManifestRollbackNonAclComplete {
         [Parameter(Mandatory = $true)]$Manifest,
         [Parameter(Mandatory = $true)]$Paths,
         [Parameter(Mandatory = $true)][string]$BackupDirectory,
-        [scriptblock]$TaskProvider
+        [scriptblock]$TaskProvider,
+        [scriptblock]$DiagnosticCodeSink
     )
 
     Assert-AIChatTransactionManifest `
         -Manifest $Manifest `
         -Paths $Paths `
         -BackupDirectory $BackupDirectory `
-        -AllowedStatuses @("rollback_incomplete")
+        -AllowedStatuses @("rollback_incomplete") `
+        -DiagnosticCodeSink $DiagnosticCodeSink
+    if ($null -ne $DiagnosticCodeSink) {
+        & $DiagnosticCodeSink "manifest_invalid"
+    }
     $schemaVersion = [int]$Manifest.schema_version
     $taskMode = if ($Manifest.task.PSObject.Properties["mode"]) {
         [string]$Manifest.task.mode
@@ -2777,6 +2798,9 @@ function Assert-AIChatManifestRollbackNonAclComplete {
         throw "Automatic rollback finalization requires schema-v3 managed or schema-v4 untouched task state"
     }
 
+    if ($null -ne $DiagnosticCodeSink) {
+        & $DiagnosticCodeSink "file_snapshot_mismatch"
+    }
     $targets = Get-AIChatDeploymentTargets -Paths $Paths
     foreach ($entry in @($Manifest.files)) {
         $target = [string]$targets[[string]$entry.id]
@@ -2797,12 +2821,18 @@ function Assert-AIChatManifestRollbackNonAclComplete {
     # invoke even an injected provider: production callers would otherwise
     # open Task Scheduler while merely verifying or finalizing this journal.
     if ($managedV3) {
+        if ($null -ne $DiagnosticCodeSink) {
+            & $DiagnosticCodeSink "task_snapshot_mismatch"
+        }
         [void](Assert-AIChatTaskSnapshotForMutation `
             -Snapshot $Manifest.task `
             -Paths $Paths `
             -TaskProvider $TaskProvider)
     }
 
+    if ($null -ne $DiagnosticCodeSink) {
+        & $DiagnosticCodeSink "release_layout_mismatch"
+    }
     $liveRelease = Join-Path $Paths.ReleasesDirectory ([string]$Manifest.new_release_id)
     if (Test-Path -LiteralPath $liveRelease) {
         throw "Failed transaction release is still present in the live releases directory"
@@ -2840,14 +2870,19 @@ function Assert-AIChatManifestRollbackComplete {
         [Parameter(Mandatory = $true)]$Paths,
         [Parameter(Mandatory = $true)][string]$BackupDirectory,
         [scriptblock]$TaskProvider,
-        [scriptblock]$ConnectorDataAclSnapshotProvider
+        [scriptblock]$ConnectorDataAclSnapshotProvider,
+        [scriptblock]$DiagnosticCodeSink
     )
 
     $nonAcl = Assert-AIChatManifestRollbackNonAclComplete `
         -Manifest $Manifest `
         -Paths $Paths `
         -BackupDirectory $BackupDirectory `
-        -TaskProvider $TaskProvider
+        -TaskProvider $TaskProvider `
+        -DiagnosticCodeSink $DiagnosticCodeSink
+    if ($null -ne $DiagnosticCodeSink) {
+        & $DiagnosticCodeSink "acl_snapshot_mismatch"
+    }
     $currentAclSnapshot = if ($null -eq $ConnectorDataAclSnapshotProvider) {
         Get-AIChatConnectorDataAclSnapshot -Path $Paths.ConnectorDataRoot
     } else {

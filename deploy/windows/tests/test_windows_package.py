@@ -636,13 +636,32 @@ def test_recovery_json_contract_is_single_ascii_safe_and_versioned() -> None:
     common_load = recovery.index('. (Join-Path $PSScriptRoot "common.ps1")')
     path_initialization = recovery.index("$paths = Get-AIChatConnectorPaths")
     assert json_try < initialization_stage < common_load < path_initialization
-    assert recovery.count("contract_version = 1") == 2
+    assert "$script:AIChatRecoveryContractVersion = 2" in recovery
+    assert recovery.count(
+        "contract_version = $script:AIChatRecoveryContractVersion"
+    ) == 2
     assert '"invalid_arguments"' in recovery
     assert '"initialization_failed"' in recovery
     assert '"verification_failed"' in recovery
     assert '"acl_repair_failed"' in recovery
     assert '"finalization_failed"' in recovery
     assert "error_code = $errorCode" in recovery
+    assert "diagnostic_code = [string]$script:AIChatRecoveryDiagnosticCode" in recovery
+    for diagnostic_code in (
+        "journal_invalid",
+        "manifest_invalid",
+        "file_snapshot_mismatch",
+        "task_snapshot_mismatch",
+        "release_layout_mismatch",
+        "acl_snapshot_mismatch",
+        "acl_repair_ineligible",
+        "concurrent_journal_change",
+        "acl_repair_apply_failed",
+        "finalize_archive_failed",
+        "finalize_reverification_failed",
+        "finalize_clear_failed",
+    ):
+        assert f'"{diagnostic_code}"' in recovery
     assert "ReadToEnd()" in contract_test
     assert "ConvertFrom-Json" in contract_test
     assert '"repair_ready"' in contract_test
@@ -658,6 +677,8 @@ def test_recovery_json_contract_is_single_ascii_safe_and_versioned() -> None:
     assert '"path-initialization-failure"' in contract_test
     assert '"repair-apply-failure"' in contract_test
     assert '"finalize-apply-failure"' in contract_test
+    assert '"managed-recovery-to-stage-only"' in contract_test
+    assert '"diagnostic_code"' in contract_test
     assert "stdout.EndsWith" in contract_test
     assert "duplicate key" in contract_test
     assert "0x2028" in contract_test
@@ -742,6 +763,7 @@ def test_recovery_json_runner_owns_the_powershell_51_launch_boundary() -> None:
         '"bom"',
         '"bad_contract"',
         '"bad_enum"',
+        '"bad_diagnostic"',
         '"exit_mismatch"',
         '"timeout"',
         '"internal"',
