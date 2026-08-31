@@ -427,7 +427,7 @@ state remains unknown; do not retry repair or finalize until the local process
 state has been independently resolved.
 
 `-OutputFormat Json` writes exactly one compact ASCII-safe JSON object to
-stdout and no human `state_root`, task, or diagnostic lines. Contract version 1
+stdout and no human `state_root`, task, or diagnostic lines. Contract version 2
 includes `operation`, `mode`, native JSON boolean outcome fields, `success`, and
 `status`; failures exit nonzero and return a fixed `error_code` instead of the
 raw exception. JSON output never includes filesystem paths, credential values,
@@ -442,7 +442,7 @@ performed the target mutation, even if compensation restored the final ACL;
 they are not a statement that final state still differs from the starting
 state. `journal_retained` reports whether the live blocker was cleared.
 
-Contract version 1 is a flat JSON object. Every success object contains exactly
+Contract version 2 is a flat JSON object. Every success object contains exactly
 these fields:
 
 ```text
@@ -458,9 +458,10 @@ connector_state_mutated connector_state_content_mutated connector_acl_mutated
 Every caught failure object contains exactly these fields:
 
 ```text
-contract_version operation mode success status error_code mutation_performed
-journal_retained token_read task_write_attempted connector_state_mutated
-connector_state_content_mutated connector_acl_mutated finalize_performed
+contract_version operation mode success status error_code diagnostic_code
+mutation_performed journal_retained token_read task_write_attempted
+connector_state_mutated connector_state_content_mutated connector_acl_mutated
+finalize_performed
 ```
 
 The fixed enums are:
@@ -472,6 +473,17 @@ The fixed enums are:
 - Failure `status` and `error_code`: `invalid_arguments`,
   `initialization_failed`, `verification_failed`, `acl_repair_failed`,
   `finalization_failed`, `internal_error`.
+- Failure `diagnostic_code`: `arguments_invalid`, `common_load_failed`,
+  `protected_paths_invalid`, `journal_invalid`, `journal_backup_invalid`,
+  `manifest_invalid`, `file_snapshot_mismatch`, `task_snapshot_mismatch`,
+  `release_layout_mismatch`, `acl_snapshot_mismatch`,
+  `acl_repair_ineligible`, `acl_repair_not_required`, `acl_repair_required`,
+  `concurrent_journal_change`, `concurrent_state_change`,
+  `concurrent_acl_change`, `concurrent_content_change`,
+  `acl_repair_apply_failed`, `finalize_archive_failed`,
+  `finalize_reverification_failed`, `finalize_clear_failed`, or
+  `internal_error`. The runner validates the code against both the operation
+  and broad `error_code`; no code is derived from exception text.
 
 The inner JSON guarantee starts only after PowerShell has successfully parsed
 the target script and bound its command-line parameters. A syntax error in
