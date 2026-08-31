@@ -344,6 +344,68 @@ Run the verifier again as a separate operator decision:
 .\deploy\windows\connector-service\recover-transaction.ps1
 ```
 
+Automation may request the versioned machine-readable contract without
+changing the default human-facing output:
+
+```powershell
+.\deploy\windows\connector-service\recover-transaction.ps1 `
+  -OutputFormat Json
+```
+
+`-OutputFormat Json` writes exactly one compact ASCII-safe JSON object to
+stdout and no human `state_root`, task, or diagnostic lines. Contract version 1
+includes `operation`, `mode`, native JSON boolean outcome fields, `success`, and
+`status`; failures exit nonzero and return a fixed `error_code` instead of the
+raw exception. JSON output never includes filesystem paths, credential values,
+SIDs, SDDL, or untrusted exception text, and caught failures keep stderr empty.
+Bootstrap failures while loading `common.ps1` or initializing protected paths
+return the fixed `initialization_failed` code under the same single-object
+contract; unsupported output-format values return `invalid_arguments`.
+The same format is available for `-RepairConnectorAcl -Apply` and
+`-Finalize -Apply`. On a failure, `mutation_performed` and
+`connector_acl_mutated` mean that this invocation may already have attempted or
+performed the target mutation, even if compensation restored the final ACL;
+they are not a statement that final state still differs from the starting
+state. `journal_retained` reports whether the live blocker was cleared.
+
+Contract version 1 is a flat JSON object. Every success object contains exactly
+these fields:
+
+```text
+contract_version operation mode success status transaction_id journal_schema
+file_targets_exact task_snapshot_exact task_mode task_untouched
+task_scheduler_accessed connector_data_acl_exact live_release_absent
+staging_absent failed_release_preserved rollback_exact rollback_non_acl_exact
+repair_ready acl_repaired finalize_requested finalize_performed
+mutation_performed journal_retained token_read task_write_attempted
+connector_state_mutated connector_state_content_mutated connector_acl_mutated
+```
+
+Every caught failure object contains exactly these fields:
+
+```text
+contract_version operation mode success status error_code mutation_performed
+journal_retained token_read task_write_attempted connector_state_mutated
+connector_state_content_mutated connector_acl_mutated finalize_performed
+```
+
+The fixed enums are:
+
+- `operation`: `verify`, `repair`, `finalize`.
+- `mode`: `read_only`, `what_if`, `apply`.
+- Success `status`: `repair_ready`, `rollback_exact`, `finalize_ready`,
+  `acl_repaired`, `finalized`.
+- Failure `status` and `error_code`: `invalid_arguments`,
+  `initialization_failed`, `verification_failed`, `acl_repair_failed`,
+  `finalization_failed`, `internal_error`.
+
+The JSON guarantee starts only after PowerShell has successfully parsed this
+script and bound its command-line parameters. A syntax error in
+`recover-transaction.ps1` itself, an unknown parameter, or another native
+parameter-binding failure occurs before the script body and cannot be wrapped
+by this contract. Callers must always inspect the native exit code, stdout, and
+stderr rather than assuming every possible launch failure is JSON.
+
 Only after the verifier reports `rollback_exact=true` may the operator archive
 the original journal and clear the live blocker:
 
