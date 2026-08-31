@@ -8,6 +8,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Add a narrowly allowlisted Windows schema-v3 `rollback_incomplete`
+  ConnectorData ACL snapshot repair for the field case where sanitized Windows
+  evidence showed the owner/DACL as the only verifier mismatch while protected
+  backups, deployment targets, prior task state, release, staging, and failed
+  release checks were exact. Recovery remains a two-step operator flow: repair
+  only owner/DACL and rerun the complete read-only verifier, then invoke a
+  separate `-Finalize -Apply` to archive the byte-identical journal and clear
+  the blocker. The journal hash and ConnectorData content hashes are pinned
+  across mutation; a partial restore is compensated to the validated semantic
+  pre-run owner/DACL identity,
+  while a hard-interrupted prefix remains resumable only when every entry is
+  semantically one of the two fixed ACL snapshots. Raw snapshot hashes remain
+  mandatory, while equivalent Windows SDDL aliases and all-Allow ACE ordering
+  no longer create false mismatches. The repair never chains
+  finalization or writes task, state, channel, mapping, token, or deployment
+  content.
 - Add a transactional Windows connector `-StageOnly` install/check/rollback
   path for supervised foreground acceptance. It installs the pinned runtime,
   settings, mapping metadata, and private ACLs without querying, creating,

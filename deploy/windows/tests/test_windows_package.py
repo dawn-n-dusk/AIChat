@@ -514,7 +514,7 @@ def test_connector_service_incomplete_rollback_recovery_is_read_only_and_exact()
     assert "Failed transaction release is still present" in common
     assert "rollback-incomplete.finalized.json" in recovery
     assert "byte-identical to the live journal" in recovery
-    assert recovery.count("Assert-AIChatManifestRollbackComplete") == 2
+    assert recovery.count("Assert-AIChatManifestRollbackComplete") == 3
     assert recovery.index("Copy-AIChatPrivateFileAtomic") < recovery.rindex(
         "Assert-AIChatManifestRollbackComplete"
     ) < recovery.index("Remove-Item -LiteralPath $paths.TransactionPath")
@@ -527,13 +527,88 @@ def test_connector_service_incomplete_rollback_recovery_is_read_only_and_exact()
     ):
         assert forbidden not in recovery
     assert 'Write-Host "task_write_attempted=false"' in recovery
-    assert 'Write-Host "task_mode=$($result.task_mode)"' in recovery
-    assert 'Write-Host "task_scheduler_accessed=$($result.task_scheduler_accessed' in recovery
+    assert 'Write-Host "task_mode=$($Value.task_mode)"' in recovery
+    assert 'Write-Host "task_scheduler_accessed=$($Value.task_scheduler_accessed' in recovery
     assert 'Write-Host "connector_state_mutated=false"' in recovery
     restore = common[common.index("function Restore-AIChatTaskSnapshot") :]
     assert restore.index("$null -ne $current") < restore.index(
         'New-Object -ComObject "Schedule.Service"'
     )
+
+
+def test_connector_service_acl_snapshot_repair_is_narrow_and_separate() -> None:
+    root = ROOT / "connector-service"
+    common = (root / "common.ps1").read_text(encoding="utf-8")
+    recovery = (root / "recover-transaction.ps1").read_text(encoding="utf-8")
+
+    assert "[switch]$RepairConnectorAcl" in recovery
+    assert "Connector ACL repair requires both -RepairConnectorAcl and -Apply" in recovery
+    assert "Connector ACL repair and transaction finalization must be separate" in recovery
+    assert "-Apply requires either -RepairConnectorAcl or -Finalize" in recovery
+    assert "Assert-AIChatManifestRollbackNonAclComplete" in common
+    assert "Assert-AIChatConnectorDataAclRepairEligible" in common
+    assert "Assert-AIChatConnectorDataAclTransitionState" in common
+    assert "Invoke-AIChatConnectorDataAclSnapshotRepair" in common
+    assert "ValidateForwardSnapshotSddl" in common
+    assert "SnapshotSddlEquivalent" in common
+    assert "Get-AIChatConnectorDataContentSnapshot" in common
+    assert "Assert-AIChatConnectorDataContentMatchesSnapshot" in common
+    assert "SACL_SECURITY_INFORMATION" not in common
+    assert "function Read-AIChatRecoveryJournalUnchanged" in recovery
+    assert "$journalHash = (Get-FileHash" in recovery
+    assert recovery.count("Read-AIChatRecoveryJournalUnchanged") >= 6
+
+    catch_start = recovery.index("} catch {")
+    repair_classification = recovery[
+        catch_start : recovery.index("function Write-AIChatRecoveryResult", catch_start)
+    ]
+    assert "Assert-AIChatManifestRollbackNonAclComplete" in repair_classification
+    assert "Assert-AIChatConnectorDataAclRepairEligible" in repair_classification
+    assert "[int]$nonAcl.schema_version -ne 3" in repair_classification
+    assert '[string]$nonAcl.task_mode -ne "managed"' in repair_classification
+
+    repair_start = recovery.index("if ($repairEligible) {")
+    repair_end = recovery.index("if ($RepairConnectorAcl) {", repair_start)
+    repair = recovery[repair_start:repair_end]
+    assert repair.count("Invoke-AIChatConnectorDataAclSnapshotRepair") == 1
+    assert repair.count("Assert-AIChatManifestRollbackNonAclComplete") == 2
+    assert repair.count("Assert-AIChatManifestRollbackComplete") == 1
+    assert repair.index("Assert-AIChatConnectorDataAclRepairEligible") < repair.index(
+        "Invoke-AIChatConnectorDataAclSnapshotRepair"
+    ) < repair.index("Assert-AIChatManifestRollbackComplete")
+    assert repair.count("Get-AIChatConnectorDataContentSnapshot") >= 3
+    assert 'Write-Host "repair_ready=true"' in repair
+    assert 'Write-Host "acl_repaired=true"' in repair
+    assert 'Write-Host "journal_retained=true"' in repair
+    assert 'Write-Host "finalize_performed=false"' in repair
+    assert 'Write-Host "connector_state_content_mutated=false"' in repair
+    assert 'Write-Host "connector_acl_mutated=true"' in repair
+    assert repair.index("Read-AIChatRecoveryJournalUnchanged") < repair.index(
+        "Invoke-AIChatConnectorDataAclSnapshotRepair"
+    )
+    for forbidden in (
+        "RegisterTask(",
+        "DeleteTask(",
+        "Register-AIChatDisabledTask",
+        "Restore-AIChatTaskSnapshot",
+        "Copy-AIChatPrivateFileAtomic",
+        "Write-AIChatPrivateJson",
+        "Move-Item",
+        "Remove-Item",
+        "rollback-incomplete.finalized.json",
+    ):
+        assert forbidden not in repair
+
+    repair_helper = common[
+        common.index("function Invoke-AIChatConnectorDataAclSnapshotRepair") :
+        common.index("function Initialize-AIChatConnectorDataDirectory")
+    ]
+    assert repair_helper.count("Restore-AIChatConnectorDataAclSnapshot") == 1
+    assert "AllowedTransitionSnapshots" in repair_helper
+    assert "PostRepairVerifier" in repair_helper
+    assert "PostCompensationVerifier" in repair_helper
+    assert "exact pre-repair ACL restored; journal retained" in repair_helper
+    assert "pre-repair ACL compensation failed; journal retained" in repair_helper
 
 
 def test_connector_service_pins_native_node_npm_and_codex_without_path_shim() -> None:

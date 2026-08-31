@@ -288,11 +288,61 @@ contract. Schema-v3 recovery requires every fixed manifest target to match the
 protected prior backup hash, every absent target to remain absent, and the task
 XML hash/existence to match the prior snapshot. Schema-v4 stage-only recovery
 checks the same files without calling a task provider or opening Task Scheduler.
-Both modes require the connector-data owner/DACL snapshot to match exactly and
+Both modes require the connector-data owner/DACL snapshot to match the validated
+semantic ACL identity and
 the failed transaction to have no live release or staging directory. A
 preserved failed release is validated as a private, reparse-free, hardlink-free
 tree. Schema-v4 managed-task journals and historical schema-v1/v2 journals
 remain fail-closed and are never auto-finalized by this tool.
+
+One narrow exception is available for a schema-v3 managed-task
+`rollback_incomplete` journal when the only mismatch is the ConnectorData
+owner/DACL. The read-only verifier reports `repair_ready=true` only after every
+deployment file and protected backup hash, prior Scheduled Task XML/existence,
+release/staging condition, and failed-release tree is exact. The live
+ConnectorData tree must have the same entry names and types as the journal.
+Each entry must be either already at the exact journal ACL contract or still use the
+protected current-SID plus LocalSystem FullControl forward contract, with at
+least one forward entry remaining; this permits a hard-interrupted prefix to be
+resumed without accepting any third ACL. The initial field repair-ready state
+is the complete trusted forward contract; the mixed two-snapshot form is only
+the narrowly recognized re-entry shape after an interrupted repair, not a
+generic mixed-ACL allowance. The journal snapshot must be one of
+the fixed legacy current-SID-only or current-SID-plus-LocalSystem contracts.
+Extra principals, deny ACEs, lesser rights, an unexpected owner, reparse
+points, hardlinks, changed files, or an untrusted inherited form remain blocked.
+Each stored snapshot still validates its own raw SDDL SHA-256. Snapshot identity
+is then strict owner/DACL semantics—same owner, protected state, ACE principals,
+rights, and inheritance flags—so only Windows SDDL text aliases and ordering
+differences among the all-Allow ACEs are ignored.
+
+After reviewing that read-only result, restore only the snapshotted owner/DACL:
+
+```powershell
+.\deploy\windows\connector-service\recover-transaction.ps1 `
+  -RepairConnectorAcl -Apply
+```
+
+This operation uses the no-SACL Owner+DACL API, pins the original transaction
+journal SHA-256 across the mutation, verifies ConnectorData file hashes before
+and after the change, and then reruns the full read-only rollback verifier. If
+restore or any post-repair verification fails, it attempts to restore the exact
+pre-run ACL snapshot through the same narrow API, rechecks content and journal
+hashes, and leaves the journal blocking; a hard process interruption can be
+resumed from the allowlisted mixed prefix on the next run. It never writes the
+Scheduled Task, deployment files, Connector state/channel contents, token, or
+journal, and it deliberately does not chain finalization.
+`-RepairConnectorAcl` without `-Apply`, combining repair with `-Finalize`,
+schema-v4 stage-only journals, and historical schema-v1/v2 journals all fail
+closed. A successful repair reports `acl_repaired=true`,
+`connector_state_content_mutated=false`, `connector_acl_mutated=true`,
+`journal_retained=true`, and `finalize_performed=false`.
+
+Run the verifier again as a separate operator decision:
+
+```powershell
+.\deploy\windows\connector-service\recover-transaction.ps1
+```
 
 Only after the verifier reports `rollback_exact=true` may the operator archive
 the original journal and clear the live blocker:

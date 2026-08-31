@@ -41,6 +41,259 @@ if (-not $aclMismatchBlocked) {
     throw "ACL snapshot mismatch was not blocked"
 }
 
+function New-TestAclEntry {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][bool]$IsDirectory,
+        [Parameter(Mandatory = $true)][string]$Sddl
+    )
+
+    return [pscustomobject][ordered]@{
+        name = $Name
+        is_directory = $IsDirectory
+        sddl = $Sddl
+        sddl_sha256 = Get-AIChatSha256Text -Value $Sddl
+    }
+}
+
+function New-TestAclSnapshot {
+    param(
+        [Parameter(Mandatory = $true)][string]$RootSddl,
+        [Parameter(Mandatory = $true)][string]$FileSddl,
+        [string]$FileName = "state.json"
+    )
+
+    return [pscustomobject][ordered]@{
+        schema_version = 1
+        existed = $true
+        private_root_existed = $true
+        entries = @(
+            New-TestAclEntry -Name "." -IsDirectory $true -Sddl $RootSddl
+            New-TestAclEntry -Name $FileName -IsDirectory $false -Sddl $FileSddl
+        )
+    }
+}
+
+function Assert-TestAclRepairBlocked {
+    param(
+        [Parameter(Mandatory = $true)]$Expected,
+        [Parameter(Mandatory = $true)]$Actual,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+
+    $blocked = $false
+    try {
+        [void](Assert-AIChatConnectorDataAclRepairEligible `
+            -Expected $Expected `
+            -Actual $Actual)
+    } catch {
+        $blocked = $true
+    }
+    if (-not $blocked) {
+        throw "ACL repair eligibility accepted $Label"
+    }
+}
+
+# ACL repair accepts only a trusted forward current state and a fixed prior
+# contract. These are synthetic owner/DACL snapshots; no live ACL is touched.
+$currentSid = Get-AIChatCurrentSid
+$forwardRoot = "O:$($currentSid)D:P(A;OICI;FA;;;$($currentSid))(A;OICI;FA;;;SY)"
+$forwardFile = "O:$($currentSid)D:P(A;;FA;;;$($currentSid))(A;;FA;;;SY)"
+$forwardSnapshot = New-TestAclSnapshot `
+    -RootSddl $forwardRoot `
+    -FileSddl $forwardFile
+$legacyRoot = "O:$($currentSid)D:P(A;OICI;FA;;;$($currentSid))"
+$legacyFile = "O:$($currentSid)D:P(A;;FA;;;$($currentSid))"
+$legacySnapshot = New-TestAclSnapshot `
+    -RootSddl $legacyRoot `
+    -FileSddl $legacyFile
+[void](Assert-AIChatConnectorDataAclRepairEligible `
+    -Expected $legacySnapshot `
+    -Actual $forwardSnapshot)
+
+$reversePairSnapshot = New-TestAclSnapshot `
+    -RootSddl "O:$($currentSid)D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;$($currentSid))" `
+    -FileSddl "O:$($currentSid)D:P(A;;FA;;;SY)(A;;FA;;;$($currentSid))"
+Assert-AIChatConnectorDataAclMatchesSnapshot `
+    -Expected $reversePairSnapshot `
+    -Actual $forwardSnapshot
+Assert-TestAclRepairBlocked `
+    -Expected $reversePairSnapshot `
+    -Actual $forwardSnapshot `
+    -Label "an already-equivalent all-Allow ACE order"
+
+$textAliasSnapshot = New-TestAclSnapshot `
+    -RootSddl "O:$($currentSid)D:P(A;CIOI;0x1f01ff;;;$($script:AIChatLocalSystemSid))(A;CIOI;0x1f01ff;;;$($currentSid))" `
+    -FileSddl "O:$($currentSid)D:P(A;;0x1f01ff;;;$($script:AIChatLocalSystemSid))(A;;0x1f01ff;;;$($currentSid))"
+Assert-AIChatConnectorDataAclMatchesSnapshot `
+    -Expected $textAliasSnapshot `
+    -Actual $forwardSnapshot
+Assert-TestAclRepairBlocked `
+    -Expected $textAliasSnapshot `
+    -Actual $forwardSnapshot `
+    -Label "an already-equivalent SDDL alias representation"
+
+$inheritedLegacySnapshot = New-TestAclSnapshot `
+    -RootSddl "O:$($currentSid)D:AI(A;OICIID;FA;;;$($currentSid))" `
+    -FileSddl "O:$($currentSid)D:AI(A;ID;FA;;;$($currentSid))"
+[void](Assert-AIChatConnectorDataAclRepairEligible `
+    -Expected $inheritedLegacySnapshot `
+    -Actual $forwardSnapshot)
+
+Assert-TestAclRepairBlocked `
+    -Expected $legacySnapshot `
+    -Actual $legacySnapshot `
+    -Label "a legacy current-only live ACL"
+Assert-TestAclRepairBlocked `
+    -Expected $legacySnapshot `
+    -Actual (New-TestAclSnapshot `
+        -RootSddl "O:$($currentSid)D:AI(A;OICIID;FA;;;$($currentSid))(A;OICIID;FA;;;SY)" `
+        -FileSddl "O:$($currentSid)D:AI(A;ID;FA;;;$($currentSid))(A;ID;FA;;;SY)") `
+    -Label "an inherited live ACL"
+Assert-TestAclRepairBlocked `
+    -Expected $legacySnapshot `
+    -Actual (New-TestAclSnapshot `
+        -RootSddl "O:$($currentSid)D:P(D;OICI;FA;;;$($currentSid))(A;OICI;FA;;;SY)" `
+        -FileSddl "O:$($currentSid)D:P(D;;FA;;;$($currentSid))(A;;FA;;;SY)") `
+    -Label "a deny ACE"
+Assert-TestAclRepairBlocked `
+    -Expected $legacySnapshot `
+    -Actual (New-TestAclSnapshot `
+        -RootSddl "O:$($currentSid)D:P(A;OICI;FR;;;$($currentSid))(A;OICI;FA;;;SY)" `
+        -FileSddl "O:$($currentSid)D:P(A;;FR;;;$($currentSid))(A;;FA;;;SY)") `
+    -Label "non-FullControl rights"
+Assert-TestAclRepairBlocked `
+    -Expected $legacySnapshot `
+    -Actual (New-TestAclSnapshot `
+        -RootSddl "O:SYD:P(A;OICI;FA;;;$($currentSid))(A;OICI;FA;;;SY)" `
+        -FileSddl "O:SYD:P(A;;FA;;;$($currentSid))(A;;FA;;;SY)") `
+    -Label "a non-current owner"
+Assert-TestAclRepairBlocked `
+    -Expected $legacySnapshot `
+    -Actual (New-TestAclSnapshot `
+        -RootSddl "O:$($currentSid)D:P(A;OICI;FA;;;$($currentSid))(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)" `
+        -FileSddl "O:$($currentSid)D:P(A;;FA;;;$($currentSid))(A;;FA;;;SY)(A;;FA;;;BA)") `
+    -Label "an extra live principal"
+Assert-TestAclRepairBlocked `
+    -Expected (New-TestAclSnapshot `
+        -RootSddl "O:$($currentSid)D:P(A;OICI;FA;;;$($currentSid))(A;OICI;FA;;;BA)" `
+        -FileSddl "O:$($currentSid)D:P(A;;FA;;;$($currentSid))(A;;FA;;;BA)") `
+    -Actual $forwardSnapshot `
+    -Label "an untrusted snapshot principal"
+Assert-TestAclRepairBlocked `
+    -Expected (New-TestAclSnapshot `
+        -RootSddl $legacyRoot `
+        -FileSddl $legacyFile `
+        -FileName "other.json") `
+    -Actual $forwardSnapshot `
+    -Label "a changed connector data entry set"
+
+# Failure injection proves a partial prefix is compensated to the exact
+# pre-mutation snapshot, and that a hard-interruption mixed state is itself a
+# safe, recognizable input for the next idempotent repair attempt.
+$mixedSnapshot = New-TestAclSnapshot `
+    -RootSddl ([string]$inheritedLegacySnapshot.entries[0].sddl) `
+    -FileSddl $forwardFile
+$script:syntheticAclSnapshot = $forwardSnapshot
+$script:syntheticRestoreCalls = 0
+$partialFailureRestore = {
+    param($TargetSnapshot, $Path, $AllowedSnapshots)
+    $script:syntheticRestoreCalls += 1
+    if ($script:syntheticRestoreCalls -eq 1) {
+        $script:syntheticAclSnapshot = $mixedSnapshot
+        throw "injected partial restore failure"
+    }
+    $script:syntheticAclSnapshot = $TargetSnapshot
+}
+$syntheticSnapshotProvider = {
+    param($Path)
+    return $script:syntheticAclSnapshot
+}
+$partialFailureBlocked = $false
+try {
+    [void](Invoke-AIChatConnectorDataAclSnapshotRepair `
+        -ExpectedSnapshot $inheritedLegacySnapshot `
+        -CurrentSnapshot $forwardSnapshot `
+        -Path "synthetic" `
+        -RestoreInvoker $partialFailureRestore `
+        -SnapshotProvider $syntheticSnapshotProvider)
+} catch {
+    $partialFailureBlocked = $_.Exception.Message -match "exact pre-repair ACL restored"
+}
+if (-not $partialFailureBlocked -or $script:syntheticRestoreCalls -ne 2) {
+    throw "Partial ACL restore did not compensate and fail closed"
+}
+Assert-AIChatConnectorDataAclMatchesSnapshot `
+    -Expected $forwardSnapshot `
+    -Actual $script:syntheticAclSnapshot
+
+$script:syntheticAclSnapshot = $forwardSnapshot
+$script:syntheticRestoreCalls = 0
+$doubleFailureRestore = {
+    param($TargetSnapshot, $Path, $AllowedSnapshots)
+    $script:syntheticRestoreCalls += 1
+    if ($script:syntheticRestoreCalls -eq 1) {
+        $script:syntheticAclSnapshot = $mixedSnapshot
+        throw "injected primary restore failure"
+    }
+    throw "injected compensation failure"
+}
+$doubleFailureBlocked = $false
+try {
+    [void](Invoke-AIChatConnectorDataAclSnapshotRepair `
+        -ExpectedSnapshot $inheritedLegacySnapshot `
+        -CurrentSnapshot $forwardSnapshot `
+        -Path "synthetic" `
+        -RestoreInvoker $doubleFailureRestore `
+        -SnapshotProvider $syntheticSnapshotProvider)
+} catch {
+    $doubleFailureBlocked = $_.Exception.Message -match "compensation failed; journal retained"
+}
+if (-not $doubleFailureBlocked -or $script:syntheticRestoreCalls -ne 2) {
+    throw "Double ACL restore failure did not preserve the fail-closed boundary"
+}
+
+$script:syntheticAclSnapshot = $mixedSnapshot
+$resumeRestore = {
+    param($TargetSnapshot, $Path, $AllowedSnapshots)
+    $script:syntheticAclSnapshot = $TargetSnapshot
+}
+$resumedResult = Invoke-AIChatConnectorDataAclSnapshotRepair `
+    -ExpectedSnapshot $inheritedLegacySnapshot `
+    -CurrentSnapshot $mixedSnapshot `
+    -Path "synthetic" `
+    -RestoreInvoker $resumeRestore `
+    -SnapshotProvider $syntheticSnapshotProvider
+Assert-AIChatConnectorDataAclMatchesSnapshot `
+    -Expected $inheritedLegacySnapshot `
+    -Actual $resumedResult
+
+$script:syntheticAclSnapshot = $forwardSnapshot
+$script:syntheticRestoreCalls = 0
+$postVerifyFailureRestore = {
+    param($TargetSnapshot, $Path, $AllowedSnapshots)
+    $script:syntheticRestoreCalls += 1
+    $script:syntheticAclSnapshot = $TargetSnapshot
+}
+$postVerifyFailureBlocked = $false
+try {
+    [void](Invoke-AIChatConnectorDataAclSnapshotRepair `
+        -ExpectedSnapshot $inheritedLegacySnapshot `
+        -CurrentSnapshot $forwardSnapshot `
+        -Path "synthetic" `
+        -RestoreInvoker $postVerifyFailureRestore `
+        -SnapshotProvider $syntheticSnapshotProvider `
+        -PostRepairVerifier { throw "injected post-repair verifier failure" })
+} catch {
+    $postVerifyFailureBlocked = $_.Exception.Message -match "exact pre-repair ACL restored"
+}
+if (-not $postVerifyFailureBlocked -or $script:syntheticRestoreCalls -ne 2) {
+    throw "Post-repair verifier failure did not compensate and fail closed"
+}
+Assert-AIChatConnectorDataAclMatchesSnapshot `
+    -Expected $forwardSnapshot `
+    -Actual $script:syntheticAclSnapshot
+
 # Exact task snapshots must return before any Schedule.Service write object is
 # created. Override only inside this isolated PowerShell process.
 $script:mockTask = [pscustomobject]@{ Xml = "<Task>prior</Task>" }
@@ -112,6 +365,20 @@ try {
         $result.task_untouched -or
         -not $result.task_scheduler_accessed) {
         throw "Schema-v3 managed recovery did not report exact task verification"
+    }
+
+    $taskMismatchBlocked = $false
+    try {
+        [void](Assert-AIChatManifestRollbackNonAclComplete `
+            -Manifest $manifest `
+            -Paths $paths `
+            -BackupDirectory $backupDirectory `
+            -TaskProvider { [pscustomobject]@{ Xml = "<Task>unexpected</Task>" } })
+    } catch {
+        $taskMismatchBlocked = $true
+    }
+    if (-not $taskMismatchBlocked) {
+        throw "Unexpected Scheduled Task state was not blocked before ACL repair"
     }
 
     Write-AIChatPrivateJson `
@@ -216,6 +483,128 @@ try {
     }
     if (-not $v2Blocked) {
         throw "Historical schema-v2 journal was not left fail-closed"
+    }
+
+    # Exercise the ACL-only native restore against an isolated connector-data
+    # tree. The content hash must remain exact, the journal object is retained,
+    # and the full schema-v3 verifier must pass after repair.
+    $testProfile = Initialize-AIChatPrivateDirectory `
+        -Path (Join-Path $stateRoot "acl-repair-profile") `
+        -ProtectedRoot $protectedRoot
+    $testPrivateRoot = Initialize-AIChatPrivateDirectory `
+        -Path (Join-Path $testProfile ".aichat") `
+        -ProtectedRoot $protectedRoot
+    $testConnectorRoot = Join-Path $testPrivateRoot "connector-data"
+    New-Item -ItemType Directory -Path $testConnectorRoot | Out-Null
+    $testStateFile = Join-Path $testConnectorRoot "state.json"
+    [IO.File]::WriteAllText(
+        $testStateFile,
+        '{"cursor":"unchanged"}',
+        [Text.UTF8Encoding]::new($false)
+    )
+    $script:testAclRepairProfile = $testProfile
+    $script:testAclRepairConnectorRoot = $testConnectorRoot
+    function Get-AIChatUserProfile { return $script:testAclRepairProfile }
+    function Get-AIChatConnectorDataRoot { return $script:testAclRepairConnectorRoot }
+
+    # Capture the OS-canonical inherited legacy form before migrating the same
+    # isolated tree to the forward ACL. Synthetic SDDL is used above only for
+    # parser tests; native exact-restore coverage must use a real snapshot.
+    $syntheticLegacyRootEntry = @($inheritedLegacySnapshot.entries | Where-Object {
+        [string]$_.name -eq "."
+    })[0]
+    $syntheticLegacyFileEntry = @($inheritedLegacySnapshot.entries | Where-Object {
+        [string]$_.name -eq "state.json"
+    })[0]
+    [AIChat.Windows.OwnerDacl]::RestoreSnapshot(
+        $testConnectorRoot,
+        [string]$syntheticLegacyRootEntry.sddl,
+        $true
+    )
+    [AIChat.Windows.OwnerDacl]::RestoreSnapshot(
+        $testStateFile,
+        [string]$syntheticLegacyFileEntry.sddl,
+        $false
+    )
+    $capturedLegacySnapshot = Get-AIChatConnectorDataAclSnapshot `
+        -Path $testConnectorRoot
+    Set-AIChatConnectorDataAcl -Path $testConnectorRoot
+    Set-AIChatConnectorDataAcl -Path $testStateFile
+    $currentForwardSnapshot = Get-AIChatConnectorDataAclSnapshot `
+        -Path $testConnectorRoot
+    $contentBeforeRepair = Get-AIChatConnectorDataContentSnapshot `
+        -Path $testConnectorRoot
+
+    # Model a process interruption after the root ACL was restored but before
+    # the file ACL. The real transition-aware native path must recognize and
+    # converge this mixed prefix on the next invocation.
+    $expectedRootEntry = @($capturedLegacySnapshot.entries | Where-Object {
+        [string]$_.name -eq "."
+    })[0]
+    [AIChat.Windows.OwnerDacl]::RestoreSnapshot(
+        $testConnectorRoot,
+        [string]$expectedRootEntry.sddl,
+        $true
+    )
+    $mixedLiveSnapshot = Get-AIChatConnectorDataAclSnapshot `
+        -Path $testConnectorRoot
+    Assert-AIChatConnectorDataAclTransitionState `
+        -Actual $mixedLiveSnapshot `
+        -AllowedSnapshots @($currentForwardSnapshot, $capturedLegacySnapshot)
+    $restoredSnapshot = Invoke-AIChatConnectorDataAclSnapshotRepair `
+        -ExpectedSnapshot $capturedLegacySnapshot `
+        -CurrentSnapshot $mixedLiveSnapshot `
+        -Path $testConnectorRoot
+    $contentAfterRepair = Get-AIChatConnectorDataContentSnapshot `
+        -Path $testConnectorRoot
+    Assert-AIChatConnectorDataContentMatchesSnapshot `
+        -Expected $contentBeforeRepair `
+        -Actual $contentAfterRepair
+    Assert-AIChatConnectorDataAclMatchesSnapshot `
+        -Expected $capturedLegacySnapshot `
+        -Actual $restoredSnapshot
+
+    $repairManifest = [pscustomobject][ordered]@{
+        schema_version = 3
+        kind = "aichat-windows-connector-transaction"
+        transaction_id = $transactionId
+        status = "rollback_incomplete"
+        files = $files
+        task = [pscustomobject]@{ existed = $false }
+        new_release_id = $transactionId
+        connector_data_acl = $capturedLegacySnapshot
+    }
+    $postRepairResult = Assert-AIChatManifestRollbackComplete `
+        -Manifest $repairManifest `
+        -Paths $paths `
+        -BackupDirectory $backupDirectory `
+        -TaskProvider { $null } `
+        -ConnectorDataAclSnapshotProvider { $restoredSnapshot }
+    if (-not $postRepairResult.connector_data_acl_exact -or
+        -not $postRepairResult.file_targets_exact -or
+        -not $postRepairResult.task_snapshot_exact) {
+        throw "Full verifier did not pass after the isolated ACL repair"
+    }
+
+    $contentChangedBlocked = $false
+    $changedContentSnapshot = [pscustomobject][ordered]@{
+        entries = @(
+            [pscustomobject][ordered]@{
+                name = "state.json"
+                length = 1
+                sha256 = "changed"
+            }
+        )
+    }
+    try {
+        Assert-AIChatConnectorDataContentMatchesSnapshot `
+            -Expected $contentBeforeRepair `
+            -Actual $changedContentSnapshot
+    } catch {
+        $contentChangedBlocked = $true
+    }
+    if (-not $contentChangedBlocked) {
+        throw "Connector data content mutation was not blocked"
     }
 } finally {
     if (Test-Path -LiteralPath $stateRoot) {

@@ -467,6 +467,76 @@ namespace AIChat.Windows {
             ValidateSnapshot(sddl, isDirectory);
         }
 
+        public static void ValidateForwardSnapshotSddl(string sddl, bool isDirectory) {
+            RawSecurityDescriptor descriptor = ValidateSnapshot(sddl, isDirectory);
+            if ((descriptor.ControlFlags & ControlFlags.DiscretionaryAclProtected) == 0) {
+                throw new InvalidOperationException("AIChat forward ACL snapshot must be protected");
+            }
+            RawAcl dacl = descriptor.DiscretionaryAcl;
+            SecurityIdentifier current = CurrentSid();
+            bool hasCurrent = false;
+            bool hasLocalSystem = false;
+            if (dacl.Count != 2) {
+                throw new InvalidOperationException("AIChat forward ACL snapshot must contain two fixed principals");
+            }
+            for (int index = 0; index < dacl.Count; index++) {
+                CommonAce ace = (CommonAce)dacl[index];
+                if (ace.SecurityIdentifier.Equals(current)) {
+                    if (hasCurrent) {
+                        throw new InvalidOperationException("AIChat forward ACL snapshot duplicates the current SID");
+                    }
+                    hasCurrent = true;
+                } else if (ace.SecurityIdentifier.Value == LOCAL_SYSTEM_SID) {
+                    if (hasLocalSystem) {
+                        throw new InvalidOperationException("AIChat forward ACL snapshot duplicates LocalSystem");
+                    }
+                    hasLocalSystem = true;
+                }
+            }
+            if (!hasCurrent || !hasLocalSystem) {
+                throw new InvalidOperationException("AIChat forward ACL snapshot principals are invalid");
+            }
+        }
+
+        public static bool SnapshotSddlEquivalent(
+            string leftSddl,
+            string rightSddl,
+            bool isDirectory
+        ) {
+            RawSecurityDescriptor left = ValidateSnapshot(leftSddl, isDirectory);
+            RawSecurityDescriptor right = ValidateSnapshot(rightSddl, isDirectory);
+            if (!left.Owner.Equals(right.Owner)) return false;
+            bool leftProtected =
+                (left.ControlFlags & ControlFlags.DiscretionaryAclProtected) != 0;
+            bool rightProtected =
+                (right.ControlFlags & ControlFlags.DiscretionaryAclProtected) != 0;
+            if (leftProtected != rightProtected) return false;
+
+            RawAcl leftDacl = left.DiscretionaryAcl;
+            RawAcl rightDacl = right.DiscretionaryAcl;
+            if (leftDacl.Count != rightDacl.Count) return false;
+            bool[] matched = new bool[rightDacl.Count];
+            for (int leftIndex = 0; leftIndex < leftDacl.Count; leftIndex++) {
+                CommonAce leftAce = (CommonAce)leftDacl[leftIndex];
+                bool found = false;
+                for (int rightIndex = 0; rightIndex < rightDacl.Count; rightIndex++) {
+                    if (matched[rightIndex]) continue;
+                    CommonAce rightAce = (CommonAce)rightDacl[rightIndex];
+                    if (leftAce.SecurityIdentifier.Equals(rightAce.SecurityIdentifier) &&
+                        leftAce.AceFlags == rightAce.AceFlags &&
+                        leftAce.AceQualifier == rightAce.AceQualifier &&
+                        leftAce.AccessMask == rightAce.AccessMask &&
+                        leftAce.IsCallback == rightAce.IsCallback) {
+                        matched[rightIndex] = true;
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) return false;
+            }
+            return true;
+        }
+
         public static void RestoreSnapshot(string path, string sddl, bool isDirectory) {
             RawSecurityDescriptor descriptor = ValidateSnapshot(sddl, isDirectory);
             uint protectionInformation =
@@ -804,6 +874,7 @@ function Assert-AIChatConnectorDataAclMatchesSnapshot {
         [bool]$Expected.private_root_existed -ne [bool]$Actual.private_root_existed) {
         throw "Connector data ACL state does not match its rollback snapshot"
     }
+    Initialize-AIChatOwnerDaclNative
     $expectedEntries = @($Expected.entries)
     $actualEntries = @($Actual.entries)
     if ($expectedEntries.Count -ne $actualEntries.Count) {
@@ -815,10 +886,205 @@ function Assert-AIChatConnectorDataAclMatchesSnapshot {
         })
         if ($matches.Count -ne 1 -or
             [bool]$matches[0].is_directory -ne [bool]$expectedEntry.is_directory -or
-            [string]$matches[0].sddl -cne [string]$expectedEntry.sddl -or
-            ([string]$matches[0].sddl_sha256).ToLowerInvariant() -cne
-                ([string]$expectedEntry.sddl_sha256).ToLowerInvariant()) {
+            -not [AIChat.Windows.OwnerDacl]::SnapshotSddlEquivalent(
+                [string]$expectedEntry.sddl,
+                [string]$matches[0].sddl,
+                [bool]$expectedEntry.is_directory
+            )) {
             throw "Connector data owner/DACL does not match its rollback snapshot"
+        }
+    }
+}
+
+function Assert-AIChatConnectorDataAclRepairEligible {
+    param(
+        [Parameter(Mandatory = $true)]$Expected,
+        [Parameter(Mandatory = $true)]$Actual
+    )
+
+    # The expected journal snapshot is validated by the narrow native parser:
+    # current owner, FullControl allow ACEs, and only the current SID or the
+    # current SID plus LocalSystem. It may retain the explicitly supported
+    # inherited historical form. Each live entry must be either already at the
+    # exact journal target or at the protected current-SID plus LocalSystem
+    # forward contract. This makes a hard-interrupted prefix safely resumable.
+    Assert-AIChatConnectorDataAclSnapshot -Snapshot $Expected
+    Assert-AIChatConnectorDataAclSnapshot -Snapshot $Actual
+    if (-not [bool]$Expected.existed -or -not [bool]$Actual.existed -or
+        -not [bool]$Expected.private_root_existed -or
+        -not [bool]$Actual.private_root_existed) {
+        throw "Connector data ACL repair requires an existing unchanged data tree"
+    }
+
+    $expectedEntries = @($Expected.entries)
+    $actualEntries = @($Actual.entries)
+    if ($expectedEntries.Count -ne $actualEntries.Count) {
+        throw "Connector data ACL repair requires the exact journal entry set"
+    }
+    Initialize-AIChatOwnerDaclNative
+    $forwardEntryCount = 0
+    foreach ($actualEntry in $actualEntries) {
+        $expectedMatches = @($expectedEntries | Where-Object {
+            [string]$_.name -ceq [string]$actualEntry.name
+        })
+        if ($expectedMatches.Count -ne 1 -or
+            [bool]$expectedMatches[0].is_directory -ne [bool]$actualEntry.is_directory) {
+            throw "Connector data ACL repair requires the exact journal entry types"
+        }
+        $alreadyAtTarget = [AIChat.Windows.OwnerDacl]::SnapshotSddlEquivalent(
+            [string]$expectedMatches[0].sddl,
+            [string]$actualEntry.sddl,
+            [bool]$actualEntry.is_directory
+        )
+        if (-not $alreadyAtTarget) {
+            [AIChat.Windows.OwnerDacl]::ValidateForwardSnapshotSddl(
+                [string]$actualEntry.sddl,
+                [bool]$actualEntry.is_directory
+            )
+            $forwardEntryCount += 1
+        }
+    }
+
+    $alreadyExact = $true
+    try {
+        Assert-AIChatConnectorDataAclMatchesSnapshot `
+            -Expected $Expected `
+            -Actual $Actual
+    } catch {
+        $alreadyExact = $false
+    }
+    if ($alreadyExact) {
+        throw "Connector data ACL already matches its rollback snapshot"
+    }
+    if ($forwardEntryCount -lt 1) {
+        throw "Connector data ACL repair requires at least one trusted forward entry"
+    }
+
+    return [pscustomobject][ordered]@{
+        entry_set_exact = $true
+        current_acl_transition_trusted = $true
+        forward_entry_count = $forwardEntryCount
+        journal_acl_snapshot_trusted = $true
+        connector_data_acl_exact = $false
+    }
+}
+
+function Assert-AIChatConnectorDataAclTransitionState {
+    param(
+        [Parameter(Mandatory = $true)]$Actual,
+        [Parameter(Mandatory = $true)][object[]]$AllowedSnapshots
+    )
+
+    if ($AllowedSnapshots.Count -ne 2) {
+        throw "Connector data ACL transition requires exactly two fixed snapshots"
+    }
+    Assert-AIChatConnectorDataAclSnapshot -Snapshot $Actual
+    foreach ($snapshot in $AllowedSnapshots) {
+        Assert-AIChatConnectorDataAclSnapshot -Snapshot $snapshot
+        if (-not [bool]$snapshot.existed -or
+            -not [bool]$snapshot.private_root_existed) {
+            throw "Connector data ACL transition snapshots must describe an existing tree"
+        }
+    }
+    if (-not [bool]$Actual.existed -or
+        -not [bool]$Actual.private_root_existed) {
+        throw "Connector data ACL transition state must retain the existing tree"
+    }
+
+    Initialize-AIChatOwnerDaclNative
+    $actualEntries = @($Actual.entries)
+    $referenceEntries = @($AllowedSnapshots[0].entries)
+    if ($actualEntries.Count -ne $referenceEntries.Count) {
+        throw "Connector data ACL transition changed the entry set"
+    }
+    foreach ($snapshot in $AllowedSnapshots) {
+        if (@($snapshot.entries).Count -ne $referenceEntries.Count) {
+            throw "Connector data ACL transition snapshots do not share an exact entry count"
+        }
+    }
+    foreach ($actualEntry in $actualEntries) {
+        $referenceMatches = @($referenceEntries | Where-Object {
+            [string]$_.name -ceq [string]$actualEntry.name
+        })
+        if ($referenceMatches.Count -ne 1 -or
+            [bool]$referenceMatches[0].is_directory -ne [bool]$actualEntry.is_directory) {
+            throw "Connector data ACL transition changed an entry type"
+        }
+        $allowedExact = $false
+        foreach ($snapshot in $AllowedSnapshots) {
+            $matches = @($snapshot.entries | Where-Object {
+                [string]$_.name -ceq [string]$actualEntry.name
+            })
+            if ($matches.Count -ne 1 -or
+                [bool]$matches[0].is_directory -ne [bool]$actualEntry.is_directory) {
+                throw "Connector data ACL transition snapshots do not share an exact entry set"
+            }
+            if ([AIChat.Windows.OwnerDacl]::SnapshotSddlEquivalent(
+                [string]$matches[0].sddl,
+                [string]$actualEntry.sddl,
+                [bool]$actualEntry.is_directory
+            )) {
+                $allowedExact = $true
+            }
+        }
+        if (-not $allowedExact) {
+            throw "Connector data ACL transition contains an ACL outside the two fixed snapshots"
+        }
+    }
+}
+
+function Get-AIChatConnectorDataContentSnapshot {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $profile = Get-AIChatUserProfile
+    $privateRoot = Join-Path $profile ".aichat"
+    $target = Assert-AIChatPathWithinRoot -Path $Path -Root $privateRoot
+    if (-not $target.Equals((Get-AIChatConnectorDataRoot), [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Connector data content snapshot must use the fixed user-profile path"
+    }
+    [void](Assert-AIChatNoReparsePath -Path $target -StopAt $profile)
+    $root = Get-Item -LiteralPath $target -Force -ErrorAction Stop
+    if (-not $root.PSIsContainer) {
+        throw "Connector data content snapshot target must be a directory"
+    }
+
+    $entries = [Collections.Generic.List[object]]::new()
+    foreach ($item in @(Get-ChildItem -LiteralPath $target -Force | Sort-Object Name)) {
+        if ($item.PSIsContainer -or
+            ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+            (Get-AIChatHardLinkCount -Path $item.FullName) -ne 1) {
+            throw "Connector data content snapshot accepts only regular unaliased files"
+        }
+        $entries.Add([pscustomobject][ordered]@{
+            name = [string]$item.Name
+            length = [long]$item.Length
+            sha256 = (Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+        })
+    }
+    return [pscustomobject][ordered]@{
+        entries = @($entries)
+    }
+}
+
+function Assert-AIChatConnectorDataContentMatchesSnapshot {
+    param(
+        [Parameter(Mandatory = $true)]$Expected,
+        [Parameter(Mandatory = $true)]$Actual
+    )
+
+    $expectedEntries = @($Expected.entries)
+    $actualEntries = @($Actual.entries)
+    if ($expectedEntries.Count -ne $actualEntries.Count) {
+        throw "Connector data content changed during ACL repair"
+    }
+    foreach ($expectedEntry in $expectedEntries) {
+        $matches = @($actualEntries | Where-Object {
+            [string]$_.name -ceq [string]$expectedEntry.name
+        })
+        if ($matches.Count -ne 1 -or
+            [long]$matches[0].length -ne [long]$expectedEntry.length -or
+            [string]$matches[0].sha256 -cne [string]$expectedEntry.sha256) {
+            throw "Connector data content changed during ACL repair"
         }
     }
 }
@@ -885,7 +1151,8 @@ function Get-AIChatConnectorDataAclSnapshot {
 function Restore-AIChatConnectorDataAclSnapshot {
     param(
         [Parameter(Mandatory = $true)]$Snapshot,
-        [Parameter(Mandatory = $true)][string]$Path
+        [Parameter(Mandatory = $true)][string]$Path,
+        [object[]]$AllowedTransitionSnapshots = @()
     )
 
     Assert-AIChatConnectorDataAclSnapshot -Snapshot $Snapshot
@@ -915,7 +1182,28 @@ function Restore-AIChatConnectorDataAclSnapshot {
         return
     }
 
-    [void](Assert-AIChatConnectorDataTree -Path $target)
+    if ($AllowedTransitionSnapshots.Count -gt 0) {
+        $targetAllowed = $false
+        foreach ($allowedSnapshot in $AllowedTransitionSnapshots) {
+            try {
+                Assert-AIChatConnectorDataAclMatchesSnapshot `
+                    -Expected $allowedSnapshot `
+                    -Actual $Snapshot
+                $targetAllowed = $true
+            } catch {
+                # Continue only across the fixed transition snapshot pair.
+            }
+        }
+        if (-not $targetAllowed) {
+            throw "Connector data ACL transition target is outside the two fixed snapshots"
+        }
+        $transitionState = Get-AIChatConnectorDataAclSnapshot -Path $target
+        Assert-AIChatConnectorDataAclTransitionState `
+            -Actual $transitionState `
+            -AllowedSnapshots $AllowedTransitionSnapshots
+    } else {
+        [void](Assert-AIChatConnectorDataTree -Path $target)
+    }
     $expectedFiles = @($Snapshot.entries | Where-Object { [string]$_.name -ne "." })
     $actualFiles = @(Get-ChildItem -LiteralPath $target -Force)
     if ($actualFiles.Count -ne $expectedFiles.Count) {
@@ -948,9 +1236,79 @@ function Restore-AIChatConnectorDataAclSnapshot {
         } else {
             Join-Path $target ([string]$entry.name)
         }
-        if ((Get-AIChatOwnerAndDaclSddl -Path $entryPath) -ne [string]$entry.sddl) {
+        if (-not [AIChat.Windows.OwnerDacl]::SnapshotSddlEquivalent(
+            [string]$entry.sddl,
+            (Get-AIChatOwnerAndDaclSddl -Path $entryPath),
+            [bool]$entry.is_directory
+        )) {
             throw "Connector data ACL rollback did not restore the exact owner/DACL"
         }
+    }
+}
+
+function Invoke-AIChatConnectorDataAclSnapshotRepair {
+    param(
+        [Parameter(Mandatory = $true)]$ExpectedSnapshot,
+        [Parameter(Mandatory = $true)]$CurrentSnapshot,
+        [Parameter(Mandatory = $true)][string]$Path,
+        [scriptblock]$PostRepairVerifier,
+        [scriptblock]$PostCompensationVerifier,
+        [scriptblock]$RestoreInvoker,
+        [scriptblock]$SnapshotProvider
+    )
+
+    [void](Assert-AIChatConnectorDataAclRepairEligible `
+        -Expected $ExpectedSnapshot `
+        -Actual $CurrentSnapshot)
+    $allowedTransitions = @($CurrentSnapshot, $ExpectedSnapshot)
+    $restore = {
+        param($TargetSnapshot)
+        if ($null -eq $RestoreInvoker) {
+            Restore-AIChatConnectorDataAclSnapshot `
+                -Snapshot $TargetSnapshot `
+                -Path $Path `
+                -AllowedTransitionSnapshots $allowedTransitions
+        } else {
+            & $RestoreInvoker $TargetSnapshot $Path $allowedTransitions
+        }
+    }
+    $readSnapshot = {
+        if ($null -eq $SnapshotProvider) {
+            return Get-AIChatConnectorDataAclSnapshot -Path $Path
+        }
+        return & $SnapshotProvider $Path
+    }
+
+    try {
+        & $restore $ExpectedSnapshot
+        $repaired = & $readSnapshot
+        Assert-AIChatConnectorDataAclMatchesSnapshot `
+            -Expected $ExpectedSnapshot `
+            -Actual $repaired
+        if ($null -ne $PostRepairVerifier) {
+            return & $PostRepairVerifier
+        }
+        return $repaired
+    } catch {
+        $primaryMessage = $_.Exception.Message
+        try {
+            # A failed restore may leave a root or prefix at the journal ACL.
+            # The transition allowlist accepts only entries exactly equal to
+            # the pre-mutation forward snapshot or the journal target, so the
+            # same no-SACL native API can safely converge back to Current.
+            & $restore $CurrentSnapshot
+            $compensated = & $readSnapshot
+            Assert-AIChatConnectorDataAclMatchesSnapshot `
+                -Expected $CurrentSnapshot `
+                -Actual $compensated
+            if ($null -ne $PostCompensationVerifier) {
+                [void](& $PostCompensationVerifier)
+            }
+        } catch {
+            $compensationMessage = $_.Exception.Message
+            throw "Connector ACL repair failed and pre-repair ACL compensation failed; journal retained; primary_error=$primaryMessage; compensation_error=$compensationMessage"
+        }
+        throw "Connector ACL repair failed; exact pre-repair ACL restored; journal retained; primary_error=$primaryMessage"
     }
 }
 
@@ -2396,13 +2754,12 @@ function Invoke-AIChatManifestRollback {
     }
 }
 
-function Assert-AIChatManifestRollbackComplete {
+function Assert-AIChatManifestRollbackNonAclComplete {
     param(
         [Parameter(Mandatory = $true)]$Manifest,
         [Parameter(Mandatory = $true)]$Paths,
         [Parameter(Mandatory = $true)][string]$BackupDirectory,
-        [scriptblock]$TaskProvider,
-        [scriptblock]$ConnectorDataAclSnapshotProvider
+        [scriptblock]$TaskProvider
     )
 
     Assert-AIChatTransactionManifest `
@@ -2446,15 +2803,6 @@ function Assert-AIChatManifestRollbackComplete {
             -TaskProvider $TaskProvider)
     }
 
-    $currentAclSnapshot = if ($null -eq $ConnectorDataAclSnapshotProvider) {
-        Get-AIChatConnectorDataAclSnapshot -Path $Paths.ConnectorDataRoot
-    } else {
-        & $ConnectorDataAclSnapshotProvider
-    }
-    Assert-AIChatConnectorDataAclMatchesSnapshot `
-        -Expected $Manifest.connector_data_acl `
-        -Actual $currentAclSnapshot
-
     $liveRelease = Join-Path $Paths.ReleasesDirectory ([string]$Manifest.new_release_id)
     if (Test-Path -LiteralPath $liveRelease) {
         throw "Failed transaction release is still present in the live releases directory"
@@ -2480,9 +2828,46 @@ function Assert-AIChatManifestRollbackComplete {
         task_snapshot_exact = $managedV3
         task_untouched = $untouchedV4
         task_scheduler_accessed = $managedV3
-        connector_data_acl_exact = $true
         live_release_absent = $true
         staging_absent = $true
         failed_release_preserved = Test-Path -LiteralPath $failedRelease -PathType Container
+    }
+}
+
+function Assert-AIChatManifestRollbackComplete {
+    param(
+        [Parameter(Mandatory = $true)]$Manifest,
+        [Parameter(Mandatory = $true)]$Paths,
+        [Parameter(Mandatory = $true)][string]$BackupDirectory,
+        [scriptblock]$TaskProvider,
+        [scriptblock]$ConnectorDataAclSnapshotProvider
+    )
+
+    $nonAcl = Assert-AIChatManifestRollbackNonAclComplete `
+        -Manifest $Manifest `
+        -Paths $Paths `
+        -BackupDirectory $BackupDirectory `
+        -TaskProvider $TaskProvider
+    $currentAclSnapshot = if ($null -eq $ConnectorDataAclSnapshotProvider) {
+        Get-AIChatConnectorDataAclSnapshot -Path $Paths.ConnectorDataRoot
+    } else {
+        & $ConnectorDataAclSnapshotProvider
+    }
+    Assert-AIChatConnectorDataAclMatchesSnapshot `
+        -Expected $Manifest.connector_data_acl `
+        -Actual $currentAclSnapshot
+
+    return [pscustomobject][ordered]@{
+        transaction_id = [string]$nonAcl.transaction_id
+        schema_version = [int]$nonAcl.schema_version
+        file_targets_exact = [bool]$nonAcl.file_targets_exact
+        task_mode = [string]$nonAcl.task_mode
+        task_snapshot_exact = [bool]$nonAcl.task_snapshot_exact
+        task_untouched = [bool]$nonAcl.task_untouched
+        task_scheduler_accessed = [bool]$nonAcl.task_scheduler_accessed
+        connector_data_acl_exact = $true
+        live_release_absent = [bool]$nonAcl.live_release_absent
+        staging_absent = [bool]$nonAcl.staging_absent
+        failed_release_preserved = [bool]$nonAcl.failed_release_preserved
     }
 }
