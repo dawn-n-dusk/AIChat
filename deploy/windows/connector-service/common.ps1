@@ -792,6 +792,37 @@ function Assert-AIChatConnectorDataAclSnapshot {
     }
 }
 
+function Assert-AIChatConnectorDataAclMatchesSnapshot {
+    param(
+        [Parameter(Mandatory = $true)]$Expected,
+        [Parameter(Mandatory = $true)]$Actual
+    )
+
+    Assert-AIChatConnectorDataAclSnapshot -Snapshot $Expected
+    Assert-AIChatConnectorDataAclSnapshot -Snapshot $Actual
+    if ([bool]$Expected.existed -ne [bool]$Actual.existed -or
+        [bool]$Expected.private_root_existed -ne [bool]$Actual.private_root_existed) {
+        throw "Connector data ACL state does not match its rollback snapshot"
+    }
+    $expectedEntries = @($Expected.entries)
+    $actualEntries = @($Actual.entries)
+    if ($expectedEntries.Count -ne $actualEntries.Count) {
+        throw "Connector data ACL entry count does not match its rollback snapshot"
+    }
+    foreach ($expectedEntry in $expectedEntries) {
+        $matches = @($actualEntries | Where-Object {
+            [string]$_.name -ceq [string]$expectedEntry.name
+        })
+        if ($matches.Count -ne 1 -or
+            [bool]$matches[0].is_directory -ne [bool]$expectedEntry.is_directory -or
+            [string]$matches[0].sddl -cne [string]$expectedEntry.sddl -or
+            ([string]$matches[0].sddl_sha256).ToLowerInvariant() -cne
+                ([string]$expectedEntry.sddl_sha256).ToLowerInvariant()) {
+            throw "Connector data owner/DACL does not match its rollback snapshot"
+        }
+    }
+}
+
 function Get-AIChatConnectorDataAclSnapshot {
     param([Parameter(Mandatory = $true)][string]$Path)
 
@@ -2142,6 +2173,11 @@ function Restore-AIChatTaskSnapshot {
                 ([string]$Snapshot.xml_sha256).ToLowerInvariant()) {
             throw "Scheduled Task rollback snapshot hash is invalid"
         }
+        if ($null -ne $current -and
+            (Get-AIChatSha256Text -Value ([string]$current.Xml)) -eq
+                ([string]$Snapshot.xml_sha256).ToLowerInvariant()) {
+            return
+        }
         $service = New-Object -ComObject "Schedule.Service"
         $service.Connect()
         try {
@@ -2164,7 +2200,9 @@ function Restore-AIChatTaskSnapshot {
         $restored = Get-AIChatConnectorTask
         Assert-AIChatManagedTask -Task $restored
         Assert-AIChatTaskContract -Task $restored -Paths $Paths
-    } elseif ($null -ne $current) {
+    } elseif ($null -eq $current) {
+        return
+    } else {
         $service = New-Object -ComObject "Schedule.Service"
         $service.Connect()
         $folder = $service.GetFolder("\AIChat")
@@ -2316,5 +2354,82 @@ function Invoke-AIChatManifestRollback {
         Restore-AIChatConnectorDataAclSnapshot `
             -Snapshot $Manifest.connector_data_acl `
             -Path $Paths.ConnectorDataRoot
+    }
+}
+
+function Assert-AIChatManifestRollbackComplete {
+    param(
+        [Parameter(Mandatory = $true)]$Manifest,
+        [Parameter(Mandatory = $true)]$Paths,
+        [Parameter(Mandatory = $true)][string]$BackupDirectory,
+        [scriptblock]$TaskProvider,
+        [scriptblock]$ConnectorDataAclSnapshotProvider
+    )
+
+    Assert-AIChatTransactionManifest `
+        -Manifest $Manifest `
+        -Paths $Paths `
+        -BackupDirectory $BackupDirectory `
+        -AllowedStatuses @("rollback_incomplete")
+    if ([int]$Manifest.schema_version -ne 3) {
+        throw "Automatic rollback finalization requires an integrated schema-v3 journal"
+    }
+
+    $targets = Get-AIChatDeploymentTargets -Paths $Paths
+    foreach ($entry in @($Manifest.files)) {
+        $target = [string]$targets[[string]$entry.id]
+        if ([bool]$entry.existed) {
+            [void](Assert-AIChatPrivateFile `
+                -Path $target `
+                -ProtectedRoot $Paths.ProtectedRoot)
+            $currentHash = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($currentHash -ne ([string]$entry.sha256).ToLowerInvariant()) {
+                throw "Rollback target content does not match its protected prior-state backup"
+            }
+        } elseif (Test-Path -LiteralPath $target) {
+            throw "Rollback target exists although it was absent from the prior state"
+        }
+    }
+
+    [void](Assert-AIChatTaskSnapshotForMutation `
+        -Snapshot $Manifest.task `
+        -Paths $Paths `
+        -TaskProvider $TaskProvider)
+
+    $currentAclSnapshot = if ($null -eq $ConnectorDataAclSnapshotProvider) {
+        Get-AIChatConnectorDataAclSnapshot -Path $Paths.ConnectorDataRoot
+    } else {
+        & $ConnectorDataAclSnapshotProvider
+    }
+    Assert-AIChatConnectorDataAclMatchesSnapshot `
+        -Expected $Manifest.connector_data_acl `
+        -Actual $currentAclSnapshot
+
+    $liveRelease = Join-Path $Paths.ReleasesDirectory ([string]$Manifest.new_release_id)
+    if (Test-Path -LiteralPath $liveRelease) {
+        throw "Failed transaction release is still present in the live releases directory"
+    }
+    $staging = Join-Path $Paths.StagingDirectory ([string]$Manifest.transaction_id)
+    if (Test-Path -LiteralPath $staging) {
+        throw "Failed transaction staging directory still exists"
+    }
+    $failedRelease = Join-Path `
+        (Join-Path $Paths.StateRoot "failed") `
+        ([string]$Manifest.new_release_id)
+    if (Test-Path -LiteralPath $failedRelease) {
+        [void](Get-AIChatTreeHash `
+            -Root $failedRelease `
+            -RequireCurrentSidOnlyAcl)
+    }
+
+    return [pscustomobject][ordered]@{
+        transaction_id = [string]$Manifest.transaction_id
+        schema_version = [int]$Manifest.schema_version
+        file_targets_exact = $true
+        task_snapshot_exact = $true
+        connector_data_acl_exact = $true
+        live_release_absent = $true
+        staging_absent = $true
+        failed_release_preserved = Test-Path -LiteralPath $failedRelease -PathType Container
     }
 }
