@@ -32,6 +32,7 @@ def test_required_windows_package_files_exist() -> None:
         "install.ps1",
         "check.ps1",
         "rollback.ps1",
+        "recover-transaction.ps1",
         "uninstall.ps1",
         "config.example.json",
     }
@@ -267,6 +268,9 @@ def test_connector_service_stage_only_never_accesses_task_scheduler() -> None:
     assert "AICHAT_WINDOWS_CONNECTOR_TEST_TASK_ACCESS" in common
     assert 'AICHAT_WINDOWS_CONNECTOR_TEST_TASK_ACCESS = "deny"' in functional
     assert "-StageOnly" in functional
+    assert "Get-AIChatDeploymentTargets -Paths $paths" in functional
+    assert "$stageOnlyTargetHashes" in functional
+    assert "$stageOnlyTaskXmlHash" in functional
 
 
 def test_connector_service_launcher_fixes_security_and_environment_contract() -> None:
@@ -492,6 +496,44 @@ def test_connector_service_journal_uses_fixed_ids_hashes_and_inverse_rollback() 
     assert 'mode = "untouched"' in install
     assert 'Write-Host "mapping_state_rollback=deferred_until_apply"' in rollback
     assert 'Write-Host "connector_data_mutated=false"' in rollback
+
+
+def test_connector_service_incomplete_rollback_recovery_is_read_only_and_exact() -> None:
+    root = ROOT / "connector-service"
+    common = (root / "common.ps1").read_text(encoding="utf-8")
+    recovery = (root / "recover-transaction.ps1").read_text(encoding="utf-8")
+    assert "Assert-AIChatManifestRollbackComplete" in common
+    assert "Assert-AIChatConnectorDataAclMatchesSnapshot" in common
+    assert 'AllowedStatuses @("rollback_incomplete")' in common
+    assert "requires schema-v3 managed or schema-v4 untouched task state" in common
+    assert "Assert-AIChatTaskSnapshotForMutation" in common
+    assert 'if ($managedV3)' in common
+    assert "task_scheduler_accessed = $managedV3" in common
+    assert "Rollback target content does not match" in common
+    assert "Failed transaction staging directory still exists" in common
+    assert "Failed transaction release is still present" in common
+    assert "rollback-incomplete.finalized.json" in recovery
+    assert "byte-identical to the live journal" in recovery
+    assert recovery.count("Assert-AIChatManifestRollbackComplete") == 2
+    assert recovery.index("Copy-AIChatPrivateFileAtomic") < recovery.rindex(
+        "Assert-AIChatManifestRollbackComplete"
+    ) < recovery.index("Remove-Item -LiteralPath $paths.TransactionPath")
+    for forbidden in (
+        "RegisterTask(",
+        "DeleteTask(",
+        "Register-AIChatDisabledTask",
+        "Restore-AIChatTaskSnapshot",
+        "Start-ScheduledTask",
+    ):
+        assert forbidden not in recovery
+    assert 'Write-Host "task_write_attempted=false"' in recovery
+    assert 'Write-Host "task_mode=$($result.task_mode)"' in recovery
+    assert 'Write-Host "task_scheduler_accessed=$($result.task_scheduler_accessed' in recovery
+    assert 'Write-Host "connector_state_mutated=false"' in recovery
+    restore = common[common.index("function Restore-AIChatTaskSnapshot") :]
+    assert restore.index("$null -ne $current") < restore.index(
+        'New-Object -ComObject "Schedule.Service"'
+    )
 
 
 def test_connector_service_pins_native_node_npm_and_codex_without_path_shim() -> None:

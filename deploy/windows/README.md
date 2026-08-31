@@ -272,6 +272,42 @@ credential-bound online check; `-StageOnly -Online` is rejected. The connector
 remains stopped until the operator explicitly runs the installed launcher in
 the foreground.
 
+If Task Scheduler rejects a rollback write with `E_ACCESSDENIED`, the journal
+correctly remains a blocker even when the files and task already appear
+restored. A visible prior task or matching filenames are insufficient proof.
+Use the recovery verifier from the same reviewed checkout; its default mode is
+read-only and never registers, deletes, enables, or starts a Scheduled Task:
+
+```powershell
+.\deploy\windows\connector-service\recover-transaction.ps1
+```
+
+It accepts only an integrated schema-v3 managed-task journal or a schema-v4
+stage-only journal with the exact single-property `task.mode=untouched`
+contract. Schema-v3 recovery requires every fixed manifest target to match the
+protected prior backup hash, every absent target to remain absent, and the task
+XML hash/existence to match the prior snapshot. Schema-v4 stage-only recovery
+checks the same files without calling a task provider or opening Task Scheduler.
+Both modes require the connector-data owner/DACL snapshot to match exactly and
+the failed transaction to have no live release or staging directory. A
+preserved failed release is validated as a private, reparse-free, hardlink-free
+tree. Schema-v4 managed-task journals and historical schema-v1/v2 journals
+remain fail-closed and are never auto-finalized by this tool.
+
+Only after the verifier reports `rollback_exact=true` may the operator archive
+the original journal and clear the live blocker:
+
+```powershell
+.\deploy\windows\connector-service\recover-transaction.ps1 `
+  -Finalize -Apply
+```
+
+Finalization revalidates all invariants immediately before removal and stores
+the byte-identical protected journal as
+`backups\<transaction-id>\rollback-incomplete.finalized.json`. It does not
+delete the failed release, alter Connector state, read a token, or request Task
+Scheduler write access. Any mismatch leaves `transaction.json` in place.
+
 The task remains disabled after a successful install. Do not enable it until
 the Mac/core PR is compatible and a supervised Windows acceptance verifies the
 native `codex.exe app-server` initialize handshake, signed-in identity, and

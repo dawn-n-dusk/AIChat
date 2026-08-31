@@ -677,12 +677,18 @@ public static class Program {
     # Task Scheduler registration is unavailable. The synthetic denial makes
     # any accidental query, registration, restore, or delete fail immediately.
     $stageOnlyTaskXml = [string](Get-AIChatConnectorTask).Xml
-    $stageOnlyActiveHash = (Get-FileHash `
-        -LiteralPath $paths.ActiveReleasePath `
-        -Algorithm SHA256).Hash
-    $stageOnlySettingsHash = (Get-FileHash `
-        -LiteralPath $paths.SettingsPath `
-        -Algorithm SHA256).Hash
+    $stageOnlyTaskXmlHash = Get-AIChatSha256Text -Value $stageOnlyTaskXml
+    $stageOnlyTargetHashes = [ordered]@{}
+    $stageOnlyTargets = Get-AIChatDeploymentTargets -Paths $paths
+    foreach ($targetId in @($stageOnlyTargets.Keys)) {
+        $targetPath = [string]$stageOnlyTargets[$targetId]
+        if (-not (Test-Path -LiteralPath $targetPath -PathType Leaf)) {
+            throw "Stage-only baseline target is absent: $targetId"
+        }
+        $stageOnlyTargetHashes[$targetId] = (Get-FileHash `
+            -LiteralPath $targetPath `
+            -Algorithm SHA256).Hash
+    }
     $env:AICHAT_WINDOWS_CONNECTOR_TEST_TASK_ACCESS = "deny"
     try {
         $stageOnlyWhatIf = & $installer `
@@ -707,12 +713,16 @@ public static class Program {
                     -StageOnly -Apply
             }
         $env:AICHAT_WINDOWS_CONNECTOR_TEST_FAILURE = $null
-        if ((Test-Path -LiteralPath $paths.TransactionPath) -or
-            (Get-FileHash -LiteralPath $paths.ActiveReleasePath -Algorithm SHA256).Hash -ne
-                $stageOnlyActiveHash -or
-            (Get-FileHash -LiteralPath $paths.SettingsPath -Algorithm SHA256).Hash -ne
-                $stageOnlySettingsHash) {
+        if (Test-Path -LiteralPath $paths.TransactionPath) {
             throw "Stage-only failure recovery did not restore the prior package"
+        }
+        foreach ($targetId in @($stageOnlyTargets.Keys)) {
+            $targetPath = [string]$stageOnlyTargets[$targetId]
+            if (-not (Test-Path -LiteralPath $targetPath -PathType Leaf) -or
+                (Get-FileHash -LiteralPath $targetPath -Algorithm SHA256).Hash -ne
+                    [string]$stageOnlyTargetHashes[$targetId]) {
+                throw "Stage-only failure recovery changed prior target: $targetId"
+            }
         }
 
         $stageOnlyInstall = & $installer `
@@ -766,12 +776,19 @@ public static class Program {
         $env:AICHAT_WINDOWS_CONNECTOR_TEST_FAILURE = $null
         $env:AICHAT_WINDOWS_CONNECTOR_TEST_TASK_ACCESS = $null
     }
-    if ([string](Get-AIChatConnectorTask).Xml -ne $stageOnlyTaskXml -or
-        (Get-FileHash -LiteralPath $paths.ActiveReleasePath -Algorithm SHA256).Hash -ne
-            $stageOnlyActiveHash -or
-        (Get-FileHash -LiteralPath $paths.SettingsPath -Algorithm SHA256).Hash -ne
-            $stageOnlySettingsHash) {
-        throw "Stage-only install/rollback changed the existing task or prior active package"
+    $stageOnlyTaskXmlAfter = [string](Get-AIChatConnectorTask).Xml
+    if ($stageOnlyTaskXmlAfter -ne $stageOnlyTaskXml -or
+        (Get-AIChatSha256Text -Value $stageOnlyTaskXmlAfter) -ne
+            $stageOnlyTaskXmlHash) {
+        throw "Stage-only install/rollback changed the existing task XML"
+    }
+    foreach ($targetId in @($stageOnlyTargets.Keys)) {
+        $targetPath = [string]$stageOnlyTargets[$targetId]
+        if (-not (Test-Path -LiteralPath $targetPath -PathType Leaf) -or
+            (Get-FileHash -LiteralPath $targetPath -Algorithm SHA256).Hash -ne
+                [string]$stageOnlyTargetHashes[$targetId]) {
+            throw "Stage-only install/rollback changed prior target: $targetId"
+        }
     }
 
     New-Item -ItemType HardLink -Path $hardlinkAlias -Target $paths.SettingsPath | Out-Null
