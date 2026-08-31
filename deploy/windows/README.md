@@ -407,12 +407,29 @@ text level with target exit code `0` or `1`.
 All runner-level failures exit `2` and emit exactly these fields:
 
 ```text
-runner_contract_version operation success error_code target_exit_code
-mutation_possible
+runner_contract_version operation success error_code rejection_code
+target_exit_code mutation_possible
 ```
 
-`runner_contract_version` is `1`, `success` is `false`, and `operation` is
+`runner_contract_version` is `2`, `success` is `false`, and `operation` is
 `verify`, `repair`, `finalize`, or `unknown` when runner arguments were invalid.
+`rejection_code` is `not_applicable` except when `error_code` is
+`target_contract_invalid`. In that case it is exactly one fixed value:
+
+- `field_set_invalid`
+- `contract_version_invalid`
+- `field_type_invalid`
+- `operation_mode_invalid`
+- `success_invariant_invalid`
+- `status_invariant_invalid`
+- `error_code_invalid`
+- `error_diagnostic_invalid`
+- `operation_diagnostic_invalid`
+- `exit_code_invalid`
+- `mutation_invariant_invalid`
+
+These values identify only the rejected contract rule. They never reproduce
+the target JSON, child output, exception text, paths, identities, or ACL data.
 `target_exit_code` is a native integer when a completed target supplied one and
 JSON `null` when no trustworthy target exit code exists. Fixed `error_code`
 values are:
@@ -499,6 +516,11 @@ The fixed enums are:
   `finalize_reverification_failed`, `finalize_clear_failed`, or
   `internal_error`. The runner validates the code against both the operation
   and broad `error_code`; no code is derived from exception text.
+  `protected_paths_invalid` is valid with `initialization_failed` when path
+  construction fails and with `verification_failed` when the later protected
+  state-root assertion fails. The latter combination is valid for verify,
+  repair, and finalize because all three revalidate the same state before any
+  permitted mutation stage.
 
 The inner JSON guarantee starts only after PowerShell has successfully parsed
 the target script and bound its command-line parameters. A syntax error in

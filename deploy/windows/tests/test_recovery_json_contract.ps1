@@ -597,6 +597,44 @@ try {
         throw "Path-initialization JSON failure is invalid"
     }
 
+    foreach ($protectedPathCase in @(
+        [pscustomobject]@{
+            Name = "verify-protected-path-failure"
+            Arguments = @("-OutputFormat", "Json")
+            Operation = "verify"
+            Mode = "read_only"
+        },
+        [pscustomobject]@{
+            Name = "repair-protected-path-failure"
+            Arguments = @("-RepairConnectorAcl", "-Apply", "-OutputFormat", "Json")
+            Operation = "repair"
+            Mode = "apply"
+        },
+        [pscustomobject]@{
+            Name = "finalize-protected-path-failure"
+            Arguments = @("-Finalize", "-Apply", "-OutputFormat", "Json")
+            Operation = "finalize"
+            Mode = "apply"
+        }
+    )) {
+        $protectedPathFailure = Invoke-RecoveryCase `
+            -Name ([string]$protectedPathCase.Name) `
+            -Scenario "protected_path_failure" `
+            -Arguments @($protectedPathCase.Arguments) `
+            -ExpectedExitCode 1 `
+            -ExpectedOperation ([string]$protectedPathCase.Operation) `
+            -ExpectedMode ([string]$protectedPathCase.Mode) `
+            -ExpectedDiagnosticCode "protected_paths_invalid"
+        if ($protectedPathFailure.success -or
+            $protectedPathFailure.error_code -ne "verification_failed" -or
+            $protectedPathFailure.mutation_performed -or
+            -not $protectedPathFailure.journal_retained -or
+            $protectedPathFailure.connector_acl_mutated -or
+            $protectedPathFailure.finalize_performed) {
+            throw "$($protectedPathCase.Name) JSON failure is invalid"
+        }
+    }
+
     $repairApplyFailure = Invoke-RecoveryCase `
         -Name "repair-apply-failure" `
         -Scenario "repair_apply_failure" `

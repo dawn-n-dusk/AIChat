@@ -64,7 +64,12 @@ if ($scenario -eq "timeout") {
     exit 0
 }
 
-if ($scenario -eq "inner_failure" -or $scenario -eq "bad_diagnostic") {
+if ($scenario -eq "inner_failure" -or
+    $scenario -eq "protected_paths_invalid" -or
+    $scenario -eq "bad_diagnostic" -or
+    $scenario -eq "bad_error_code" -or
+    $scenario -eq "bad_operation_diagnostic" -or
+    $scenario -eq "bad_mutation") {
     $errorCode = switch ($operation) {
         "verify" { "verification_failed"; break }
         "repair" { "acl_repair_failed"; break }
@@ -75,6 +80,16 @@ if ($scenario -eq "inner_failure" -or $scenario -eq "bad_diagnostic") {
         "repair" { "acl_repair_apply_failed"; break }
         "finalize" { "finalize_archive_failed"; break }
     }
+    if ($scenario -eq "protected_paths_invalid") {
+        $errorCode = "verification_failed"
+        $diagnosticCode = "protected_paths_invalid"
+    } elseif ($scenario -eq "bad_error_code") {
+        $errorCode = "acl_repair_failed"
+        $diagnosticCode = "acl_repair_apply_failed"
+    } elseif ($scenario -eq "bad_operation_diagnostic") {
+        $errorCode = "verification_failed"
+        $diagnosticCode = "acl_repair_not_required"
+    }
     $value = [pscustomobject][ordered]@{
         contract_version = 2
         operation = $operation
@@ -83,13 +98,21 @@ if ($scenario -eq "inner_failure" -or $scenario -eq "bad_diagnostic") {
         status = $errorCode
         error_code = $errorCode
         diagnostic_code = $diagnosticCode
-        mutation_performed = $operation -ne "verify"
+        mutation_performed = if ($scenario -eq "protected_paths_invalid") {
+            $false
+        } else {
+            $operation -ne "verify"
+        }
         journal_retained = $true
         token_read = $false
         task_write_attempted = $false
         connector_state_mutated = $false
         connector_state_content_mutated = $false
-        connector_acl_mutated = $operation -eq "repair"
+        connector_acl_mutated = if ($scenario -eq "protected_paths_invalid") {
+            $false
+        } else {
+            $operation -eq "repair"
+        }
         finalize_performed = $false
     }
 } else {
@@ -148,12 +171,22 @@ if ($scenario -eq "duplicate_key") {
     )
 } elseif ($scenario -eq "bad_contract") {
     $json = $json.Replace('"contract_version":2', '"contract_version":1')
+} elseif ($scenario -eq "bad_fields") {
+    $json = $json.Replace(',"transaction_id":"20260901T000000Z-1234abcd"', '')
+} elseif ($scenario -eq "bad_type") {
+    $json = $json.Replace('"success":true', '"success":"true"')
+} elseif ($scenario -eq "bad_mode") {
+    $json = $json.Replace('"mode":"read_only"', '"mode":"apply"')
+} elseif ($scenario -eq "bad_success_invariant") {
+    $json = $json.Replace('"file_targets_exact":true', '"file_targets_exact":false')
 } elseif ($scenario -eq "bad_enum") {
     $json = $json.Replace('"status":"rollback_exact"', '"status":"other"')
     $json = $json.Replace('"status":"acl_repaired"', '"status":"other"')
     $json = $json.Replace('"status":"finalized"', '"status":"other"')
 } elseif ($scenario -eq "bad_diagnostic") {
     $json = $json.Replace('"diagnostic_code":"manifest_invalid"', '"diagnostic_code":"other"')
+} elseif ($scenario -eq "bad_mutation") {
+    $json = $json.Replace('"mutation_performed":false', '"mutation_performed":true')
 }
 
 if ($scenario -ne "empty") {
@@ -195,7 +228,12 @@ switch ($scenario) {
     }
     default {
         [Console]::Out.WriteLine($json)
-        if ($scenario -eq "inner_failure" -or $scenario -eq "bad_diagnostic") { exit 1 }
+        if ($scenario -eq "inner_failure" -or
+            $scenario -eq "protected_paths_invalid" -or
+            $scenario -eq "bad_diagnostic" -or
+            $scenario -eq "bad_error_code" -or
+            $scenario -eq "bad_operation_diagnostic" -or
+            $scenario -eq "bad_mutation") { exit 1 }
         exit 0
     }
 }
@@ -308,7 +346,8 @@ function Read-RunnerFailure {
         [Parameter(Mandatory = $true)]$Result,
         [Parameter(Mandatory = $true)][string]$Operation,
         [Parameter(Mandatory = $true)][string]$ErrorCode,
-        [Parameter(Mandatory = $true)][bool]$MutationPossible
+        [Parameter(Mandatory = $true)][bool]$MutationPossible,
+        [string]$RejectionCode = "not_applicable"
     )
 
     if ($Result.ExitCode -ne 2 -or $Result.Stderr.Length -ne 0) {
@@ -359,7 +398,7 @@ function Read-RunnerFailure {
     $fields = @($parsed.PSObject.Properties.Name)
     $expectedFields = @(
         "runner_contract_version", "operation", "success", "error_code",
-        "target_exit_code", "mutation_possible"
+        "rejection_code", "target_exit_code", "mutation_possible"
     )
     if ($fields.Count -ne $expectedFields.Count) {
         throw "$ErrorCode runner field count changed"
@@ -369,11 +408,12 @@ function Read-RunnerFailure {
             throw "$ErrorCode runner field order changed"
         }
     }
-    if ([int]$parsed.runner_contract_version -ne 1 -or
+    if ([int]$parsed.runner_contract_version -ne 2 -or
         [string]$parsed.operation -cne $Operation -or
         $parsed.success -isnot [bool] -or
         [bool]$parsed.success -or
         [string]$parsed.error_code -cne $ErrorCode -or
+        [string]$parsed.rejection_code -cne $RejectionCode -or
         $parsed.mutation_possible -isnot [bool] -or
         [bool]$parsed.mutation_possible -ne $MutationPossible) {
         throw "$ErrorCode runner contract values are invalid"
@@ -438,6 +478,19 @@ try {
         }
     }
 
+    foreach ($operation in @("verify", "repair", "finalize")) {
+        $caseRoot = New-RunnerCase -Name "protected-paths-$operation"
+        $result = Invoke-RunnerCase `
+            -CaseRoot $caseRoot `
+            -Operation $operation `
+            -Scenario "protected_paths_invalid"
+        $expected = Get-Content -LiteralPath (Join-Path $caseRoot "expected.txt") -Raw
+        if ($result.ExitCode -ne 1 -or $result.Stderr.Length -ne 0 -or
+            $result.Stdout -cne $expected) {
+            throw "$operation protected_paths_invalid was not forwarded exactly"
+        }
+    }
+
     foreach ($operation in @("verify", "finalize")) {
         $caseRoot = New-RunnerCase -Name "schema4-$operation"
         $result = Invoke-RunnerCase `
@@ -482,8 +535,10 @@ param([switch]$Different)
 
     foreach ($scenario in @(
         "stderr", "empty", "double_json", "extra_whitespace", "duplicate_key",
-        "malformed", "bom", "bad_contract", "bad_enum", "bad_diagnostic",
-        "exit_mismatch"
+        "malformed", "bom", "bad_contract", "bad_fields", "bad_type",
+        "bad_mode", "bad_success_invariant", "bad_enum", "bad_diagnostic",
+        "bad_error_code",
+        "bad_operation_diagnostic", "bad_mutation", "exit_mismatch"
     )) {
         $caseRoot = New-RunnerCase -Name $scenario
         $result = Invoke-RunnerCase `
@@ -501,7 +556,26 @@ param([switch]$Different)
             "exit_mismatch" { "target_contract_invalid"; break }
             default { "target_contract_invalid"; break }
         }
-        [void](Read-RunnerFailure $result "verify" $expectedError $false)
+        $expectedRejection = switch ($scenario) {
+            "bad_contract" { "contract_version_invalid"; break }
+            "bad_fields" { "field_set_invalid"; break }
+            "bad_type" { "field_type_invalid"; break }
+            "bad_mode" { "operation_mode_invalid"; break }
+            "bad_success_invariant" { "success_invariant_invalid"; break }
+            "bad_enum" { "status_invariant_invalid"; break }
+            "bad_diagnostic" { "error_diagnostic_invalid"; break }
+            "bad_error_code" { "error_code_invalid"; break }
+            "bad_operation_diagnostic" { "operation_diagnostic_invalid"; break }
+            "bad_mutation" { "mutation_invariant_invalid"; break }
+            "exit_mismatch" { "exit_code_invalid"; break }
+            default { "not_applicable"; break }
+        }
+        [void](Read-RunnerFailure `
+            $result `
+            "verify" `
+            $expectedError `
+            $false `
+            $expectedRejection)
     }
 
     $timeoutRoot = New-RunnerCase -Name "timeout" -ShortTimeout

@@ -8,6 +8,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Accept the recovery target's valid `verification_failed` plus
+  `protected_paths_invalid` result for verify, repair, and finalize instead of
+  incorrectly replacing it with `target_contract_invalid`. Runner failure
+  contract version 2 adds a fixed, redacted `rejection_code` so field-set,
+  version, type, error/diagnostic, operation/diagnostic, exit-code, status, and
+  mutation-invariant rejections are distinguishable without forwarding inner
+  JSON, exceptions, paths, SID/SDDL, credentials, or tokens. Windows
+  PowerShell 5.1 tests cover the verification-stage protected-root failure for
+  all three operations and each rejection category.
 - Upgrade the Windows recovery JSON target contract to version 2 with a fixed,
   redacted `diagnostic_code` on every caught failure. Explicit stage markers
   now distinguish protected paths, journal and manifest validation, file/task

@@ -1,7 +1,7 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$runnerContractVersion = 1
+$runnerContractVersion = 2
 $runnerFailureExitCode = 2
 $timeoutMilliseconds = 120000
 
@@ -10,6 +10,30 @@ function Write-AIChatRunnerFailure {
     $errorCode = [string]$args[1]
     $targetExitCode = $args[2]
     $mutationPossible = [bool]$args[3]
+    $rejectionCode = if ($args.Count -ge 5) {
+        [string]$args[4]
+    } else {
+        "not_applicable"
+    }
+
+    $allowedRejectionCodes = @(
+        "not_applicable", "field_set_invalid", "contract_version_invalid",
+        "field_type_invalid", "operation_mode_invalid",
+        "success_invariant_invalid", "status_invariant_invalid",
+        "error_code_invalid", "error_diagnostic_invalid",
+        "operation_diagnostic_invalid", "exit_code_invalid",
+        "mutation_invariant_invalid"
+    )
+    if ($allowedRejectionCodes -cnotcontains $rejectionCode -or
+        ($errorCode -ceq "target_contract_invalid" -and
+        $rejectionCode -ceq "not_applicable") -or
+        ($errorCode -cne "target_contract_invalid" -and
+        $rejectionCode -cne "not_applicable")) {
+        $errorCode = "runner_internal_error"
+        $targetExitCode = $null
+        $mutationPossible = $false
+        $rejectionCode = "not_applicable"
+    }
 
     $exitJson = if ($null -eq $targetExitCode) {
         "null"
@@ -21,10 +45,24 @@ function Write-AIChatRunnerFailure {
         "`"operation`":`"$operation`"," +
         "`"success`":false," +
         "`"error_code`":`"$errorCode`"," +
+        "`"rejection_code`":`"$rejectionCode`"," +
         "`"target_exit_code`":$exitJson," +
         "`"mutation_possible`":$mutationJson}"
     [Console]::Out.WriteLine($json)
     exit $runnerFailureExitCode
+}
+
+function Write-AIChatTargetContractFailure {
+    $operation = [string]$args[0]
+    $targetExitCode = $args[1]
+    $mutationPossible = [bool]$args[2]
+    $rejectionCode = [string]$args[3]
+    Write-AIChatRunnerFailure `
+        $operation `
+        "target_contract_invalid" `
+        $targetExitCode `
+        $mutationPossible `
+        $rejectionCode
 }
 
 function ConvertTo-AIChatWindowsArgument {
@@ -245,7 +283,8 @@ try {
     Write-AIChatRunnerFailure $operation "target_json_invalid" $targetExitCode $mutationCapable
 }
 if ($keyMatches.Count -ne @($parsed.PSObject.Properties).Count) {
-    Write-AIChatRunnerFailure $operation "target_contract_invalid" $targetExitCode $mutationCapable
+    Write-AIChatTargetContractFailure `
+        $operation $targetExitCode $mutationCapable "field_set_invalid"
 }
 
 $successFields = @(
@@ -278,18 +317,29 @@ $expectedMode = if ($operation -eq "verify") { "read_only" } else { "apply" }
 $propertyNames = @($parsed.PSObject.Properties.Name)
 foreach ($envelopeField in @("contract_version", "operation", "mode", "success", "status")) {
     if ($propertyNames -cnotcontains $envelopeField) {
-        Write-AIChatRunnerFailure $operation "target_contract_invalid" $targetExitCode $mutationCapable
+        Write-AIChatTargetContractFailure `
+            $operation $targetExitCode $mutationCapable "field_set_invalid"
     }
 }
-if (-not (Test-AIChatInteger $parsed.contract_version) -or
-    [int]$parsed.contract_version -ne 2 -or
-    $parsed.operation -isnot [string] -or
-    [string]$parsed.operation -cne $operation -or
+if (-not (Test-AIChatInteger $parsed.contract_version)) {
+    Write-AIChatTargetContractFailure `
+        $operation $targetExitCode $mutationCapable "field_type_invalid"
+}
+if ([int]$parsed.contract_version -ne 2) {
+    Write-AIChatTargetContractFailure `
+        $operation $targetExitCode $mutationCapable "contract_version_invalid"
+}
+if ($parsed.operation -isnot [string] -or
     $parsed.mode -isnot [string] -or
-    [string]$parsed.mode -cne $expectedMode -or
     $parsed.success -isnot [bool] -or
     $parsed.status -isnot [string]) {
-    Write-AIChatRunnerFailure $operation "target_contract_invalid" $targetExitCode $mutationCapable
+    Write-AIChatTargetContractFailure `
+        $operation $targetExitCode $mutationCapable "field_type_invalid"
+}
+if ([string]$parsed.operation -cne $operation -or
+    [string]$parsed.mode -cne $expectedMode) {
+    Write-AIChatTargetContractFailure `
+        $operation $targetExitCode $mutationCapable "operation_mode_invalid"
 }
 
 if ([bool]$parsed.success) {
@@ -300,14 +350,19 @@ if ([bool]$parsed.success) {
         "rollback_exact", "rollback_non_acl_exact", "repair_ready",
         "acl_repaired", "finalize_requested"
     ) + $commonBooleanFields
-    if (-not (Test-AIChatExactFields $parsed $successFields) -or
-        -not (Test-AIChatBooleanFields $parsed $successBooleanFields) -or
-        $parsed.status -isnot [string] -or
+    if (-not (Test-AIChatExactFields $parsed $successFields)) {
+        Write-AIChatTargetContractFailure `
+            $operation $targetExitCode $mutationCapable "field_set_invalid"
+    }
+    if (-not (Test-AIChatBooleanFields $parsed $successBooleanFields) -or
         $parsed.transaction_id -isnot [string] -or
         -not [string]$parsed.transaction_id -or
         -not (Test-AIChatInteger $parsed.journal_schema) -or
-        $parsed.task_mode -isnot [string] -or
-        -not (([int]$parsed.journal_schema -eq 3 -and
+        $parsed.task_mode -isnot [string]) {
+        Write-AIChatTargetContractFailure `
+            $operation $targetExitCode $mutationCapable "field_type_invalid"
+    }
+    if (-not (([int]$parsed.journal_schema -eq 3 -and
             [string]$parsed.task_mode -ceq "managed" -and
             [bool]$parsed.task_snapshot_exact -and
             (-not [bool]$parsed.task_untouched) -and
@@ -316,17 +371,27 @@ if ([bool]$parsed.success) {
             [string]$parsed.task_mode -ceq "untouched" -and
             (-not [bool]$parsed.task_snapshot_exact) -and
             [bool]$parsed.task_untouched -and
-            (-not [bool]$parsed.task_scheduler_accessed))) -or
-        $targetExitCode -ne 0 -or
-        -not [bool]$parsed.file_targets_exact -or
+            (-not [bool]$parsed.task_scheduler_accessed)))) {
+        Write-AIChatTargetContractFailure `
+            $operation $targetExitCode $mutationCapable "success_invariant_invalid"
+    }
+    if ($targetExitCode -ne 0) {
+        Write-AIChatTargetContractFailure `
+            $operation $targetExitCode $mutationCapable "exit_code_invalid"
+    }
+    if (-not [bool]$parsed.file_targets_exact -or
         -not [bool]$parsed.live_release_absent -or
         -not [bool]$parsed.staging_absent -or
-        -not [bool]$parsed.rollback_non_acl_exact -or
-        [bool]$parsed.token_read -or
+        -not [bool]$parsed.rollback_non_acl_exact) {
+        Write-AIChatTargetContractFailure `
+            $operation $targetExitCode $mutationCapable "success_invariant_invalid"
+    }
+    if ([bool]$parsed.token_read -or
         [bool]$parsed.task_write_attempted -or
         [bool]$parsed.connector_state_mutated -or
         [bool]$parsed.connector_state_content_mutated) {
-        Write-AIChatRunnerFailure $operation "target_contract_invalid" $targetExitCode $mutationCapable
+        Write-AIChatTargetContractFailure `
+            $operation $targetExitCode $mutationCapable "mutation_invariant_invalid"
     }
 
     $statusValid = switch ($operation) {
@@ -388,7 +453,8 @@ if ([bool]$parsed.success) {
         }
     }
     if (-not $statusValid) {
-        Write-AIChatRunnerFailure $operation "target_contract_invalid" $targetExitCode $mutationCapable
+        Write-AIChatTargetContractFailure `
+            $operation $targetExitCode $mutationCapable "status_invariant_invalid"
     }
 } else {
     $failureCodes = @(
@@ -460,7 +526,7 @@ if ([bool]$parsed.success) {
         }
         "verification_failed" {
             @(
-                "journal_invalid", "journal_backup_invalid",
+                "protected_paths_invalid", "journal_invalid", "journal_backup_invalid",
                 "manifest_invalid", "file_snapshot_mismatch",
                 "task_snapshot_mismatch", "release_layout_mismatch",
                 "acl_snapshot_mismatch", "acl_repair_ineligible",
@@ -497,7 +563,7 @@ if ([bool]$parsed.success) {
         $true
     } else {
         $baseVerificationCodes = @(
-            "journal_invalid", "journal_backup_invalid", "manifest_invalid",
+            "protected_paths_invalid", "journal_invalid", "journal_backup_invalid", "manifest_invalid",
             "file_snapshot_mismatch", "task_snapshot_mismatch",
             "release_layout_mismatch", "acl_snapshot_mismatch",
             "acl_repair_ineligible"
@@ -519,25 +585,45 @@ if ([bool]$parsed.success) {
         }
         $operationVerificationCodes -ccontains [string]$parsed.diagnostic_code
     }
-    if (-not (Test-AIChatExactFields $parsed $failureFields) -or
-        -not (Test-AIChatBooleanFields $parsed $commonBooleanFields) -or
-        $parsed.status -isnot [string] -or
+    if (-not (Test-AIChatExactFields $parsed $failureFields)) {
+        Write-AIChatTargetContractFailure `
+            $operation $targetExitCode $mutationCapable "field_set_invalid"
+    }
+    if (-not (Test-AIChatBooleanFields $parsed $commonBooleanFields) -or
         $parsed.error_code -isnot [string] -or
-        $parsed.diagnostic_code -isnot [string] -or
-        [string]$parsed.status -cne [string]$parsed.error_code -or
+        $parsed.diagnostic_code -isnot [string]) {
+        Write-AIChatTargetContractFailure `
+            $operation $targetExitCode $mutationCapable "field_type_invalid"
+    }
+    if ([string]$parsed.status -cne [string]$parsed.error_code -or
         $failureCodes -cnotcontains [string]$parsed.error_code -or
-        $allowedFailureCodes -cnotcontains [string]$parsed.error_code -or
+        $allowedFailureCodes -cnotcontains [string]$parsed.error_code) {
+        Write-AIChatTargetContractFailure `
+            $operation $targetExitCode $mutationCapable "error_code_invalid"
+    }
+    if (
         $diagnosticCodes -cnotcontains [string]$parsed.diagnostic_code -or
-        -not $diagnosticAllowed -or
-        -not $operationDiagnosticAllowed -or
-        $targetExitCode -ne 1 -or
+        -not $diagnosticAllowed) {
+        Write-AIChatTargetContractFailure `
+            $operation $targetExitCode $mutationCapable "error_diagnostic_invalid"
+    }
+    if (-not $operationDiagnosticAllowed) {
+        Write-AIChatTargetContractFailure `
+            $operation $targetExitCode $mutationCapable "operation_diagnostic_invalid"
+    }
+    if ($targetExitCode -ne 1) {
+        Write-AIChatTargetContractFailure `
+            $operation $targetExitCode $mutationCapable "exit_code_invalid"
+    }
+    if (
         -not $failureMutationValid -or
         [bool]$parsed.token_read -or
         [bool]$parsed.task_write_attempted -or
         [bool]$parsed.connector_state_mutated -or
         [bool]$parsed.connector_state_content_mutated -or
         [bool]$parsed.finalize_performed) {
-        Write-AIChatRunnerFailure $operation "target_contract_invalid" $targetExitCode $mutationCapable
+        Write-AIChatTargetContractFailure `
+            $operation $targetExitCode $mutationCapable "mutation_invariant_invalid"
     }
 }
 

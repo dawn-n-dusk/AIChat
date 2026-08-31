@@ -48,7 +48,12 @@ Validated target responses remain exactly one compact ASCII-safe JSON object.
 Pre-contract launch, parser, parameter-binding, stderr, timeout, malformed
 output, field, enum, or exit-code failures are replaced by a fixed runner
 failure object with no paths, raw exceptions, credential values, SID/SDDL data,
-or untrusted text. After a repair or finalize target has started, an
+or untrusted text. Runner contract version 2 adds a fixed `rejection_code` for
+`target_contract_invalid`, distinguishing only the rejected field-set,
+version, type, error/diagnostic, operation/diagnostic, exit, status, or mutation
+rule. A verification-stage `protected_paths_invalid` target result is valid
+for verify, repair, and finalize and is forwarded without reclassification.
+After a repair or finalize target has started, an
 unverifiable outcome is conservatively marked `mutation_possible=true`.
 `target_termination_failed` prohibits retry until local process state is
 independently resolved. See
