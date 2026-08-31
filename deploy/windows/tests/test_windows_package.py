@@ -742,9 +742,25 @@ def test_recovery_json_runner_owns_the_powershell_51_launch_boundary() -> None:
     assert "target_termination_failed" in runner
     assert "target_duplicate_key" in runner
     assert "target_contract_invalid" in runner
+    assert '$runnerContractVersion = 2' in runner
+    assert "rejection_code" in runner
+    for rejection_code in (
+        "field_set_invalid",
+        "contract_version_invalid",
+        "field_type_invalid",
+        "error_diagnostic_invalid",
+        "operation_diagnostic_invalid",
+        "exit_code_invalid",
+        "mutation_invariant_invalid",
+    ):
+        assert rejection_code in runner
     assert "mutation_possible" in runner
     assert "[Console]::Out.Write($stdout)" in runner
     assert "test_recovery_json_runner.ps1" in workflow
+    assert '$sourceRecovery = Join-Path $serviceRoot "recover-transaction.ps1"' in runner_test
+    assert '"real-protected-paths-$operation"' in runner_test
+    assert "Assert-RealProtectedPathFailure" in runner_test
+    assert "was not forwarded byte-exactly" in runner_test
 
     for marker in (
         '"success-$operation"',
@@ -761,8 +777,15 @@ def test_recovery_json_runner_owns_the_powershell_51_launch_boundary() -> None:
         '"malformed"',
         '"bom"',
         '"bad_contract"',
+        '"bad_fields"',
+        '"bad_type"',
+        '"bad_mode"',
+        '"bad_success_invariant"',
         '"bad_enum"',
         '"bad_diagnostic"',
+        '"bad_error_code"',
+        '"bad_operation_diagnostic"',
+        '"bad_mutation"',
         '"exit_mismatch"',
         '"timeout"',
         '"internal"',
