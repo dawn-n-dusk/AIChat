@@ -5,6 +5,12 @@ package. See [`../README.md`](../README.md#disabled-codex-connector-service-pack
 for preparation, install, check, rollback, uninstall, security boundaries, and
 the supervised synthetic E2E gate.
 
+`recover-transaction.ps1` is the explicit fail-closed recovery path for a
+protected `rollback_incomplete` journal. Verification is read-only; finalizing
+requires `-Finalize -Apply` and archives the exact journal only after files,
+task XML, connector-data ACLs, release placement, and staging absence all match
+the schema-v3 prior-state snapshot. It never performs a Task Scheduler write.
+
 The task is always installed as `\AIChat\CodexConnector`, disabled, without
 triggers, and is never started by these scripts. Automatic result return is
 also disabled in the example and requires the explicit fail-closed opt-in
