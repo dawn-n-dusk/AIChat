@@ -64,19 +64,25 @@ if ($scenario -eq "timeout") {
     exit 0
 }
 
-if ($scenario -eq "inner_failure") {
+if ($scenario -eq "inner_failure" -or $scenario -eq "bad_diagnostic") {
     $errorCode = switch ($operation) {
         "verify" { "verification_failed"; break }
         "repair" { "acl_repair_failed"; break }
         "finalize" { "finalization_failed"; break }
     }
+    $diagnosticCode = switch ($operation) {
+        "verify" { "manifest_invalid"; break }
+        "repair" { "acl_repair_apply_failed"; break }
+        "finalize" { "finalize_archive_failed"; break }
+    }
     $value = [pscustomobject][ordered]@{
-        contract_version = 1
+        contract_version = 2
         operation = $operation
         mode = $mode
         success = $false
         status = $errorCode
         error_code = $errorCode
+        diagnostic_code = $diagnosticCode
         mutation_performed = $operation -ne "verify"
         journal_retained = $true
         token_read = $false
@@ -93,7 +99,7 @@ if ($scenario -eq "inner_failure") {
         "finalize" { "finalized"; break }
     }
     $value = [pscustomobject][ordered]@{
-        contract_version = 1
+        contract_version = 2
         operation = $operation
         mode = $mode
         success = $true
@@ -137,15 +143,17 @@ if ($scenario -eq "schema4") {
 $json = $value | ConvertTo-Json -Compress -Depth 8
 if ($scenario -eq "duplicate_key") {
     $json = $json.Replace(
-        '{"contract_version":1,',
-        '{"contract_version":1,"contract_version":1,'
+        '{"contract_version":2,',
+        '{"contract_version":2,"contract_version":2,'
     )
 } elseif ($scenario -eq "bad_contract") {
-    $json = $json.Replace('"contract_version":1', '"contract_version":2')
+    $json = $json.Replace('"contract_version":2', '"contract_version":1')
 } elseif ($scenario -eq "bad_enum") {
     $json = $json.Replace('"status":"rollback_exact"', '"status":"other"')
     $json = $json.Replace('"status":"acl_repaired"', '"status":"other"')
     $json = $json.Replace('"status":"finalized"', '"status":"other"')
+} elseif ($scenario -eq "bad_diagnostic") {
+    $json = $json.Replace('"diagnostic_code":"manifest_invalid"', '"diagnostic_code":"other"')
 }
 
 if ($scenario -ne "empty") {
@@ -187,7 +195,7 @@ switch ($scenario) {
     }
     default {
         [Console]::Out.WriteLine($json)
-        if ($scenario -eq "inner_failure") { exit 1 }
+        if ($scenario -eq "inner_failure" -or $scenario -eq "bad_diagnostic") { exit 1 }
         exit 0
     }
 }
@@ -474,7 +482,8 @@ param([switch]$Different)
 
     foreach ($scenario in @(
         "stderr", "empty", "double_json", "extra_whitespace", "duplicate_key",
-        "malformed", "bom", "bad_contract", "bad_enum", "exit_mismatch"
+        "malformed", "bom", "bad_contract", "bad_enum", "bad_diagnostic",
+        "exit_mismatch"
     )) {
         $caseRoot = New-RunnerCase -Name $scenario
         $result = Invoke-RunnerCase `

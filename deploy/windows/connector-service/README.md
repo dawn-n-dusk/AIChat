@@ -33,7 +33,9 @@ must invoke `invoke-recovery-json.ps1` with exactly one operation: `verify`,
 `repair`, or `finalize`. The runner owns the Windows PowerShell 5.1 subprocess,
 places the target script before its `-OutputFormat Json` argument, captures
 stdout and stderr separately, and forwards only a fully validated contract
-version 1 response. It accepts no arbitrary target arguments and never chains
+version 2 response. Failure responses add one fixed `diagnostic_code` that
+identifies the failed read-only or mutation stage without reproducing paths,
+ACL text, or exception messages. It accepts no arbitrary target arguments and never chains
 one recovery operation into another.
 
 Validated target responses remain exactly one compact ASCII-safe JSON object.

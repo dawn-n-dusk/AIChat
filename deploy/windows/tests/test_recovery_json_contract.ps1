@@ -12,13 +12,28 @@ if ($env:OS -ne "Windows_NT" -or
 
 $sourceRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\connector-service")).Path
 $sourceRecovery = Join-Path $sourceRoot "recover-transaction.ps1"
+$sourceInstall = Join-Path $sourceRoot "install.ps1"
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) "aichat-recovery-json-$([Guid]::NewGuid().ToString('N'))"
 New-Item -ItemType Directory -Path $testRoot | Out-Null
 
 $syntheticCommon = @'
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-$script:syntheticRepaired = $false
+
+function Get-SyntheticRepairMarker {
+    return Join-Path $env:AICHAT_RECOVERY_TEST_ROOT "acl-repaired.marker"
+}
+
+function Test-SyntheticRepaired {
+    return Test-Path -LiteralPath (Get-SyntheticRepairMarker) -PathType Leaf
+}
+
+function Set-SyntheticDiagnosticCode {
+    param([scriptblock]$DiagnosticCodeSink, [string]$Code)
+    if ($null -ne $DiagnosticCodeSink) {
+        & $DiagnosticCodeSink $Code
+    }
+}
 
 function Get-AIChatConnectorPaths {
     $root = $env:AICHAT_RECOVERY_TEST_ROOT
@@ -35,8 +50,27 @@ function Get-AIChatConnectorPaths {
     }
 }
 
-function Assert-AIChatPrivateDirectoryTree { param($Path, $ProtectedRoot) return $Path }
-function Assert-AIChatPrivateFile { param($Path, $ProtectedRoot) return $Path }
+function Assert-AIChatPrivateDirectoryTree {
+    param($Path, $ProtectedRoot)
+    $scenario = $env:AICHAT_RECOVERY_TEST_SCENARIO
+    if ($scenario -eq "protected_path_failure" -and
+        $Path -eq $env:AICHAT_RECOVERY_TEST_ROOT) {
+        throw "synthetic protected path failure at $Path token=secret"
+    }
+    if ($scenario -eq "journal_backup_failure" -and
+        $Path -like "*backups*") {
+        throw "synthetic journal backup failure at $Path token=secret"
+    }
+    return $Path
+}
+function Assert-AIChatPrivateFile {
+    param($Path, $ProtectedRoot)
+    if ($env:AICHAT_RECOVERY_TEST_SCENARIO -eq "journal_failure" -and
+        $Path -like "*transaction.json") {
+        throw "synthetic journal failure at $Path token=secret"
+    }
+    return $Path
+}
 function Read-AIChatPrivateJson {
     param($Path, $ProtectedRoot)
     return Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
@@ -58,29 +92,48 @@ function New-SyntheticRecoveryResult {
     }
 }
 function Assert-AIChatManifestRollbackComplete {
-    param($Manifest, $Paths, $BackupDirectory)
+    param($Manifest, $Paths, $BackupDirectory, [scriptblock]$DiagnosticCodeSink)
     $scenario = $env:AICHAT_RECOVERY_TEST_SCENARIO
-    if ($scenario -eq "verifier_failure") {
+    $diagnosticScenario = switch ($scenario) {
+        "verifier_failure" { "manifest_invalid"; break }
+        "manifest_failure" { "manifest_invalid"; break }
+        "file_snapshot_failure" { "file_snapshot_mismatch"; break }
+        "task_snapshot_failure" { "task_snapshot_mismatch"; break }
+        "release_layout_failure" { "release_layout_mismatch"; break }
+        "acl_snapshot_failure" { "acl_snapshot_mismatch"; break }
+        default { ""; break }
+    }
+    if ($diagnosticScenario) {
+        Set-SyntheticDiagnosticCode $DiagnosticCodeSink $diagnosticScenario
         $unicodeProbe = ([string][char]0x4e2d) + ([string][char]0x6587)
         throw "synthetic verifier failure at $($env:AICHAT_RECOVERY_TEST_ROOT) $unicodeProbe$([char]0x2028) raw-sddl=O:BAD token=secret"
     }
     if (($scenario -eq "repair_ready" -or
         $scenario -eq "repair" -or
-        $scenario -eq "repair_apply_failure") -and
-        -not $script:syntheticRepaired) {
+        $scenario -eq "repair_apply_failure" -or
+        $scenario -eq "acl_repair_ineligible" -or
+        $scenario -eq "stateful_recovery") -and
+        -not (Test-SyntheticRepaired)) {
+        Set-SyntheticDiagnosticCode $DiagnosticCodeSink "acl_snapshot_mismatch"
         throw "synthetic ACL mismatch"
     }
     return New-SyntheticRecoveryResult -AclExact $true
 }
 function Assert-AIChatManifestRollbackNonAclComplete {
-    param($Manifest, $Paths, $BackupDirectory)
-    if ($env:AICHAT_RECOVERY_TEST_SCENARIO -eq "verifier_failure") {
-        throw "synthetic non-ACL verifier failure at $($env:AICHAT_RECOVERY_TEST_ROOT)"
+    param($Manifest, $Paths, $BackupDirectory, [scriptblock]$DiagnosticCodeSink)
+    if ($env:AICHAT_RECOVERY_TEST_SCENARIO -eq "acl_snapshot_failure") {
+        Set-SyntheticDiagnosticCode $DiagnosticCodeSink "acl_snapshot_mismatch"
+        throw "synthetic stored ACL snapshot failure token=secret"
     }
     return New-SyntheticRecoveryResult -AclExact $false
 }
 function Get-AIChatConnectorDataAclSnapshot { param($Path) return [pscustomobject]@{ marker = "forward" } }
-function Assert-AIChatConnectorDataAclRepairEligible { param($Expected, $Actual) }
+function Assert-AIChatConnectorDataAclRepairEligible {
+    param($Expected, $Actual)
+    if ($env:AICHAT_RECOVERY_TEST_SCENARIO -eq "acl_repair_ineligible") {
+        throw "synthetic ineligible ACL token=secret"
+    }
+}
 function Assert-AIChatConnectorDataAclMatchesSnapshot { param($Expected, $Actual) }
 function Get-AIChatConnectorDataContentSnapshot { param($Path) return [pscustomobject]@{ entries = @() } }
 function Assert-AIChatConnectorDataContentMatchesSnapshot { param($Expected, $Actual) }
@@ -92,7 +145,11 @@ function Invoke-AIChatConnectorDataAclSnapshotRepair {
         [scriptblock]$PostRepairVerifier,
         [scriptblock]$PostCompensationVerifier
     )
-    $script:syntheticRepaired = $true
+    [IO.File]::WriteAllText(
+        (Get-SyntheticRepairMarker),
+        "repaired",
+        [Text.UTF8Encoding]::new($false)
+    )
     if ($env:AICHAT_RECOVERY_TEST_SCENARIO -eq "repair_apply_failure") {
         throw "synthetic repair failure at $($env:AICHAT_RECOVERY_TEST_ROOT) raw-sddl=O:BAD token=secret"
     }
@@ -121,39 +178,47 @@ function Invoke-RecoveryCase {
         [bool]$ExpectedMutationPerformed = $false,
         [bool]$ExpectedJournalRetained = $true,
         [bool]$ExpectedConnectorAclMutated = $false,
-        [bool]$ExpectedFinalizePerformed = $false
+        [bool]$ExpectedFinalizePerformed = $false,
+        [string]$ExpectedDiagnosticCode = "",
+        [string]$StateKey = "",
+        [switch]$ReuseState
     )
 
-    $caseRoot = Join-Path $testRoot $Name
+    if (-not $StateKey) { $StateKey = $Name }
+    $caseRoot = Join-Path $testRoot $StateKey
     $runnerRoot = Join-Path $caseRoot "runner"
     $stateRoot = Join-Path $caseRoot "private-sensitive"
     $backupRoot = Join-Path $stateRoot "backups\20260901T000000Z-1234abcd"
-    New-Item -ItemType Directory -Path $runnerRoot | Out-Null
-    New-Item -ItemType Directory -Path $backupRoot | Out-Null
-    New-Item -ItemType Directory -Path (Join-Path $stateRoot "connector-data") | Out-Null
-    Copy-Item -LiteralPath $sourceRecovery -Destination (Join-Path $runnerRoot "recover-transaction.ps1")
     $commonPath = Join-Path $runnerRoot "common.ps1"
-    if ($CommonFixture -eq "valid") {
+    if (-not $ReuseState) {
+        New-Item -ItemType Directory -Path $runnerRoot | Out-Null
+        New-Item -ItemType Directory -Path $backupRoot | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path $stateRoot "connector-data") | Out-Null
+        Copy-Item -LiteralPath $sourceRecovery -Destination (Join-Path $runnerRoot "recover-transaction.ps1")
+    }
+    if (-not $ReuseState -and $CommonFixture -eq "valid") {
         [IO.File]::WriteAllText(
             $commonPath,
             $syntheticCommon,
             [Text.UTF8Encoding]::new($false)
         )
-    } elseif ($CommonFixture -eq "syntax_error") {
+    } elseif (-not $ReuseState -and $CommonFixture -eq "syntax_error") {
         [IO.File]::WriteAllText(
             $commonPath,
             'function Broken-SyntheticCommon { if (',
             [Text.UTF8Encoding]::new($false)
         )
     }
-    [IO.File]::WriteAllText(
-        (Join-Path $stateRoot "transaction.json"),
-        '{"transaction_id":"20260901T000000Z-1234abcd","connector_data_acl":{}}',
-        [Text.UTF8Encoding]::new($false)
-    )
+    if (-not $ReuseState) {
+        [IO.File]::WriteAllText(
+            (Join-Path $stateRoot "transaction.json"),
+            '{"transaction_id":"20260901T000000Z-1234abcd","connector_data_acl":{}}',
+            [Text.UTF8Encoding]::new($false)
+        )
+    }
 
-    $stdoutPath = Join-Path $caseRoot "stdout.txt"
-    $stderrPath = Join-Path $caseRoot "stderr.txt"
+    $stdoutPath = Join-Path $caseRoot "$Name.stdout.txt"
+    $stderrPath = Join-Path $caseRoot "$Name.stderr.txt"
     $argumentList = @(
         "-NoProfile",
         "-NonInteractive",
@@ -263,7 +328,7 @@ function Invoke-RecoveryCase {
     if ($keyMatches.Count -ne @($parsed.PSObject.Properties).Count) {
         throw "$Name JSON key scanner did not match the parsed field set"
     }
-    if ([int]$parsed.contract_version -ne 1 -or
+    if ([int]$parsed.contract_version -ne 2 -or
         $null -eq $parsed.success -or
         -not [string]$parsed.operation -or
         -not [string]$parsed.mode -or
@@ -327,14 +392,28 @@ function Invoke-RecoveryCase {
             "verification_failed", "acl_repair_failed",
             "finalization_failed", "internal_error"
         )
+        $diagnosticCodes = @(
+            "arguments_invalid", "common_load_failed", "protected_paths_invalid",
+            "journal_invalid", "journal_backup_invalid", "manifest_invalid",
+            "file_snapshot_mismatch", "task_snapshot_mismatch",
+            "release_layout_mismatch", "acl_snapshot_mismatch",
+            "acl_repair_ineligible", "acl_repair_not_required",
+            "acl_repair_required", "concurrent_journal_change",
+            "concurrent_state_change", "concurrent_acl_change",
+            "concurrent_content_change", "acl_repair_apply_failed",
+            "finalize_archive_failed", "finalize_reverification_failed",
+            "finalize_clear_failed", "internal_error"
+        )
         if ([string]$parsed.status -cne [string]$parsed.error_code -or
-            $failureCodes -notcontains [string]$parsed.error_code) {
+            $failureCodes -notcontains [string]$parsed.error_code -or
+            $diagnosticCodes -notcontains [string]$parsed.diagnostic_code) {
             throw "$Name failure status or error_code is outside the fixed enum"
         }
         $failureFields = @(
             "contract_version", "operation", "mode", "success", "status",
-            "error_code", "mutation_performed", "journal_retained", "token_read",
-            "task_write_attempted", "connector_state_mutated",
+            "error_code", "diagnostic_code", "mutation_performed",
+            "journal_retained", "token_read", "task_write_attempted",
+            "connector_state_mutated",
             "connector_state_content_mutated", "connector_acl_mutated",
             "finalize_performed"
         )
@@ -356,6 +435,10 @@ function Invoke-RecoveryCase {
             if ($parsed.$booleanField -isnot [bool]) {
                 throw "$Name failure field $booleanField is not a native JSON boolean"
             }
+        }
+        if ($ExpectedDiagnosticCode -and
+            [string]$parsed.diagnostic_code -cne $ExpectedDiagnosticCode) {
+            throw "$Name diagnostic_code was not $ExpectedDiagnosticCode"
         }
     }
     if ([bool]$parsed.mutation_performed -ne $ExpectedMutationPerformed -or
@@ -451,7 +534,8 @@ try {
         ) `
         -ExpectedExitCode 1 `
         -ExpectedOperation "repair" `
-        -ExpectedMode "apply"
+        -ExpectedMode "apply" `
+        -ExpectedDiagnosticCode "arguments_invalid"
     if ($invalid.success -or $invalid.error_code -ne "invalid_arguments" -or
         $invalid.mutation_performed) {
         throw "Invalid-arguments JSON failure is invalid"
@@ -463,7 +547,8 @@ try {
         -Arguments @("-OutputFormat", "Xml") `
         -ExpectedExitCode 1 `
         -ExpectedOperation "verify" `
-        -ExpectedMode "read_only"
+        -ExpectedMode "read_only" `
+        -ExpectedDiagnosticCode "arguments_invalid"
     if ($invalidFormat.success -or
         $invalidFormat.error_code -ne "invalid_arguments" -or
         $invalidFormat.mutation_performed) {
@@ -477,7 +562,8 @@ try {
         -ExpectedExitCode 1 `
         -CommonFixture "missing" `
         -ExpectedOperation "verify" `
-        -ExpectedMode "read_only"
+        -ExpectedMode "read_only" `
+        -ExpectedDiagnosticCode "common_load_failed"
     if ($missingCommon.success -or
         $missingCommon.error_code -ne "initialization_failed" -or
         $missingCommon.mutation_performed) {
@@ -491,7 +577,8 @@ try {
         -ExpectedExitCode 1 `
         -CommonFixture "syntax_error" `
         -ExpectedOperation "verify" `
-        -ExpectedMode "read_only"
+        -ExpectedMode "read_only" `
+        -ExpectedDiagnosticCode "common_load_failed"
     if ($brokenCommon.success -or
         $brokenCommon.error_code -ne "initialization_failed" -or
         $brokenCommon.mutation_performed) {
@@ -504,7 +591,8 @@ try {
         -Arguments @("-OutputFormat", "Json") `
         -ExpectedExitCode 1 `
         -ExpectedOperation "verify" `
-        -ExpectedMode "read_only"
+        -ExpectedMode "read_only" `
+        -ExpectedDiagnosticCode "protected_paths_invalid"
     if ($pathInitializationFailure.success -or
         $pathInitializationFailure.error_code -ne "initialization_failed" -or
         $pathInitializationFailure.mutation_performed) {
@@ -519,7 +607,8 @@ try {
         -ExpectedOperation "repair" `
         -ExpectedMode "apply" `
         -ExpectedMutationPerformed $true `
-        -ExpectedConnectorAclMutated $true
+        -ExpectedConnectorAclMutated $true `
+        -ExpectedDiagnosticCode "acl_repair_apply_failed"
     if ($repairApplyFailure.success -or
         $repairApplyFailure.operation -ne "repair" -or
         $repairApplyFailure.mode -ne "apply" -or
@@ -538,7 +627,8 @@ try {
         -ExpectedExitCode 1 `
         -ExpectedOperation "finalize" `
         -ExpectedMode "apply" `
-        -ExpectedMutationPerformed $true
+        -ExpectedMutationPerformed $true `
+        -ExpectedDiagnosticCode "finalize_archive_failed"
     if ($finalizeApplyFailure.success -or
         $finalizeApplyFailure.operation -ne "finalize" -or
         $finalizeApplyFailure.mode -ne "apply" -or
@@ -556,10 +646,96 @@ try {
         -Arguments @("-OutputFormat", "Json") `
         -ExpectedExitCode 1 `
         -ExpectedOperation "verify" `
-        -ExpectedMode "read_only"
+        -ExpectedMode "read_only" `
+        -ExpectedDiagnosticCode "manifest_invalid"
     if ($failure.success -or $failure.error_code -ne "verification_failed" -or
         $failure.mutation_performed) {
         throw "Verifier-failure JSON result is invalid"
+    }
+
+    foreach ($diagnosticCase in @(
+        [pscustomobject]@{ Name = "journal-failure"; Scenario = "journal_failure"; Code = "journal_invalid" },
+        [pscustomobject]@{ Name = "journal-backup-failure"; Scenario = "journal_backup_failure"; Code = "journal_backup_invalid" },
+        [pscustomobject]@{ Name = "manifest-failure"; Scenario = "manifest_failure"; Code = "manifest_invalid" },
+        [pscustomobject]@{ Name = "file-snapshot-failure"; Scenario = "file_snapshot_failure"; Code = "file_snapshot_mismatch" },
+        [pscustomobject]@{ Name = "task-state-failure"; Scenario = "task_snapshot_failure"; Code = "task_snapshot_mismatch" },
+        [pscustomobject]@{ Name = "release-layout-failure"; Scenario = "release_layout_failure"; Code = "release_layout_mismatch" },
+        [pscustomobject]@{ Name = "acl-snapshot-failure"; Scenario = "acl_snapshot_failure"; Code = "acl_snapshot_mismatch" },
+        [pscustomobject]@{ Name = "acl-repair-ineligible"; Scenario = "acl_repair_ineligible"; Code = "acl_repair_ineligible" }
+    )) {
+        $diagnosticFailure = Invoke-RecoveryCase `
+            -Name ([string]$diagnosticCase.Name) `
+            -Scenario ([string]$diagnosticCase.Scenario) `
+            -Arguments @("-OutputFormat", "Json") `
+            -ExpectedExitCode 1 `
+            -ExpectedOperation "verify" `
+            -ExpectedMode "read_only" `
+            -ExpectedDiagnosticCode ([string]$diagnosticCase.Code)
+        if ($diagnosticFailure.success -or
+            $diagnosticFailure.error_code -ne "verification_failed") {
+            throw "$($diagnosticCase.Name) did not use verification_failed"
+        }
+    }
+
+    $statefulKey = "managed-recovery-to-stage-only"
+    $statefulDiagnose = Invoke-RecoveryCase `
+        -Name "stateful-diagnose" `
+        -StateKey $statefulKey `
+        -Scenario "stateful_recovery" `
+        -Arguments @("-OutputFormat", "Json") `
+        -ExpectedOperation "verify" `
+        -ExpectedMode "read_only"
+    if ($statefulDiagnose.status -ne "repair_ready") {
+        throw "Stateful managed recovery did not diagnose repair readiness"
+    }
+    $statefulRepair = Invoke-RecoveryCase `
+        -Name "stateful-repair" `
+        -StateKey $statefulKey `
+        -ReuseState `
+        -Scenario "stateful_recovery" `
+        -Arguments @("-RepairConnectorAcl", "-Apply", "-OutputFormat", "Json") `
+        -ExpectedOperation "repair" `
+        -ExpectedMode "apply" `
+        -ExpectedMutationPerformed $true `
+        -ExpectedConnectorAclMutated $true
+    if ($statefulRepair.status -ne "acl_repaired") {
+        throw "Stateful managed recovery did not repair the ACL"
+    }
+    $statefulVerify = Invoke-RecoveryCase `
+        -Name "stateful-verify" `
+        -StateKey $statefulKey `
+        -ReuseState `
+        -Scenario "stateful_recovery" `
+        -Arguments @("-OutputFormat", "Json") `
+        -ExpectedOperation "verify" `
+        -ExpectedMode "read_only"
+    if ($statefulVerify.status -ne "rollback_exact") {
+        throw "Stateful managed recovery did not reverify exact rollback"
+    }
+    $statefulFinalize = Invoke-RecoveryCase `
+        -Name "stateful-finalize" `
+        -StateKey $statefulKey `
+        -ReuseState `
+        -Scenario "stateful_recovery" `
+        -Arguments @("-Finalize", "-Apply", "-OutputFormat", "Json") `
+        -ExpectedOperation "finalize" `
+        -ExpectedMode "apply" `
+        -ExpectedMutationPerformed $true `
+        -ExpectedJournalRetained $false `
+        -ExpectedFinalizePerformed $true
+    $statefulRoot = Join-Path (Join-Path $testRoot $statefulKey) "private-sensitive"
+    if ($statefulFinalize.status -ne "finalized" -or
+        (Test-Path -LiteralPath (Join-Path $statefulRoot "transaction.json"))) {
+        throw "Stateful managed recovery did not clear the finalized blocker"
+    }
+    $stageOnlyDryRun = & $sourceInstall `
+        -SettingsPath (Join-Path $statefulRoot "not-read-in-whatif.json") `
+        -RepositoryRoot (Resolve-Path (Join-Path $PSScriptRoot "..\..\..")).Path `
+        -StageOnly -Apply -WhatIf *>&1 | Out-String
+    if ($LASTEXITCODE -ne 0 -or
+        $stageOnlyDryRun -notmatch '(?m)^stage_only=true\s*$' -or
+        $stageOnlyDryRun -notmatch '(?m)^mutation_performed=false\s*$') {
+        throw "StageOnly dry-run was not admissible after managed recovery finalization"
     }
 } finally {
     if (Test-Path -LiteralPath $testRoot) {

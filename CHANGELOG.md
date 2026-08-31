@@ -8,6 +8,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Upgrade the Windows recovery JSON target contract to version 2 with a fixed,
+  redacted `diagnostic_code` on every caught failure. Explicit stage markers
+  now distinguish protected paths, journal and manifest validation, file/task
+  snapshots, release/staging layout, ACL exactness and repair eligibility,
+  concurrent revalidation, ACL repair, and journal finalization without
+  matching or returning exception text. The outer runner strictly validates
+  the new enum and its operation/error pairing before forwarding it. Windows
+  PowerShell 5.1 coverage includes a managed rollback-incomplete diagnose,
+  repair, reverify, finalize, then StageOnly dry-run transition.
 - Add an ASCII-only, repository-owned Windows PowerShell 5.1 outer runner for
   transaction recovery automation. It accepts only fixed verify, repair, or
   finalize operations, prevents the native `powershell.exe -OutputFormat`
