@@ -564,11 +564,18 @@ try {
         -Expected $capturedLegacySnapshot `
         -Actual $restoredSnapshot
 
-    $manifest.schema_version = 3
-    $manifest.task = [pscustomobject]@{ existed = $false }
-    $manifest.connector_data_acl = $capturedLegacySnapshot
+    $repairManifest = [pscustomobject][ordered]@{
+        schema_version = 3
+        kind = "aichat-windows-connector-transaction"
+        transaction_id = $transactionId
+        status = "rollback_incomplete"
+        files = $files
+        task = [pscustomobject]@{ existed = $false }
+        new_release_id = $transactionId
+        connector_data_acl = $capturedLegacySnapshot
+    }
     $postRepairResult = Assert-AIChatManifestRollbackComplete `
-        -Manifest $manifest `
+        -Manifest $repairManifest `
         -Paths $paths `
         -BackupDirectory $backupDirectory `
         -TaskProvider { $null } `
