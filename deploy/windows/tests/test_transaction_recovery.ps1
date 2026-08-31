@@ -122,6 +122,17 @@ Assert-TestAclRepairBlocked `
     -Actual $forwardSnapshot `
     -Label "an already-equivalent all-Allow ACE order"
 
+$textAliasSnapshot = New-TestAclSnapshot `
+    -RootSddl "O:$($currentSid)D:P(A;CIOI;0x1f01ff;;;$($script:AIChatLocalSystemSid))(A;CIOI;0x1f01ff;;;$($currentSid))" `
+    -FileSddl "O:$($currentSid)D:P(A;;0x1f01ff;;;$($script:AIChatLocalSystemSid))(A;;0x1f01ff;;;$($currentSid))"
+Assert-AIChatConnectorDataAclMatchesSnapshot `
+    -Expected $textAliasSnapshot `
+    -Actual $forwardSnapshot
+Assert-TestAclRepairBlocked `
+    -Expected $textAliasSnapshot `
+    -Actual $forwardSnapshot `
+    -Label "an already-equivalent SDDL alias representation"
+
 $inheritedLegacySnapshot = New-TestAclSnapshot `
     -RootSddl "O:$($currentSid)D:AI(A;OICIID;FA;;;$($currentSid))" `
     -FileSddl "O:$($currentSid)D:AI(A;ID;FA;;;$($currentSid))"
@@ -499,6 +510,22 @@ try {
     # Capture the OS-canonical inherited legacy form before migrating the same
     # isolated tree to the forward ACL. Synthetic SDDL is used above only for
     # parser tests; native exact-restore coverage must use a real snapshot.
+    $syntheticLegacyRootEntry = @($inheritedLegacySnapshot.entries | Where-Object {
+        [string]$_.name -eq "."
+    })[0]
+    $syntheticLegacyFileEntry = @($inheritedLegacySnapshot.entries | Where-Object {
+        [string]$_.name -eq "state.json"
+    })[0]
+    [AIChat.Windows.OwnerDacl]::RestoreSnapshot(
+        $testConnectorRoot,
+        [string]$syntheticLegacyRootEntry.sddl,
+        $true
+    )
+    [AIChat.Windows.OwnerDacl]::RestoreSnapshot(
+        $testStateFile,
+        [string]$syntheticLegacyFileEntry.sddl,
+        $false
+    )
     $capturedLegacySnapshot = Get-AIChatConnectorDataAclSnapshot `
         -Path $testConnectorRoot
     Set-AIChatConnectorDataAcl -Path $testConnectorRoot
