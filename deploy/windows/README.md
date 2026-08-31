@@ -244,6 +244,34 @@ disabled. Any failure attempts an inverse rollback; an incomplete rollback
 leaves a protected journal and fails closed. `check.ps1` never displays a
 token. `-Online` performs only the credential-bound identity GET.
 
+For a supervised foreground acceptance on a host where Task Scheduler access
+is unavailable or intentionally out of scope, use the transactional stage-only
+mode:
+
+```powershell
+.\deploy\windows\connector-service\install.ps1 `
+  -SettingsPath $settings `
+  -RepositoryRoot $PWD `
+  -StageOnly -Apply -WhatIf
+
+.\deploy\windows\connector-service\install.ps1 `
+  -SettingsPath $settings `
+  -RepositoryRoot $PWD `
+  -StageOnly -Apply
+
+.\deploy\windows\connector-service\check.ps1 -StageOnly
+```
+
+`-StageOnly` installs and validates the same pinned package, protected settings,
+mapping metadata, and connector-data ACL contract, but it never opens Task
+Scheduler COM and never queries, creates, replaces, restores, or deletes
+`\AIChat\CodexConnector`. Its schema-v4 journal records `task.mode=untouched`,
+so install failure recovery and `rollback.ps1 -StageOnly -Apply` preserve the
+same no-task boundary. `check.ps1 -StageOnly` deliberately skips the task and
+credential-bound online check; `-StageOnly -Online` is rejected. The connector
+remains stopped until the operator explicitly runs the installed launcher in
+the foreground.
+
 If Task Scheduler rejects a rollback write with `E_ACCESSDENIED`, the journal
 correctly remains a blocker even when the files and task already appear
 restored. A visible prior task or matching filenames are insufficient proof.
@@ -254,14 +282,17 @@ read-only and never registers, deletes, enables, or starts a Scheduled Task:
 .\deploy\windows\connector-service\recover-transaction.ps1
 ```
 
-It accepts only an integrated schema-v3 `rollback_incomplete` journal and
-requires every fixed manifest target to match the protected prior backup hash,
-every absent target to remain absent, the task XML hash/existence to match the
-prior snapshot, the connector-data owner/DACL snapshot to match exactly, and
+It accepts only an integrated schema-v3 managed-task journal or a schema-v4
+stage-only journal with the exact single-property `task.mode=untouched`
+contract. Schema-v3 recovery requires every fixed manifest target to match the
+protected prior backup hash, every absent target to remain absent, and the task
+XML hash/existence to match the prior snapshot. Schema-v4 stage-only recovery
+checks the same files without calling a task provider or opening Task Scheduler.
+Both modes require the connector-data owner/DACL snapshot to match exactly and
 the failed transaction to have no live release or staging directory. A
-preserved failed release is validated as a private, reparse-free,
-hardlink-free tree. Historical schema-v1/v2 journals retain their existing
-fail-closed behavior and are never auto-finalized by this tool.
+preserved failed release is validated as a private, reparse-free, hardlink-free
+tree. Schema-v4 managed-task journals and historical schema-v1/v2 journals
+remain fail-closed and are never auto-finalized by this tool.
 
 Only after the verifier reports `rollback_exact=true` may the operator archive
 the original journal and clear the live blocker:
@@ -394,6 +425,8 @@ opt-in above; `request,result` inbound alone cannot create a relay loop.
 .\deploy\windows\connector-service\rollback.ps1
 .\deploy\windows\connector-service\rollback.ps1 -Apply -WhatIf
 .\deploy\windows\connector-service\rollback.ps1 -Apply
+.\deploy\windows\connector-service\rollback.ps1 -StageOnly -Apply -WhatIf
+.\deploy\windows\connector-service\rollback.ps1 -StageOnly -Apply
 
 .\deploy\windows\connector-service\uninstall.ps1
 .\deploy\windows\connector-service\uninstall.ps1 -Apply -WhatIf

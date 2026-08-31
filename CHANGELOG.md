@@ -8,9 +8,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Add a transactional Windows connector `-StageOnly` install/check/rollback
+  path for supervised foreground acceptance. It installs the pinned runtime,
+  settings, mapping metadata, and private ACLs without querying, creating,
+  replacing, restoring, or deleting the Scheduled Task, and records that
+  no-task boundary in the rollback manifest.
 - Add a read-only Windows `rollback_incomplete` verifier and explicit protected
   journal finalization path, while avoiding redundant Task Scheduler writes
-  when the prior task snapshot is already exact.
+  when the prior task snapshot is already exact. Schema-v4 stage-only journals
+  are verified and finalized under their strict `task.mode=untouched` contract
+  without accessing Task Scheduler.
 - Namespace packaged Windows connector state and its derived instance lock by
   a trusted local Agent/channel/task mapping digest, while preserving legacy
   `state.json` only for an unchanged pre-namespace mapping and leaving all

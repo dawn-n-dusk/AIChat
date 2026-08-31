@@ -1,5 +1,8 @@
 [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = "High")]
-param([switch]$Apply)
+param(
+    [switch]$Apply,
+    [switch]$StageOnly
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
@@ -9,6 +12,7 @@ $stateRoot = [IO.Path]::GetFullPath(
 )
 Write-Host "state_root=$stateRoot"
 Write-Host "task=\AIChat\CodexConnector"
+Write-Host "stage_only=$($StageOnly.ToString().ToLowerInvariant())"
 Write-Host "token_read=false"
 if (-not $Apply -or $WhatIfPreference) {
     Write-Host "dry_run=true"
@@ -26,12 +30,6 @@ $paths = Get-AIChatConnectorPaths
 if (Test-Path -LiteralPath $paths.TransactionPath) {
     throw "Refusing user rollback while an unfinished install transaction exists"
 }
-[void](Initialize-AIChatConnectorDataDirectory -Path $paths.ConnectorDataRoot)
-$task = Get-AIChatConnectorTask
-if ($null -ne $task) {
-    Assert-AIChatTaskContract -Task $task -Paths $paths
-}
-
 $pointer = Read-AIChatPrivateJson `
     -Path $paths.LastBackupPath `
     -ProtectedRoot $paths.ProtectedRoot
@@ -59,6 +57,13 @@ Assert-AIChatTransactionManifest `
     -Paths $paths `
     -BackupDirectory $backupDirectory `
     -AllowedStatuses @("committed")
+$taskMode = if ($manifest.task.PSObject.Properties["mode"]) {
+    [string]$manifest.task.mode
+} else { "managed" }
+if ($StageOnly -and $taskMode -ne "untouched") {
+    throw "Stage-only rollback refuses a deployment that may require Scheduled Task mutation"
+}
+[void](Initialize-AIChatConnectorDataDirectory -Path $paths.ConnectorDataRoot)
 Invoke-AIChatManifestRollback `
     -Manifest $manifest `
     -Paths $paths `
@@ -69,5 +74,9 @@ Invoke-AIChatManifestRollback `
     -ProtectedRoot $paths.ProtectedRoot)
 Remove-Item -LiteralPath $paths.LastBackupPath -Force
 Write-Host "rolled_back_transaction=$([string]$manifest.transaction_id)"
+if ($taskMode -eq "untouched") {
+    Write-Host "task_scheduler_accessed=false"
+    Write-Host "task_mutation_performed=false"
+}
 Write-Host "token_read=false"
 Write-Host "task_started=false"

@@ -108,6 +108,11 @@ try {
     if (-not $result.file_targets_exact -or -not $result.task_snapshot_exact) {
         throw "Exact rollback was not accepted"
     }
+    if ([string]$result.task_mode -ne "managed" -or
+        $result.task_untouched -or
+        -not $result.task_scheduler_accessed) {
+        throw "Schema-v3 managed recovery did not report exact task verification"
+    }
 
     Write-AIChatPrivateJson `
         -Path $paths.SettingsPath `
@@ -128,7 +133,75 @@ try {
         throw "Unexpected rollback target was not blocked"
     }
 
+    if (Test-Path -LiteralPath $paths.SettingsPath) {
+        Remove-Item -LiteralPath $paths.SettingsPath -Force
+    }
+
+    # Stage-only recovery is checked twice to model the read-only verification
+    # and the immediate pre-finalization revalidation. The throwing provider
+    # proves neither pass can query Task Scheduler.
+    $manifest.schema_version = 4
+    $manifest.task = [pscustomobject]@{ mode = "untouched" }
+    $taskAccessAttempts = 0
+    $denyTaskProvider = {
+        $taskAccessAttempts += 1
+        throw "Stage-only recovery accessed Task Scheduler"
+    }
+    foreach ($pass in 1..2) {
+        $stageOnlyResult = Assert-AIChatManifestRollbackComplete `
+            -Manifest $manifest `
+            -Paths $paths `
+            -BackupDirectory $backupDirectory `
+            -TaskProvider $denyTaskProvider `
+            -ConnectorDataAclSnapshotProvider { $snapshotAbsent }
+        if ([string]$stageOnlyResult.task_mode -ne "untouched" -or
+            -not $stageOnlyResult.task_untouched -or
+            $stageOnlyResult.task_snapshot_exact -or
+            $stageOnlyResult.task_scheduler_accessed) {
+            throw "Schema-v4 untouched recovery reported an invalid task boundary"
+        }
+    }
+    if ($taskAccessAttempts -ne 0) {
+        throw "Schema-v4 untouched recovery invoked its TaskProvider"
+    }
+
+    $manifest.task = [pscustomobject]@{ mode = "managed"; existed = $false }
+    $v4ManagedBlocked = $false
+    try {
+        [void](Assert-AIChatManifestRollbackComplete `
+            -Manifest $manifest `
+            -Paths $paths `
+            -BackupDirectory $backupDirectory `
+            -TaskProvider $denyTaskProvider `
+            -ConnectorDataAclSnapshotProvider { $snapshotAbsent })
+    } catch {
+        $v4ManagedBlocked = $_.Exception.Message -match "schema-v3 managed or schema-v4 untouched"
+    }
+    if (-not $v4ManagedBlocked -or $taskAccessAttempts -ne 0) {
+        throw "Schema-v4 managed recovery did not fail closed before TaskProvider access"
+    }
+
+    $manifest.task = [pscustomobject][ordered]@{
+        mode = "untouched"
+        existed = $false
+    }
+    $v4ExtraTaskPropertyBlocked = $false
+    try {
+        [void](Assert-AIChatManifestRollbackComplete `
+            -Manifest $manifest `
+            -Paths $paths `
+            -BackupDirectory $backupDirectory `
+            -TaskProvider $denyTaskProvider `
+            -ConnectorDataAclSnapshotProvider { $snapshotAbsent })
+    } catch {
+        $v4ExtraTaskPropertyBlocked = $_.Exception.Message -match "must not contain a Scheduled Task snapshot"
+    }
+    if (-not $v4ExtraTaskPropertyBlocked -or $taskAccessAttempts -ne 0) {
+        throw "Schema-v4 extra task properties did not fail closed before TaskProvider access"
+    }
+
     $manifest.schema_version = 2
+    $manifest.task = [pscustomobject]@{ existed = $false }
     $manifest.PSObject.Properties.Remove("connector_data_acl")
     $v2Blocked = $false
     try {
@@ -139,7 +212,7 @@ try {
             -TaskProvider { $null } `
             -ConnectorDataAclSnapshotProvider { $snapshotAbsent })
     } catch {
-        $v2Blocked = $_.Exception.Message -match "schema-v3"
+        $v2Blocked = $_.Exception.Message -match "schema-v3 managed or schema-v4 untouched"
     }
     if (-not $v2Blocked) {
         throw "Historical schema-v2 journal was not left fail-closed"

@@ -2,7 +2,8 @@
 param(
     [Parameter(Mandatory = $true)][string]$SettingsPath,
     [Parameter(Mandatory = $true)][string]$RepositoryRoot,
-    [switch]$Apply
+    [switch]$Apply,
+    [switch]$StageOnly
 )
 
 Set-StrictMode -Version Latest
@@ -16,9 +17,15 @@ $defaultState = [IO.Path]::GetFullPath(
     (Join-Path $env:LOCALAPPDATA "AIChat\codex-connector-task")
 )
 Write-Host "state_root=$defaultState"
-Write-Host "task=\AIChat\CodexConnector"
-Write-Host "service_enabled=false"
-Write-Host "task_triggers=0"
+Write-Host "stage_only=$($StageOnly.ToString().ToLowerInvariant())"
+if ($StageOnly) {
+    Write-Host "task_scheduler_accessed=false"
+    Write-Host "task_mutation_performed=false"
+} else {
+    Write-Host "task=\AIChat\CodexConnector"
+    Write-Host "service_enabled=false"
+    Write-Host "task_triggers=0"
+}
 Write-Host "automatic_egress_default=false"
 Write-Host "token_read=false"
 
@@ -123,6 +130,16 @@ try {
                 }) `
                 -ProtectedRoot $paths.ProtectedRoot
         } else {
+            Assert-AIChatTransactionManifest `
+                -Manifest $unfinished `
+                -Paths $paths `
+                -BackupDirectory $unfinishedBackup
+            $unfinishedTaskMode = if ($unfinished.task.PSObject.Properties["mode"]) {
+                [string]$unfinished.task.mode
+            } else { "managed" }
+            if ($StageOnly -and $unfinishedTaskMode -ne "untouched") {
+                throw "Stage-only install refuses recovery that could mutate Scheduled Task state"
+            }
             Invoke-AIChatManifestRollback `
                 -Manifest $unfinished `
                 -Paths $paths `
@@ -166,9 +183,12 @@ try {
         -MappingState $mappingState `
         -Settings $settings)
 
-    $existingTask = Get-AIChatConnectorTask
-    if ($null -ne $existingTask) {
-        Assert-AIChatTaskContract -Task $existingTask -Paths $paths
+    $existingTask = $null
+    if (-not $StageOnly) {
+        $existingTask = Get-AIChatConnectorTask
+        if ($null -ne $existingTask) {
+            Assert-AIChatTaskContract -Task $existingTask -Paths $paths
+        }
     }
 
     $connectorDataAclSnapshot = Get-AIChatConnectorDataAclSnapshot `
@@ -196,11 +216,14 @@ try {
         }
         $fileEntries.Add([pscustomobject]$entry)
     }
-    $taskSnapshot = if ($null -eq $existingTask) {
-        [pscustomobject]@{ existed = $false }
+    $taskSnapshot = if ($StageOnly) {
+        [pscustomobject]@{ mode = "untouched" }
+    } elseif ($null -eq $existingTask) {
+        [pscustomobject]@{ mode = "managed"; existed = $false }
     } else {
         $taskXml = [string]$existingTask.Xml
         [pscustomobject]@{
+            mode = "managed"
             existed = $true
             enabled = [bool]$existingTask.Enabled
             xml = $taskXml
@@ -208,7 +231,7 @@ try {
         }
     }
     $transaction = [pscustomobject][ordered]@{
-        schema_version = 3
+        schema_version = 4
         kind = "aichat-windows-connector-transaction"
         transaction_id = $transactionId
         created_at = (Get-Date).ToUniversalTime().ToString("o")
@@ -332,7 +355,9 @@ try {
         -ProtectedRoot $paths.ProtectedRoot
     Invoke-AIChatInstallFailurePoint -Name "after-files"
 
-    Register-AIChatDisabledTask -Paths $paths
+    if (-not $StageOnly) {
+        Register-AIChatDisabledTask -Paths $paths
+    }
     Invoke-AIChatInstallFailurePoint -Name "after-task"
     Set-AIChatTransactionStatus -Status "applied"
 
@@ -356,8 +381,14 @@ try {
 
     Write-Host "installed_release=$transactionId"
     Write-Host "mapping_state_mode=$([string]$mappingState.state_mode)"
-    Write-Host "service_enabled=false"
-    Write-Host "task_triggers=0"
+    if ($StageOnly) {
+        Write-Host "task_scheduler_accessed=false"
+        Write-Host "task_mutation_performed=false"
+        Write-Host "manual_launcher_ready=true"
+    } else {
+        Write-Host "service_enabled=false"
+        Write-Host "task_triggers=0"
+    }
     Write-Host "token_read=false"
     Write-Host "restart_or_start_performed=false"
 } catch {

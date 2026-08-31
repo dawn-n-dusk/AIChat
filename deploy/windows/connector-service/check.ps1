@@ -1,9 +1,16 @@
 [CmdletBinding()]
-param([switch]$Online)
+param(
+    [switch]$Online,
+    [switch]$StageOnly
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "common.ps1")
+
+if ($Online -and $StageOnly) {
+    throw "Stage-only validation does not read the Relay credential; omit -Online"
+}
 
 $failures = [Collections.Generic.List[string]]::new()
 function Report-AIChatCheck {
@@ -86,13 +93,19 @@ try {
     Report-AIChatCheck "launcher" $false $_.Exception.Message
 }
 
-try {
-    $task = Get-AIChatConnectorTask
-    if ($null -eq $task) { throw "fixed connector Scheduled Task is absent" }
-    Assert-AIChatTaskContract -Task $task -Paths $paths
-    Report-AIChatCheck "scheduled-task" $true "disabled, no triggers, current SID, LeastPrivilege, IgnoreNew"
-} catch {
-    Report-AIChatCheck "scheduled-task" $false $_.Exception.Message
+if ($StageOnly) {
+    Write-Host "[SKIP] scheduled-task: stage-only package validation does not access Task Scheduler"
+    Write-Host "task_scheduler_accessed=false"
+    Write-Host "task_mutation_performed=false"
+} else {
+    try {
+        $task = Get-AIChatConnectorTask
+        if ($null -eq $task) { throw "fixed connector Scheduled Task is absent" }
+        Assert-AIChatTaskContract -Task $task -Paths $paths
+        Report-AIChatCheck "scheduled-task" $true "disabled, no triggers, current SID, LeastPrivilege, IgnoreNew"
+    } catch {
+        Report-AIChatCheck "scheduled-task" $false $_.Exception.Message
+    }
 }
 
 try {
@@ -120,7 +133,11 @@ if ($Online -and $null -ne $settings) {
 
 Write-Host "token_value_displayed=false"
 Write-Host "app_server_initialize_verified=false"
-Write-Host "expected_service_enabled=false"
+if ($StageOnly) {
+    Write-Host "expected_service_enabled=unchanged"
+} else {
+    Write-Host "expected_service_enabled=false"
+}
 if ($failures.Count -gt 0) {
     Write-Host "AIChat Windows connector check found $($failures.Count) failure(s)."
     exit 1
