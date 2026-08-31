@@ -105,6 +105,9 @@ jobs:
       - name: Run recovery JSON contract E2E with Windows PowerShell 5.1
         shell: pwsh
         run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File deploy/windows/tests/test_recovery_json_contract.ps1
+      - name: Run recovery JSON outer-runner E2E with Windows PowerShell 5.1
+        shell: pwsh
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File deploy/windows/tests/test_recovery_json_runner.ps1
 
   macos-connector-package:
     name: macOS connector package (macOS)

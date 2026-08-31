@@ -8,6 +8,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Add an ASCII-only, repository-owned Windows PowerShell 5.1 outer runner for
+  transaction recovery automation. It accepts only fixed verify, repair, or
+  finalize operations, prevents the native `powershell.exe -OutputFormat`
+  option from consuming the target script's `Json` value, captures both child
+  streams without deadlock, enforces a timeout and bounded child cleanup, and forwards
+  only an exact versioned recovery contract. All pre-contract, stderr,
+  malformed-output, schema, enum, or exit-code failures become one fixed
+  redacted runner JSON object; unverifiable repair/finalize outcomes after
+  child start fail closed with `mutation_possible=true`.
 - Add a versioned `recover-transaction.ps1 -OutputFormat Json` contract while
   preserving the default Human output. JSON mode emits one compact ASCII-safe
   object with native booleans and fixed status/error codes, suppresses paths,

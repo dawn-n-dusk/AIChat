@@ -344,13 +344,87 @@ Run the verifier again as a separate operator decision:
 .\deploy\windows\connector-service\recover-transaction.ps1
 ```
 
-Automation may request the versioned machine-readable contract without
-changing the default human-facing output:
+Automation must use the repository-owned outer runner and pass exactly one
+positional operation. It must not invoke `recover-transaction.ps1` directly or
+construct a temporary parser/launcher:
 
 ```powershell
-.\deploy\windows\connector-service\recover-transaction.ps1 `
-  -OutputFormat Json
+$runner = ".\deploy\windows\connector-service\invoke-recovery-json.ps1"
+$ps51 = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+& $ps51 -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+  -File $runner verify
 ```
+
+After a reviewed `repair_ready` result, repair remains a separate operator
+decision:
+
+```powershell
+& $ps51 -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+  -File $runner repair
+```
+
+Run `verify` again and require `rollback_exact=true`. Only then may a separate
+operator decision finalize the journal:
+
+```powershell
+& $ps51 -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+  -File $runner finalize
+```
+
+The canonical token order is always host arguments, `-File`, the runner path,
+then the positional operation. The runner internally uses the same ordering
+for the target: host arguments, `-File`, `recover-transaction.ps1`, then the
+target's `-OutputFormat Json` and fixed operation flags. Windows
+`powershell.exe` has its own `-OutputFormat Text|XML` host option. Placing the
+target's `-OutputFormat Json` before `-File` makes the host reject `Json` before
+the recovery script can emit its contract.
+
+The runner accepts no arbitrary arguments and never chains verify, repair, or
+finalize. It launches the fixed same-directory target under explicit Windows
+PowerShell 5.1, captures stdout and stderr separately, applies a bounded
+timeout, terminates the child before returning from timeout or internal-error
+paths when Windows confirms termination, and validates raw framing, ASCII,
+unique keys, field order/types,
+operation, mode, status/error enums, mutation invariants, and native exit code.
+Valid target success and failure JSON is forwarded byte-for-byte at the ASCII
+text level with target exit code `0` or `1`.
+
+All runner-level failures exit `2` and emit exactly these fields:
+
+```text
+runner_contract_version operation success error_code target_exit_code
+mutation_possible
+```
+
+`runner_contract_version` is `1`, `success` is `false`, and `operation` is
+`verify`, `repair`, `finalize`, or `unknown` when runner arguments were invalid.
+`target_exit_code` is a native integer when a completed target supplied one and
+JSON `null` when no trustworthy target exit code exists. Fixed `error_code`
+values are:
+
+- `invalid_runner_arguments`
+- `target_missing`
+- `powershell_51_unavailable`
+- `target_start_failed`
+- `target_timeout`
+- `target_termination_failed`
+- `target_capture_failed`
+- `target_stderr`
+- `target_output_invalid`
+- `target_duplicate_key`
+- `target_json_invalid`
+- `target_contract_invalid`
+- `runner_internal_error`
+
+Runner failures never reproduce child stdout/stderr, paths, raw exceptions,
+credentials, SID/SDDL data, or other untrusted text. For `verify`,
+`mutation_possible=false` because the runner fixes a read-only invocation. For
+`repair` or `finalize`, any failure after the target successfully starts is
+reported with `mutation_possible=true`; this is deliberately conservative even
+when the likely failure happened before the target body. The runner makes two
+bounded kill-and-wait attempts. `target_termination_failed` means the child
+state remains unknown; do not retry repair or finalize until the local process
+state has been independently resolved.
 
 `-OutputFormat Json` writes exactly one compact ASCII-safe JSON object to
 stdout and no human `state_root`, task, or diagnostic lines. Contract version 1
@@ -399,12 +473,12 @@ The fixed enums are:
   `initialization_failed`, `verification_failed`, `acl_repair_failed`,
   `finalization_failed`, `internal_error`.
 
-The JSON guarantee starts only after PowerShell has successfully parsed this
-script and bound its command-line parameters. A syntax error in
+The inner JSON guarantee starts only after PowerShell has successfully parsed
+the target script and bound its command-line parameters. A syntax error in
 `recover-transaction.ps1` itself, an unknown parameter, or another native
 parameter-binding failure occurs before the script body and cannot be wrapped
-by this contract. Callers must always inspect the native exit code, stdout, and
-stderr rather than assuming every possible launch failure is JSON.
+by the inner contract. The outer runner converts those cases to its fixed,
+redacted exit-2 failure object.
 
 Only after the verifier reports `rollback_exact=true` may the operator archive
 the original journal and clear the live blocker:

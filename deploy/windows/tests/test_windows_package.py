@@ -33,6 +33,7 @@ def test_required_windows_package_files_exist() -> None:
         "check.ps1",
         "rollback.ps1",
         "recover-transaction.ps1",
+        "invoke-recovery-json.ps1",
         "uninstall.ps1",
         "config.example.json",
     }
@@ -681,6 +682,75 @@ def test_recovery_json_contract_is_single_ascii_safe_and_versioned() -> None:
         "failed_release_preserved",
     ):
         assert result_block.count(f"{key} =") == 1
+
+
+def test_recovery_json_runner_owns_the_powershell_51_launch_boundary() -> None:
+    root = ROOT / "connector-service"
+    runner_path = root / "invoke-recovery-json.ps1"
+    runner_bytes = runner_path.read_bytes()
+    runner = runner_bytes.decode("ascii")
+    runner_test = (ROOT / "tests" / "test_recovery_json_runner.ps1").read_text(
+        encoding="utf-8"
+    )
+    workflow = (REPOSITORY_ROOT / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert all(value < 0x80 for value in runner_bytes)
+    assert "param(" not in runner.lower()
+    assert re.search(r"(?m)^\s*\.\s+", runner) is None
+    assert "Import-Module" not in runner
+    assert '$args.Count -ne 1' in runner
+    assert '@("verify", "repair", "finalize")' in runner
+    assert 'Join-Path $PSScriptRoot "recover-transaction.ps1"' in runner
+    assert '"-OutputFormat", "Json"' in runner
+    child_block = runner[
+        runner.index("$childArguments = @(") : runner.index("$quotedArguments =")
+    ]
+    assert '"-File", $targetPath' in child_block
+    assert ") + $scriptArguments" in child_block
+    assert "ArgumentList" not in runner
+    assert "ConvertTo-AIChatWindowsArgument" in runner
+    assert 'Join-Path $env:SystemRoot "System32\\WindowsPowerShell\\v1.0\\powershell.exe"' in runner
+    assert "RedirectStandardOutput = $true" in runner
+    assert "RedirectStandardError = $true" in runner
+    assert runner.count("ReadToEndAsync()") == 2
+    assert "WaitForExit($timeoutMilliseconds)" in runner
+    assert "Stop-AIChatRunnerTarget" in runner
+    assert "runner_internal_error" in runner
+    assert "target_timeout" in runner
+    assert "target_termination_failed" in runner
+    assert "target_duplicate_key" in runner
+    assert "target_contract_invalid" in runner
+    assert "mutation_possible" in runner
+    assert "[Console]::Out.Write($stdout)" in runner
+    assert "test_recovery_json_runner.ps1" in workflow
+
+    for marker in (
+        '"success-$operation"',
+        '"inner_failure"',
+        '"schema4"',
+        '"missing"',
+        '"syntax"',
+        '"binder"',
+        '"stderr"',
+        '"empty"',
+        '"double_json"',
+        '"extra_whitespace"',
+        '"duplicate_key"',
+        '"malformed"',
+        '"bom"',
+        '"bad_contract"',
+        '"bad_enum"',
+        '"exit_mismatch"',
+        '"timeout"',
+        '"internal"',
+        '"internal-after-start"',
+        '"invalid"',
+        "host_outputformat_collision=pass",
+        "timeout_orphan_count=0",
+    ):
+        assert marker in runner_test
 
 
 def test_connector_service_pins_native_node_npm_and_codex_without_path_shim() -> None:

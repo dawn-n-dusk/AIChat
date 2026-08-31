@@ -28,15 +28,20 @@ schema-v4 stage-only journals require the exact `task.mode=untouched` shape and
 never invoke Task Scheduler during either verification pass. It never performs
 a Task Scheduler write.
 
-The default output remains the existing Human key/value stream. Automation can
-pass `-OutputFormat Json` to receive contract version 1 as exactly one compact,
-ASCII-safe JSON object on stdout. Success objects contain fixed operation/mode,
-status, and native boolean fields. Failures exit nonzero with a fixed
-`error_code`, suppress human lines and raw exceptions, keep stderr free of
-diagnostics, and never include paths, credential values, SID/SDDL data, or
-untrusted text. Missing or invalid shared helpers and protected-path bootstrap
-failures use `initialization_failed`; unsupported format values use
-`invalid_arguments`. Failure mutation flags mean the run may already have
-attempted or performed that mutation even if compensation restored the final
-ACL; they do not describe a final-state diff. See the parent README for the
-full field and operator-flow contract.
+The default output remains the existing Human key/value stream. Automation
+must invoke `invoke-recovery-json.ps1` with exactly one operation: `verify`,
+`repair`, or `finalize`. The runner owns the Windows PowerShell 5.1 subprocess,
+places the target script before its `-OutputFormat Json` argument, captures
+stdout and stderr separately, and forwards only a fully validated contract
+version 1 response. It accepts no arbitrary target arguments and never chains
+one recovery operation into another.
+
+Validated target responses remain exactly one compact ASCII-safe JSON object.
+Pre-contract launch, parser, parameter-binding, stderr, timeout, malformed
+output, field, enum, or exit-code failures are replaced by a fixed runner
+failure object with no paths, raw exceptions, credential values, SID/SDDL data,
+or untrusted text. After a repair or finalize target has started, an
+unverifiable outcome is conservatively marked `mutation_possible=true`.
+`target_termination_failed` prohibits retry until local process state is
+independently resolved. See
+the parent README for the complete invocation and failure contract.
