@@ -16,9 +16,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   only owner/DACL and rerun the complete read-only verifier, then invoke a
   separate `-Finalize -Apply` to archive the byte-identical journal and clear
   the blocker. The journal hash and ConnectorData content hashes are pinned
-  across mutation; a partial restore is compensated to the exact pre-run ACL,
+  across mutation; a partial restore is compensated to the validated semantic
+  pre-run owner/DACL identity,
   while a hard-interrupted prefix remains resumable only when every entry is
-  exactly one of the two fixed ACL snapshots. The repair never chains
+  semantically one of the two fixed ACL snapshots. Raw snapshot hashes remain
+  mandatory, while equivalent Windows SDDL aliases and all-Allow ACE ordering
+  no longer create false mismatches. The repair never chains
   finalization or writes task, state, channel, mapping, token, or deployment
   content.
 - Add a transactional Windows connector `-StageOnly` install/check/rollback

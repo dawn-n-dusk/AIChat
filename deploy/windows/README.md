@@ -288,7 +288,8 @@ contract. Schema-v3 recovery requires every fixed manifest target to match the
 protected prior backup hash, every absent target to remain absent, and the task
 XML hash/existence to match the prior snapshot. Schema-v4 stage-only recovery
 checks the same files without calling a task provider or opening Task Scheduler.
-Both modes require the connector-data owner/DACL snapshot to match exactly and
+Both modes require the connector-data owner/DACL snapshot to match the validated
+semantic ACL identity and
 the failed transaction to have no live release or staging directory. A
 preserved failed release is validated as a private, reparse-free, hardlink-free
 tree. Schema-v4 managed-task journals and historical schema-v1/v2 journals
@@ -300,7 +301,7 @@ owner/DACL. The read-only verifier reports `repair_ready=true` only after every
 deployment file and protected backup hash, prior Scheduled Task XML/existence,
 release/staging condition, and failed-release tree is exact. The live
 ConnectorData tree must have the same entry names and types as the journal.
-Each entry must be either already at the exact journal ACL or still use the
+Each entry must be either already at the exact journal ACL contract or still use the
 protected current-SID plus LocalSystem FullControl forward contract, with at
 least one forward entry remaining; this permits a hard-interrupted prefix to be
 resumed without accepting any third ACL. The initial field repair-ready state
@@ -310,6 +311,10 @@ generic mixed-ACL allowance. The journal snapshot must be one of
 the fixed legacy current-SID-only or current-SID-plus-LocalSystem contracts.
 Extra principals, deny ACEs, lesser rights, an unexpected owner, reparse
 points, hardlinks, changed files, or an untrusted inherited form remain blocked.
+Each stored snapshot still validates its own raw SDDL SHA-256. Snapshot identity
+is then strict owner/DACL semantics—same owner, protected state, ACE principals,
+rights, and inheritance flags—so only Windows SDDL text aliases and ordering
+differences among the all-Allow ACEs are ignored.
 
 After reviewing that read-only result, restore only the snapshotted owner/DACL:
 

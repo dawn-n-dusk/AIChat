@@ -114,9 +114,13 @@ $legacySnapshot = New-TestAclSnapshot `
 $reversePairSnapshot = New-TestAclSnapshot `
     -RootSddl "O:$($currentSid)D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;$($currentSid))" `
     -FileSddl "O:$($currentSid)D:P(A;;FA;;;SY)(A;;FA;;;$($currentSid))"
-[void](Assert-AIChatConnectorDataAclRepairEligible `
+Assert-AIChatConnectorDataAclMatchesSnapshot `
     -Expected $reversePairSnapshot `
-    -Actual $forwardSnapshot)
+    -Actual $forwardSnapshot
+Assert-TestAclRepairBlocked `
+    -Expected $reversePairSnapshot `
+    -Actual $forwardSnapshot `
+    -Label "an already-equivalent all-Allow ACE order"
 
 $inheritedLegacySnapshot = New-TestAclSnapshot `
     -RootSddl "O:$($currentSid)D:AI(A;OICIID;FA;;;$($currentSid))" `
@@ -487,13 +491,18 @@ try {
         '{"cursor":"unchanged"}',
         [Text.UTF8Encoding]::new($false)
     )
-    Set-AIChatConnectorDataAcl -Path $testConnectorRoot
-    Set-AIChatConnectorDataAcl -Path $testStateFile
     $script:testAclRepairProfile = $testProfile
     $script:testAclRepairConnectorRoot = $testConnectorRoot
     function Get-AIChatUserProfile { return $script:testAclRepairProfile }
     function Get-AIChatConnectorDataRoot { return $script:testAclRepairConnectorRoot }
 
+    # Capture the OS-canonical inherited legacy form before migrating the same
+    # isolated tree to the forward ACL. Synthetic SDDL is used above only for
+    # parser tests; native exact-restore coverage must use a real snapshot.
+    $capturedLegacySnapshot = Get-AIChatConnectorDataAclSnapshot `
+        -Path $testConnectorRoot
+    Set-AIChatConnectorDataAcl -Path $testConnectorRoot
+    Set-AIChatConnectorDataAcl -Path $testStateFile
     $currentForwardSnapshot = Get-AIChatConnectorDataAclSnapshot `
         -Path $testConnectorRoot
     $contentBeforeRepair = Get-AIChatConnectorDataContentSnapshot `
@@ -502,7 +511,7 @@ try {
     # Model a process interruption after the root ACL was restored but before
     # the file ACL. The real transition-aware native path must recognize and
     # converge this mixed prefix on the next invocation.
-    $expectedRootEntry = @($inheritedLegacySnapshot.entries | Where-Object {
+    $expectedRootEntry = @($capturedLegacySnapshot.entries | Where-Object {
         [string]$_.name -eq "."
     })[0]
     [AIChat.Windows.OwnerDacl]::RestoreSnapshot(
@@ -514,9 +523,9 @@ try {
         -Path $testConnectorRoot
     Assert-AIChatConnectorDataAclTransitionState `
         -Actual $mixedLiveSnapshot `
-        -AllowedSnapshots @($currentForwardSnapshot, $inheritedLegacySnapshot)
+        -AllowedSnapshots @($currentForwardSnapshot, $capturedLegacySnapshot)
     $restoredSnapshot = Invoke-AIChatConnectorDataAclSnapshotRepair `
-        -ExpectedSnapshot $inheritedLegacySnapshot `
+        -ExpectedSnapshot $capturedLegacySnapshot `
         -CurrentSnapshot $mixedLiveSnapshot `
         -Path $testConnectorRoot
     $contentAfterRepair = Get-AIChatConnectorDataContentSnapshot `
@@ -525,12 +534,12 @@ try {
         -Expected $contentBeforeRepair `
         -Actual $contentAfterRepair
     Assert-AIChatConnectorDataAclMatchesSnapshot `
-        -Expected $inheritedLegacySnapshot `
+        -Expected $capturedLegacySnapshot `
         -Actual $restoredSnapshot
 
     $manifest.schema_version = 3
     $manifest.task = [pscustomobject]@{ existed = $false }
-    $manifest.connector_data_acl = $inheritedLegacySnapshot
+    $manifest.connector_data_acl = $capturedLegacySnapshot
     $postRepairResult = Assert-AIChatManifestRollbackComplete `
         -Manifest $manifest `
         -Paths $paths `

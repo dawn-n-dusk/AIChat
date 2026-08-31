@@ -550,6 +550,7 @@ def test_connector_service_acl_snapshot_repair_is_narrow_and_separate() -> None:
     assert "Assert-AIChatConnectorDataAclTransitionState" in common
     assert "Invoke-AIChatConnectorDataAclSnapshotRepair" in common
     assert "ValidateForwardSnapshotSddl" in common
+    assert "SnapshotSddlEquivalent" in common
     assert "Get-AIChatConnectorDataContentSnapshot" in common
     assert "Assert-AIChatConnectorDataContentMatchesSnapshot" in common
     assert "SACL_SECURITY_INFORMATION" not in common

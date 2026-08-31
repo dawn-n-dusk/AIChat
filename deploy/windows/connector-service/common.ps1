@@ -498,6 +498,45 @@ namespace AIChat.Windows {
             }
         }
 
+        public static bool SnapshotSddlEquivalent(
+            string leftSddl,
+            string rightSddl,
+            bool isDirectory
+        ) {
+            RawSecurityDescriptor left = ValidateSnapshot(leftSddl, isDirectory);
+            RawSecurityDescriptor right = ValidateSnapshot(rightSddl, isDirectory);
+            if (!left.Owner.Equals(right.Owner)) return false;
+            bool leftProtected =
+                (left.ControlFlags & ControlFlags.DiscretionaryAclProtected) != 0;
+            bool rightProtected =
+                (right.ControlFlags & ControlFlags.DiscretionaryAclProtected) != 0;
+            if (leftProtected != rightProtected) return false;
+
+            RawAcl leftDacl = left.DiscretionaryAcl;
+            RawAcl rightDacl = right.DiscretionaryAcl;
+            if (leftDacl.Count != rightDacl.Count) return false;
+            bool[] matched = new bool[rightDacl.Count];
+            for (int leftIndex = 0; leftIndex < leftDacl.Count; leftIndex++) {
+                CommonAce leftAce = (CommonAce)leftDacl[leftIndex];
+                bool found = false;
+                for (int rightIndex = 0; rightIndex < rightDacl.Count; rightIndex++) {
+                    if (matched[rightIndex]) continue;
+                    CommonAce rightAce = (CommonAce)rightDacl[rightIndex];
+                    if (leftAce.SecurityIdentifier.Equals(rightAce.SecurityIdentifier) &&
+                        leftAce.AceFlags == rightAce.AceFlags &&
+                        leftAce.AceQualifier == rightAce.AceQualifier &&
+                        leftAce.AccessMask == rightAce.AccessMask &&
+                        leftAce.IsCallback == rightAce.IsCallback) {
+                        matched[rightIndex] = true;
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) return false;
+            }
+            return true;
+        }
+
         public static void RestoreSnapshot(string path, string sddl, bool isDirectory) {
             RawSecurityDescriptor descriptor = ValidateSnapshot(sddl, isDirectory);
             uint protectionInformation =
@@ -835,6 +874,7 @@ function Assert-AIChatConnectorDataAclMatchesSnapshot {
         [bool]$Expected.private_root_existed -ne [bool]$Actual.private_root_existed) {
         throw "Connector data ACL state does not match its rollback snapshot"
     }
+    Initialize-AIChatOwnerDaclNative
     $expectedEntries = @($Expected.entries)
     $actualEntries = @($Actual.entries)
     if ($expectedEntries.Count -ne $actualEntries.Count) {
@@ -846,9 +886,11 @@ function Assert-AIChatConnectorDataAclMatchesSnapshot {
         })
         if ($matches.Count -ne 1 -or
             [bool]$matches[0].is_directory -ne [bool]$expectedEntry.is_directory -or
-            [string]$matches[0].sddl -cne [string]$expectedEntry.sddl -or
-            ([string]$matches[0].sddl_sha256).ToLowerInvariant() -cne
-                ([string]$expectedEntry.sddl_sha256).ToLowerInvariant()) {
+            -not [AIChat.Windows.OwnerDacl]::SnapshotSddlEquivalent(
+                [string]$expectedEntry.sddl,
+                [string]$matches[0].sddl,
+                [bool]$expectedEntry.is_directory
+            )) {
             throw "Connector data owner/DACL does not match its rollback snapshot"
         }
     }
@@ -889,10 +931,11 @@ function Assert-AIChatConnectorDataAclRepairEligible {
             [bool]$expectedMatches[0].is_directory -ne [bool]$actualEntry.is_directory) {
             throw "Connector data ACL repair requires the exact journal entry types"
         }
-        $alreadyAtTarget = [string]$expectedMatches[0].sddl -ceq
-                [string]$actualEntry.sddl -and
-            ([string]$expectedMatches[0].sddl_sha256).ToLowerInvariant() -ceq
-                ([string]$actualEntry.sddl_sha256).ToLowerInvariant()
+        $alreadyAtTarget = [AIChat.Windows.OwnerDacl]::SnapshotSddlEquivalent(
+            [string]$expectedMatches[0].sddl,
+            [string]$actualEntry.sddl,
+            [bool]$actualEntry.is_directory
+        )
         if (-not $alreadyAtTarget) {
             [AIChat.Windows.OwnerDacl]::ValidateForwardSnapshotSddl(
                 [string]$actualEntry.sddl,
@@ -948,6 +991,7 @@ function Assert-AIChatConnectorDataAclTransitionState {
         throw "Connector data ACL transition state must retain the existing tree"
     }
 
+    Initialize-AIChatOwnerDaclNative
     $actualEntries = @($Actual.entries)
     $referenceEntries = @($AllowedSnapshots[0].entries)
     if ($actualEntries.Count -ne $referenceEntries.Count) {
@@ -975,9 +1019,11 @@ function Assert-AIChatConnectorDataAclTransitionState {
                 [bool]$matches[0].is_directory -ne [bool]$actualEntry.is_directory) {
                 throw "Connector data ACL transition snapshots do not share an exact entry set"
             }
-            if ([string]$matches[0].sddl -ceq [string]$actualEntry.sddl -and
-                ([string]$matches[0].sddl_sha256).ToLowerInvariant() -ceq
-                    ([string]$actualEntry.sddl_sha256).ToLowerInvariant()) {
+            if ([AIChat.Windows.OwnerDacl]::SnapshotSddlEquivalent(
+                [string]$matches[0].sddl,
+                [string]$actualEntry.sddl,
+                [bool]$actualEntry.is_directory
+            )) {
                 $allowedExact = $true
             }
         }
@@ -1190,7 +1236,11 @@ function Restore-AIChatConnectorDataAclSnapshot {
         } else {
             Join-Path $target ([string]$entry.name)
         }
-        if ((Get-AIChatOwnerAndDaclSddl -Path $entryPath) -ne [string]$entry.sddl) {
+        if (-not [AIChat.Windows.OwnerDacl]::SnapshotSddlEquivalent(
+            [string]$entry.sddl,
+            (Get-AIChatOwnerAndDaclSddl -Path $entryPath),
+            [bool]$entry.is_directory
+        )) {
             throw "Connector data ACL rollback did not restore the exact owner/DACL"
         }
     }
