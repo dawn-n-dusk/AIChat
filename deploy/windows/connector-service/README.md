@@ -41,5 +41,7 @@ Pre-contract launch, parser, parameter-binding, stderr, timeout, malformed
 output, field, enum, or exit-code failures are replaced by a fixed runner
 failure object with no paths, raw exceptions, credential values, SID/SDDL data,
 or untrusted text. After a repair or finalize target has started, an
-unverifiable outcome is conservatively marked `mutation_possible=true`. See
+unverifiable outcome is conservatively marked `mutation_possible=true`.
+`target_termination_failed` prohibits retry until local process state is
+independently resolved. See
 the parent README for the complete invocation and failure contract.

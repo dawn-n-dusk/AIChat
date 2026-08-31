@@ -370,6 +370,20 @@ function Read-RunnerFailure {
         [bool]$parsed.mutation_possible -ne $MutationPossible) {
         throw "$ErrorCode runner contract values are invalid"
     }
+    $nullExitCodes = @(
+        "invalid_runner_arguments", "target_missing",
+        "powershell_51_unavailable", "target_start_failed", "target_timeout",
+        "target_termination_failed"
+    )
+    if ($null -eq $parsed.target_exit_code) {
+        if ($nullExitCodes -cnotcontains $ErrorCode -and
+            $ErrorCode -cne "runner_internal_error") {
+            throw "$ErrorCode unexpectedly omitted target_exit_code"
+        }
+    } elseif ($parsed.target_exit_code -isnot [int] -and
+        $parsed.target_exit_code -isnot [long]) {
+        throw "$ErrorCode target_exit_code was not an integer or null"
+    }
     return $parsed
 }
 

@@ -383,7 +383,8 @@ The runner accepts no arbitrary arguments and never chains verify, repair, or
 finalize. It launches the fixed same-directory target under explicit Windows
 PowerShell 5.1, captures stdout and stderr separately, applies a bounded
 timeout, terminates the child before returning from timeout or internal-error
-paths, and validates raw framing, ASCII, unique keys, field order/types,
+paths when Windows confirms termination, and validates raw framing, ASCII,
+unique keys, field order/types,
 operation, mode, status/error enums, mutation invariants, and native exit code.
 Valid target success and failure JSON is forwarded byte-for-byte at the ASCII
 text level with target exit code `0` or `1`.
@@ -420,7 +421,10 @@ credentials, SID/SDDL data, or other untrusted text. For `verify`,
 `mutation_possible=false` because the runner fixes a read-only invocation. For
 `repair` or `finalize`, any failure after the target successfully starts is
 reported with `mutation_possible=true`; this is deliberately conservative even
-when the likely failure happened before the target body.
+when the likely failure happened before the target body. The runner makes two
+bounded kill-and-wait attempts. `target_termination_failed` means the child
+state remains unknown; do not retry repair or finalize until the local process
+state has been independently resolved.
 
 `-OutputFormat Json` writes exactly one compact ASCII-safe JSON object to
 stdout and no human `state_root`, task, or diagnostic lines. Contract version 1

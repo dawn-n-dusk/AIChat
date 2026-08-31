@@ -12,7 +12,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   transaction recovery automation. It accepts only fixed verify, repair, or
   finalize operations, prevents the native `powershell.exe -OutputFormat`
   option from consuming the target script's `Json` value, captures both child
-  streams without deadlock, enforces a timeout and child cleanup, and forwards
+  streams without deadlock, enforces a timeout and bounded child cleanup, and forwards
   only an exact versioned recovery contract. All pre-contract, stderr,
   malformed-output, schema, enum, or exit-code failures become one fixed
   redacted runner JSON object; unverifiable repair/finalize outcomes after
