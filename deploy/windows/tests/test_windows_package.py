@@ -34,6 +34,7 @@ def test_required_windows_package_files_exist() -> None:
         "rollback.ps1",
         "recover-transaction.ps1",
         "invoke-recovery-json.ps1",
+        "diagnose-recovery-protected-paths.ps1",
         "uninstall.ps1",
         "config.example.json",
     }
@@ -795,6 +796,83 @@ def test_recovery_json_runner_owns_the_powershell_51_launch_boundary() -> None:
         "timeout_orphan_count=0",
     ):
         assert marker in runner_test
+
+
+def test_recovery_protected_path_diagnostic_is_read_only_and_redacted() -> None:
+    root = ROOT / "connector-service"
+    diagnostic_path = root / "diagnose-recovery-protected-paths.ps1"
+    diagnostic_bytes = diagnostic_path.read_bytes()
+    diagnostic = diagnostic_bytes.decode("ascii")
+    contract_test = (
+        ROOT / "tests" / "test_recovery_protected_paths_diagnostics.ps1"
+    ).read_text(encoding="utf-8")
+    workflow = (REPOSITORY_ROOT / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert all(value < 0x80 for value in diagnostic_bytes)
+    assert 'contract_version = 1' in diagnostic
+    assert 'operation = "diagnose_protected_paths"' in diagnostic
+    assert 'mode = "read_only"' in diagnostic
+    assert '[ValidateSet("exact", "mismatch", "indeterminate")]' in diagnostic
+    assert '[ValidateSet("-1", "0", "1")]' in diagnostic
+    assert '[ValidateSet("ancestor_chain", "protected_root", "state_root")]' in diagnostic
+    for reason in (
+        "none",
+        "resolution_failed",
+        "ancestor_missing",
+        "ancestor_reparse",
+        "layer_missing",
+        "layer_not_directory",
+        "layer_reparse",
+        "acl_unreadable",
+        "owner_mismatch",
+        "dacl_unprotected",
+        "rule_count_mismatch",
+        "rule_shape_mismatch",
+        "internal_error",
+    ):
+        assert f'"{reason}"' in diagnostic
+    for field in (
+        "mutation_performed",
+        "token_read",
+        "journal_read",
+        "connector_data_accessed",
+        "task_scheduler_accessed",
+        "connector_process_accessed",
+    ):
+        assert f"{field} = $false" in diagnostic
+    for forbidden in (
+        "Get-AIChatConnectorPaths",
+        "Get-AIChatConnectorDataRoot",
+        "Get-AIChatConnectorTask",
+        "New-Object -ComObject",
+        "Schedule.Service",
+        "Get-Process",
+        "Start-Process",
+        "Invoke-RestMethod",
+        "Read-AIChatPrivateJson",
+        "Get-Content",
+        "Set-Acl",
+        "New-Item",
+        "Remove-Item",
+        "Move-Item",
+        "Copy-Item",
+        "Write-Host",
+        "Write-Output",
+        "Write-Error",
+    ):
+        assert forbidden not in diagnostic
+    assert "[Console]::Out.WriteLine($json)" in diagnostic
+    assert 'if ([string]$Value.result -ceq "indeterminate")' in diagnostic
+    assert "exit 1" in diagnostic
+    assert "exit 0" in diagnostic
+    assert "Get-DiagnosticFixtureSnapshot" in contract_test
+    assert "$before -cne $after" in contract_test
+    assert "sensitiveCanaries" in contract_test
+    assert 'ExpectedStatus "mismatch"' in contract_test
+    assert 'ExpectedStatus "blocked"' in contract_test
+    assert "test_recovery_protected_paths_diagnostics.ps1" in workflow
 
 
 def test_connector_service_pins_native_node_npm_and_codex_without_path_shim() -> None:

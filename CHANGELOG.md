@@ -115,6 +115,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Add a standalone Windows PowerShell 5.1 read-only diagnostic for recovery
+  `protected_paths_invalid` results. Its fixed version-1 ASCII JSON contract
+  identifies only the allowlisted phase, ancestor/protected-root/state-root
+  level, layer, and reason; it never emits paths, SID/SDDL, ACL/ACE content,
+  credentials, tokens, or raw exceptions. Exact and mismatch results exit 0,
+  while an unsafe-to-classify result is explicitly blocked and exits 1. The
+  diagnostic does not read the recovery journal, ConnectorData, or identity
+  configuration, access Task Scheduler or connector processes, mutate files or
+  ACLs, or alter the existing recovery target/runner contracts. Windows tests
+  enforce the schema, redaction canaries, representative real ACL mismatches,
+  and byte-for-byte fixture stability before and after every invocation.
 - Add an explicit macOS `--apply --stage-only` connector package that publishes
   an inert content-addressed candidate, plus staged-only check and removal
   commands. Staging never calls launchd, changes the active package, creates an
