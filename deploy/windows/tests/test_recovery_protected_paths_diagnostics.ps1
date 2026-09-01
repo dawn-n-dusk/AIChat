@@ -50,13 +50,11 @@ function Get-AIChatCurrentSid {
 }
 
 function Get-AIChatConnectorCanonicalPaths {
+    $protectedRoot = [IO.Path]::GetFullPath((Get-AIChatProtectedRoot))
     if ($env:AICHAT_DIAGNOSTIC_TEST_SCENARIO -eq
         "connector_data_resolution_failure") {
         throw "private-sensitive-path-canary secret-token-canary-9f4cb55d"
     }
-    $protectedRoot = [IO.Path]::GetFullPath(
-        $env:AICHAT_DIAGNOSTIC_TEST_PROTECTED_ROOT
-    )
     return [pscustomobject][ordered]@{
         ProtectedRoot = $protectedRoot
         StateRoot = [IO.Path]::GetFullPath(
