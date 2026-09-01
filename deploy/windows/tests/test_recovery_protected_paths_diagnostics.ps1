@@ -312,6 +312,13 @@ try {
     Write-Host "Windows protected-path diagnostic contract tests passed"
 } finally {
     if (Test-Path -LiteralPath $testRoot) {
+        $cleanupDirectories = @(
+            Get-ChildItem -LiteralPath $testRoot -Force -Recurse -Directory |
+                Sort-Object { $_.FullName.Length } -Descending
+        )
+        foreach ($cleanupDirectory in $cleanupDirectories) {
+            Set-DiagnosticDirectoryAcl -Path $cleanupDirectory.FullName
+        }
         Remove-Item -LiteralPath $testRoot -Recurse -Force
     }
 }
