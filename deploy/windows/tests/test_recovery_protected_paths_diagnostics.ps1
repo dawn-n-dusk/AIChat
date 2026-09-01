@@ -49,7 +49,11 @@ function Get-AIChatCurrentSid {
     return [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 }
 
-function Get-AIChatConnectorCanonicalStatePaths {
+function Get-AIChatConnectorCanonicalPaths {
+    if ($env:AICHAT_DIAGNOSTIC_TEST_SCENARIO -eq
+        "connector_data_resolution_failure") {
+        throw "private-sensitive-path-canary secret-token-canary-9f4cb55d"
+    }
     $protectedRoot = [IO.Path]::GetFullPath(
         $env:AICHAT_DIAGNOSTIC_TEST_PROTECTED_ROOT
     )
@@ -57,6 +61,9 @@ function Get-AIChatConnectorCanonicalStatePaths {
         ProtectedRoot = $protectedRoot
         StateRoot = [IO.Path]::GetFullPath(
             (Join-Path $protectedRoot "codex-connector-task")
+        )
+        ConnectorDataRoot = [IO.Path]::GetFullPath(
+            (Join-Path $protectedRoot "..\connector-data-resolution-only")
         )
     }
 }
@@ -429,6 +436,13 @@ try {
     Invoke-DiagnosticCase `
         -Name "resolution-blocked" -Scenario "resolution_failure" `
         -Fixture "exact" -ExpectedExit 1 -ExpectedStatus "blocked" `
+        -ExpectedResult "indeterminate" -ExpectedPhase "resolution" `
+        -ExpectedLevel -1 -ExpectedLayer "ancestor_chain" `
+        -ExpectedReason "resolution_failed"
+    Invoke-DiagnosticCase `
+        -Name "connector-data-resolution-blocked" `
+        -Scenario "connector_data_resolution_failure" -Fixture "exact" `
+        -ExpectedExit 1 -ExpectedStatus "blocked" `
         -ExpectedResult "indeterminate" -ExpectedPhase "resolution" `
         -ExpectedLevel -1 -ExpectedLayer "ancestor_chain" `
         -ExpectedReason "resolution_failed"

@@ -56,8 +56,11 @@ or identity configuration; access Task Scheduler or connector processes; or
 change ACLs or files. It is intentionally outside the recovery JSON target and
 runner contracts and cannot repair, finalize, retry, or otherwise advance a
 recovery operation. Both recovery and diagnosis resolve the protected/state
-roots and canonical private-tree pair through the same read-only helpers in
-`common.ps1`; the diagnostic does not maintain a second state-root literal.
+roots, the ConnectorData root, and the canonical private-tree pair through the
+same read-only helpers in `common.ps1`; the diagnostic does not maintain a
+second state-root literal. ConnectorData resolution computes the fixed
+UserProfile path only. The diagnostic does not test existence, read an ACL or
+file, enumerate the directory, or otherwise access ConnectorData.
 If result construction or serialization itself fails, the outermost handler
 writes one fixed ASCII JSON literal plus the native Windows newline, writes no
 stderr, and exits 1.

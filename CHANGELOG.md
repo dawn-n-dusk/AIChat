@@ -129,8 +129,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   classifications, byte-exact native-newline framing, constructor/serializer
   literal-fallback safety, and byte-for-byte fixture stability before and after
   every invocation. Recovery and diagnosis now share pure read-only canonical
-  protected/state-root and private-tree path helpers so they cannot drift into
-  a false `exact` result without changing the recovery JSON contract.
+  protected/state-root, ConnectorData-root, and private-tree path helpers so
+  UserProfile/ConnectorData resolution cannot drift into a false `exact`
+  result without changing the recovery JSON contract or reading ConnectorData.
 - Add an explicit macOS `--apply --stage-only` connector package that publishes
   an inert content-addressed candidate, plus staged-only check and removal
   commands. Staging never calls launchd, changes the active package, creates an

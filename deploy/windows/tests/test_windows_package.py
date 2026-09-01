@@ -818,16 +818,24 @@ def test_recovery_protected_path_diagnostic_is_read_only_and_redacted() -> None:
     assert '[ValidateSet("exact", "mismatch", "indeterminate")]' in diagnostic
     assert '[ValidateSet("-1", "0", "1")]' in diagnostic
     assert '[ValidateSet("ancestor_chain", "protected_root", "state_root")]' in diagnostic
-    assert "Get-AIChatConnectorCanonicalStatePaths" in diagnostic
+    assert "Get-AIChatConnectorCanonicalPaths" in diagnostic
     assert "Get-AIChatPrivateDirectoryTreeCanonicalPaths" in diagnostic
     assert '"codex-connector-task"' not in diagnostic
     assert "AICHAT_DIAGNOSTIC_TEST" not in diagnostic
-    assert "function Get-AIChatConnectorCanonicalStatePaths" in common
+    assert "function Get-AIChatConnectorCanonicalPaths" in common
     assert "function Get-AIChatPrivateDirectoryTreeCanonicalPaths" in common
     connector_paths = common[
         common.index("function Get-AIChatConnectorPaths") :
     ]
-    assert "Get-AIChatConnectorCanonicalStatePaths" in connector_paths
+    assert "Get-AIChatConnectorCanonicalPaths" in connector_paths
+    canonical_paths = common[
+        common.index("function Get-AIChatConnectorCanonicalPaths") :
+        common.index("function Get-AIChatConnectorPaths")
+    ]
+    assert "Get-AIChatConnectorDataRoot" in canonical_paths
+    assert "ConnectorDataRoot = [IO.Path]::GetFullPath" in canonical_paths
+    assert "ConnectorDataRoot = $connectorDataRoot" in connector_paths
+    assert 'Join-Path $connectorDataRoot "state.json"' in connector_paths
     private_tree = common[
         common.index("function Assert-AIChatPrivateDirectoryTree") :
         common.index("function Assert-AIChatConnectorDataTree")
@@ -901,6 +909,7 @@ def test_recovery_protected_path_diagnostic_is_read_only_and_redacted() -> None:
     assert 'Fixture "state_reparse"' in contract_test
     assert 'Scenario "owner_mismatch"' in contract_test
     assert 'Scenario "acl_unreadable"' in contract_test
+    assert 'Scenario "connector_data_resolution_failure"' in contract_test
     assert 'ExpectedStatus "mismatch"' in contract_test
     assert 'ExpectedStatus "blocked"' in contract_test
     assert "test_recovery_protected_paths_diagnostics.ps1" in workflow

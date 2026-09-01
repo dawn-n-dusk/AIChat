@@ -2156,7 +2156,7 @@ function Get-AIChatConnectorSettings {
     }
 }
 
-function Get-AIChatConnectorCanonicalStatePaths {
+function Get-AIChatConnectorCanonicalPaths {
     param(
         [string]$StateRoot
     )
@@ -2167,9 +2167,11 @@ function Get-AIChatConnectorCanonicalStatePaths {
     } else {
         Join-Path $protectedRoot "codex-connector-task"
     }
+    $connectorDataRoot = Get-AIChatConnectorDataRoot
     return [pscustomobject][ordered]@{
         ProtectedRoot = $protectedRoot
         StateRoot = [IO.Path]::GetFullPath($state)
+        ConnectorDataRoot = [IO.Path]::GetFullPath($connectorDataRoot)
     }
 }
 
@@ -2180,9 +2182,10 @@ function Get-AIChatConnectorPaths {
 
     $taskName = "CodexConnector"
     $taskPath = "\AIChat\"
-    $canonical = Get-AIChatConnectorCanonicalStatePaths -StateRoot $StateRoot
+    $canonical = Get-AIChatConnectorCanonicalPaths -StateRoot $StateRoot
     $protectedRoot = [string]$canonical.ProtectedRoot
     $state = [string]$canonical.StateRoot
+    $connectorDataRoot = [string]$canonical.ConnectorDataRoot
     return [pscustomobject]@{
         ProtectedRoot = $protectedRoot
         StateRoot = $state
@@ -2196,8 +2199,8 @@ function Get-AIChatConnectorPaths {
         LastBackupPath = Join-Path $state "last-backup.json"
         TransactionPath = Join-Path $state "transaction.json"
         StagingDirectory = Join-Path $state "staging"
-        ConnectorDataRoot = Get-AIChatConnectorDataRoot
-        ConnectorLegacyStatePath = Join-Path (Get-AIChatConnectorDataRoot) "state.json"
+        ConnectorDataRoot = $connectorDataRoot
+        ConnectorLegacyStatePath = Join-Path $connectorDataRoot "state.json"
         TaskName = $taskName
         TaskPath = $taskPath
     }

@@ -290,7 +290,7 @@ try {
 
     try {
         $currentSid = Get-AIChatCurrentSid
-        $connectorCanonical = Get-AIChatConnectorCanonicalStatePaths
+        $connectorCanonical = Get-AIChatConnectorCanonicalPaths
         $treeCanonical = Get-AIChatPrivateDirectoryTreeCanonicalPaths `
             -Path ([string]$connectorCanonical.StateRoot) `
             -ProtectedRoot ([string]$connectorCanonical.ProtectedRoot)
