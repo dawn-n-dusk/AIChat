@@ -34,6 +34,44 @@ transaction marker, exits before ConnectorData, settings, launcher,
 credentials, or Task Scheduler checks, and reports no mutation. It does not
 replace the full StageOnly package check.
 
+`diagnose-recovery-protected-paths.ps1` is a separate, read-only diagnostic
+for a recovery result whose `diagnostic_code` is `protected_paths_invalid`.
+Run it directly with Windows PowerShell 5.1:
+
+```powershell
+powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\diagnose-recovery-protected-paths.ps1
+```
+
+It emits exactly one compact ASCII JSON object under contract version 1. The
+fixed `level` values are `-1` for the unmanaged ancestor chain, `0` for the
+LocalAppData `AIChat` protected root, and `1` for its fixed
+`codex-connector-task` state root. The matching `layer` enum is included so a
+wrapper never has to infer the meaning of the integer. `exact` and `mismatch`
+are successful diagnoses and exit 0; `indeterminate` reports `status=blocked`
+and exits 1. Reasons are fixed allowlisted enums only.
+
+The diagnostic never returns a path, SID, SDDL, ACL/ACE data, credential,
+token, or raw exception. It does not read the recovery journal, ConnectorData,
+or identity configuration; access Task Scheduler or connector processes; or
+change ACLs or files. It is intentionally outside the recovery JSON target and
+runner contracts and cannot repair, finalize, retry, or otherwise advance a
+recovery operation. Both recovery and diagnosis resolve the protected/state
+roots, the ConnectorData root, and the canonical private-tree pair through the
+same read-only helpers in `common.ps1`; the diagnostic does not maintain a
+second state-root literal. ConnectorData resolution computes the fixed
+UserProfile path only. The diagnostic does not test existence, read an ACL or
+file, enumerate the directory, or otherwise access ConnectorData.
+If result construction or serialization itself fails, the outermost handler
+writes one fixed ASCII JSON literal plus the native Windows newline, writes no
+stderr, and exits 1.
+
+Windows CI uses real temporary ACLs for protected/unprotected DACL and rule
+shape/count cases, and real junctions for ancestor and state-root reparse
+cases. Owner replacement and deliberately unreadable ACLs are not stable or
+safe to construct on every hosted runner without elevation or cleanup risk, so
+those two classifications use scoped provider injection only in the isolated
+test copy. The production script contains no environment-controlled test hook.
+
 The default output remains the existing Human key/value stream. Automation
 must invoke `invoke-recovery-json.ps1` with exactly one operation: `verify`,
 `repair`, or `finalize`. The runner owns the Windows PowerShell 5.1 subprocess,
