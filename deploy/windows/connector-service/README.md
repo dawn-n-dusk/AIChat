@@ -55,7 +55,19 @@ token, or raw exception. It does not read the recovery journal, ConnectorData,
 or identity configuration; access Task Scheduler or connector processes; or
 change ACLs or files. It is intentionally outside the recovery JSON target and
 runner contracts and cannot repair, finalize, retry, or otherwise advance a
-recovery operation.
+recovery operation. Both recovery and diagnosis resolve the protected/state
+roots and canonical private-tree pair through the same read-only helpers in
+`common.ps1`; the diagnostic does not maintain a second state-root literal.
+If result construction or serialization itself fails, the outermost handler
+writes one fixed ASCII JSON literal plus the native Windows newline, writes no
+stderr, and exits 1.
+
+Windows CI uses real temporary ACLs for protected/unprotected DACL and rule
+shape/count cases, and real junctions for ancestor and state-root reparse
+cases. Owner replacement and deliberately unreadable ACLs are not stable or
+safe to construct on every hosted runner without elevation or cleanup risk, so
+those two classifications use scoped provider injection only in the isolated
+test copy. The production script contains no environment-controlled test hook.
 
 The default output remains the existing Human key/value stream. Automation
 must invoke `invoke-recovery-json.ps1` with exactly one operation: `verify`,

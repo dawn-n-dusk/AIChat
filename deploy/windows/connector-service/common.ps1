@@ -1391,13 +1391,30 @@ function Initialize-AIChatPrivateDirectory {
     return $target
 }
 
+function Get-AIChatPrivateDirectoryTreeCanonicalPaths {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$ProtectedRoot
+    )
+
+    $root = [IO.Path]::GetFullPath($ProtectedRoot)
+    $target = Assert-AIChatPathWithinRoot -Path $Path -Root $root
+    return [pscustomobject][ordered]@{
+        ProtectedRoot = $root
+        Target = $target
+    }
+}
+
 function Assert-AIChatPrivateDirectoryTree {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
         [Parameter(Mandatory = $true)][string]$ProtectedRoot
     )
-    $root = [IO.Path]::GetFullPath($ProtectedRoot)
-    $target = Assert-AIChatPathWithinRoot -Path $Path -Root $root
+    $canonical = Get-AIChatPrivateDirectoryTreeCanonicalPaths `
+        -Path $Path `
+        -ProtectedRoot $ProtectedRoot
+    $root = [string]$canonical.ProtectedRoot
+    $target = [string]$canonical.Target
     [void](Assert-AIChatNoReparsePath -Path $target -StopAt ([IO.Path]::GetPathRoot($target)))
     $relative = $target.Substring($root.Length).TrimStart(
         [IO.Path]::DirectorySeparatorChar,
@@ -2139,6 +2156,23 @@ function Get-AIChatConnectorSettings {
     }
 }
 
+function Get-AIChatConnectorCanonicalStatePaths {
+    param(
+        [string]$StateRoot
+    )
+
+    $protectedRoot = Get-AIChatProtectedRoot
+    $state = if ($StateRoot) {
+        Assert-AIChatPathWithinRoot -Path $StateRoot -Root $protectedRoot
+    } else {
+        Join-Path $protectedRoot "codex-connector-task"
+    }
+    return [pscustomobject][ordered]@{
+        ProtectedRoot = $protectedRoot
+        StateRoot = [IO.Path]::GetFullPath($state)
+    }
+}
+
 function Get-AIChatConnectorPaths {
     param(
         [string]$StateRoot
@@ -2146,15 +2180,12 @@ function Get-AIChatConnectorPaths {
 
     $taskName = "CodexConnector"
     $taskPath = "\AIChat\"
-    $protectedRoot = Get-AIChatProtectedRoot
-    $state = if ($StateRoot) {
-        Assert-AIChatPathWithinRoot -Path $StateRoot -Root $protectedRoot
-    } else {
-        Join-Path $protectedRoot "codex-connector-task"
-    }
+    $canonical = Get-AIChatConnectorCanonicalStatePaths -StateRoot $StateRoot
+    $protectedRoot = [string]$canonical.ProtectedRoot
+    $state = [string]$canonical.StateRoot
     return [pscustomobject]@{
         ProtectedRoot = $protectedRoot
-        StateRoot = [IO.Path]::GetFullPath($state)
+        StateRoot = $state
         SettingsPath = Join-Path $state "settings.json"
         MappingStatePath = Join-Path $state "mapping-state.json"
         LauncherPath = Join-Path $state "launcher.ps1"

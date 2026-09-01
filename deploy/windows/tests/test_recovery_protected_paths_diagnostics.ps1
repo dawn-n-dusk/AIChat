@@ -21,6 +21,7 @@ New-Item -ItemType Directory -Path $testRoot | Out-Null
 
 $sensitiveCanaries = @(
     "S-1-5-21-111111111-222222222-333333333-4444",
+    "S-1-5-18",
     "O:SENSITIVE-G:SENSITIVE-D:(A;;FA;;;SENSITIVE)",
     "secret-token-canary-9f4cb55d",
     "private-sensitive-path-canary",
@@ -46,6 +47,67 @@ function Get-AIChatProtectedRoot {
 
 function Get-AIChatCurrentSid {
     return [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+}
+
+function Get-AIChatConnectorCanonicalStatePaths {
+    $protectedRoot = [IO.Path]::GetFullPath(
+        $env:AICHAT_DIAGNOSTIC_TEST_PROTECTED_ROOT
+    )
+    return [pscustomobject][ordered]@{
+        ProtectedRoot = $protectedRoot
+        StateRoot = [IO.Path]::GetFullPath(
+            (Join-Path $protectedRoot "codex-connector-task")
+        )
+    }
+}
+
+function Get-AIChatPrivateDirectoryTreeCanonicalPaths {
+    param($Path, $ProtectedRoot)
+    $root = [IO.Path]::GetFullPath($ProtectedRoot)
+    $target = [IO.Path]::GetFullPath($Path)
+    $prefix = $root + [IO.Path]::DirectorySeparatorChar
+    if (-not $target.StartsWith(
+        $prefix,
+        [StringComparison]::OrdinalIgnoreCase
+    )) {
+        throw "private-sensitive-path-canary"
+    }
+    return [pscustomobject][ordered]@{
+        ProtectedRoot = $root
+        Target = $target
+    }
+}
+
+function Get-AIChatProtectedPathDiagnosticAcl {
+    param($Path)
+    if ($env:AICHAT_DIAGNOSTIC_TEST_SCENARIO -eq "acl_unreadable") {
+        throw "private-sensitive-path-canary secret-token-canary-9f4cb55d"
+    }
+    return Microsoft.PowerShell.Security\Get-Acl `
+        -LiteralPath $Path -ErrorAction Stop
+}
+
+function Get-AIChatProtectedPathDiagnosticOwnerSid {
+    param($Acl)
+    if ($env:AICHAT_DIAGNOSTIC_TEST_SCENARIO -eq "owner_mismatch") {
+        return "S-1-5-18"
+    }
+    return $Acl.GetOwner(
+        [Security.Principal.SecurityIdentifier]
+    ).Value
+}
+
+if ($env:AICHAT_DIAGNOSTIC_TEST_SCENARIO -eq "constructor_failure") {
+    Set-Item -LiteralPath Function:\New-AIChatProtectedPathDiagnostic -Value {
+        param($Result, $Phase, $Level, $Layer, $Reason)
+        throw "private-sensitive-path-canary secret-token-canary-9f4cb55d"
+    }
+}
+if ($env:AICHAT_DIAGNOSTIC_TEST_SCENARIO -eq "serializer_failure") {
+    Set-Item -LiteralPath Function:\ConvertTo-AIChatProtectedPathAsciiJson -Value {
+        param($Value)
+        throw "private-sensitive-path-canary secret-token-canary-9f4cb55d"
+    }
 }
 
 function Get-AIChatConnectorPaths { throw "connector-path-canary" }
@@ -92,11 +154,25 @@ function Set-DiagnosticDirectoryAcl {
     Set-Acl -LiteralPath $Path -AclObject $security
 }
 
+function New-DiagnosticJunction {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Target
+    )
+
+    & $env:ComSpec /d /c "mklink /J `"$Path`" `"$Target`"" | Out-Null
+    if ($LASTEXITCODE -ne 0 -or
+        -not (Test-Path -LiteralPath $Path -PathType Container)) {
+        throw "Could not create the diagnostic reparse fixture"
+    }
+}
+
 function Get-DiagnosticFixtureSnapshot {
     param([Parameter(Mandatory = $true)][string]$Path)
 
     $items = @(Get-Item -LiteralPath $Path -Force) +
         @(Get-ChildItem -LiteralPath $Path -Force -Recurse)
+    $items = @($items | Sort-Object FullName)
     $entries = @()
     foreach ($item in $items) {
         $relative = $item.FullName.Substring($Path.Length)
@@ -131,20 +207,36 @@ function Invoke-DiagnosticCase {
         [Parameter(Mandatory = $true)][int]$ExpectedLevel,
         [Parameter(Mandatory = $true)][string]$ExpectedLayer,
         [Parameter(Mandatory = $true)][string]$ExpectedReason,
+        [switch]$ExpectedLiteralFallback,
         [ValidateSet(
             "exact", "missing_state", "state_file", "unprotected_root",
-            "state_extra_rule", "state_rule_shape"
+            "state_extra_rule", "state_rule_shape", "ancestor_reparse",
+            "state_reparse"
         )]
         [string]$Fixture = "exact"
     )
 
     $caseRoot = Join-Path $testRoot $Name
     $runnerRoot = Join-Path $caseRoot "runner"
-    $protectedRoot = Join-Path $caseRoot "private-sensitive-path-canary"
+    New-Item -ItemType Directory -Path $caseRoot | Out-Null
+    if ($Fixture -eq "ancestor_reparse") {
+        $ancestorTarget = Join-Path $caseRoot "ancestor-target"
+        $ancestorLink = Join-Path $caseRoot "ancestor-link"
+        New-Item -ItemType Directory -Path $ancestorTarget | Out-Null
+        New-DiagnosticJunction -Path $ancestorLink -Target $ancestorTarget
+        $protectedRoot = Join-Path $ancestorLink `
+            "private-sensitive-path-canary"
+    } else {
+        $protectedRoot = Join-Path $caseRoot "private-sensitive-path-canary"
+    }
     $stateRoot = Join-Path $protectedRoot "codex-connector-task"
     New-Item -ItemType Directory -Path $runnerRoot | Out-Null
     New-Item -ItemType Directory -Path $protectedRoot | Out-Null
-    if ($Fixture -eq "state_file") {
+    if ($Fixture -eq "state_reparse") {
+        $stateTarget = Join-Path $caseRoot "state-target"
+        New-Item -ItemType Directory -Path $stateTarget | Out-Null
+        New-DiagnosticJunction -Path $stateRoot -Target $stateTarget
+    } elseif ($Fixture -eq "state_file") {
         [IO.File]::WriteAllText(
             $stateRoot,
             "fixed-content",
@@ -215,11 +307,21 @@ function Invoke-DiagnosticCase {
     if ($before -cne $after) {
         throw "$Name mutated its fixture"
     }
-    $trimmed = $stdout.TrimEnd([char[]]"`r`n")
-    if (-not $trimmed -or $trimmed.Contains("`r") -or $trimmed.Contains("`n")) {
-        throw "$Name did not emit exactly one JSON line"
+    $nativeNewline = [Environment]::NewLine
+    if (-not $stdout.EndsWith($nativeNewline)) {
+        throw "$Name did not emit the native Windows newline"
     }
-    foreach ($character in $trimmed.ToCharArray()) {
+    $jsonText = $stdout.Substring(
+        0,
+        $stdout.Length - $nativeNewline.Length
+    )
+    if (-not $jsonText -or
+        $jsonText.Contains("`r") -or
+        $jsonText.Contains("`n") -or
+        $jsonText[0] -eq [char]0xfeff) {
+        throw "$Name did not emit exactly one unprefixed JSON object"
+    }
+    foreach ($character in $jsonText.ToCharArray()) {
         if ([int][char]$character -gt 0x7f) {
             throw "$Name emitted non-ASCII output"
         }
@@ -230,7 +332,12 @@ function Invoke-DiagnosticCase {
         }
     }
 
-    $value = $trimmed | ConvertFrom-Json
+    $literalFallback = '{"contract_version":1,"operation":"diagnose_protected_paths","mode":"read_only","success":false,"status":"blocked","result":"indeterminate","phase":"internal","level":-1,"layer":"ancestor_chain","reason":"internal_error","mutation_performed":false,"token_read":false,"journal_read":false,"connector_data_accessed":false,"task_scheduler_accessed":false,"connector_process_accessed":false}'
+    if ($ExpectedLiteralFallback -and
+        $stdout -cne ($literalFallback + $nativeNewline)) {
+        throw "$Name did not emit the byte-exact literal fallback"
+    }
+    $value = $jsonText | ConvertFrom-Json
     $expectedNames = @(
         "contract_version", "operation", "mode", "success", "status",
         "result", "phase", "level", "layer", "reason",
@@ -297,6 +404,29 @@ try {
         -ExpectedPhase "acl" -ExpectedLevel 1 -ExpectedLayer "state_root" `
         -ExpectedReason "rule_shape_mismatch"
     Invoke-DiagnosticCase `
+        -Name "ancestor-reparse" -Scenario "normal" `
+        -Fixture "ancestor_reparse" `
+        -ExpectedExit 0 -ExpectedStatus "mismatch" -ExpectedResult "mismatch" `
+        -ExpectedPhase "ancestor_chain" -ExpectedLevel -1 `
+        -ExpectedLayer "ancestor_chain" -ExpectedReason "ancestor_reparse"
+    Invoke-DiagnosticCase `
+        -Name "state-reparse" -Scenario "normal" `
+        -Fixture "state_reparse" `
+        -ExpectedExit 0 -ExpectedStatus "mismatch" -ExpectedResult "mismatch" `
+        -ExpectedPhase "directory_shape" -ExpectedLevel 1 `
+        -ExpectedLayer "state_root" -ExpectedReason "layer_reparse"
+    Invoke-DiagnosticCase `
+        -Name "owner-mismatch" -Scenario "owner_mismatch" -Fixture "exact" `
+        -ExpectedExit 0 -ExpectedStatus "mismatch" -ExpectedResult "mismatch" `
+        -ExpectedPhase "acl" -ExpectedLevel 0 -ExpectedLayer "protected_root" `
+        -ExpectedReason "owner_mismatch"
+    Invoke-DiagnosticCase `
+        -Name "acl-unreadable" -Scenario "acl_unreadable" -Fixture "exact" `
+        -ExpectedExit 1 -ExpectedStatus "blocked" `
+        -ExpectedResult "indeterminate" -ExpectedPhase "acl" `
+        -ExpectedLevel 0 -ExpectedLayer "protected_root" `
+        -ExpectedReason "acl_unreadable"
+    Invoke-DiagnosticCase `
         -Name "resolution-blocked" -Scenario "resolution_failure" `
         -Fixture "exact" -ExpectedExit 1 -ExpectedStatus "blocked" `
         -ExpectedResult "indeterminate" -ExpectedPhase "resolution" `
@@ -308,10 +438,37 @@ try {
         -ExpectedResult "indeterminate" -ExpectedPhase "internal" `
         -ExpectedLevel -1 -ExpectedLayer "ancestor_chain" `
         -ExpectedReason "internal_error"
+    Invoke-DiagnosticCase `
+        -Name "constructor-fallback" -Scenario "constructor_failure" `
+        -Fixture "exact" -ExpectedExit 1 -ExpectedStatus "blocked" `
+        -ExpectedResult "indeterminate" -ExpectedPhase "internal" `
+        -ExpectedLevel -1 -ExpectedLayer "ancestor_chain" `
+        -ExpectedReason "internal_error" -ExpectedLiteralFallback
+    Invoke-DiagnosticCase `
+        -Name "serializer-fallback" -Scenario "serializer_failure" `
+        -Fixture "exact" -ExpectedExit 1 -ExpectedStatus "blocked" `
+        -ExpectedResult "indeterminate" -ExpectedPhase "internal" `
+        -ExpectedLevel -1 -ExpectedLayer "ancestor_chain" `
+        -ExpectedReason "internal_error" -ExpectedLiteralFallback
 
     Write-Host "Windows protected-path diagnostic contract tests passed"
 } finally {
     if (Test-Path -LiteralPath $testRoot) {
+        $cleanupReparsePoints = @(
+            Get-ChildItem -LiteralPath $testRoot -Force -Recurse |
+                Where-Object {
+                    $_.PSIsContainer -and
+                    ($_.Attributes -band [IO.FileAttributes]::ReparsePoint)
+                } |
+                Sort-Object { $_.FullName.Length } -Descending
+        )
+        foreach ($cleanupReparsePoint in $cleanupReparsePoints) {
+            & $env:ComSpec /d /c `
+                "rmdir `"$($cleanupReparsePoint.FullName)`"" | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                throw "Could not remove the diagnostic reparse fixture"
+            }
+        }
         $cleanupDirectories = @(
             Get-ChildItem -LiteralPath $testRoot -Force -Recurse -Directory |
                 Sort-Object { $_.FullName.Length } -Descending

@@ -800,6 +800,7 @@ def test_recovery_json_runner_owns_the_powershell_51_launch_boundary() -> None:
 
 def test_recovery_protected_path_diagnostic_is_read_only_and_redacted() -> None:
     root = ROOT / "connector-service"
+    common = (root / "common.ps1").read_text(encoding="utf-8")
     diagnostic_path = root / "diagnose-recovery-protected-paths.ps1"
     diagnostic_bytes = diagnostic_path.read_bytes()
     diagnostic = diagnostic_bytes.decode("ascii")
@@ -817,6 +818,21 @@ def test_recovery_protected_path_diagnostic_is_read_only_and_redacted() -> None:
     assert '[ValidateSet("exact", "mismatch", "indeterminate")]' in diagnostic
     assert '[ValidateSet("-1", "0", "1")]' in diagnostic
     assert '[ValidateSet("ancestor_chain", "protected_root", "state_root")]' in diagnostic
+    assert "Get-AIChatConnectorCanonicalStatePaths" in diagnostic
+    assert "Get-AIChatPrivateDirectoryTreeCanonicalPaths" in diagnostic
+    assert '"codex-connector-task"' not in diagnostic
+    assert "AICHAT_DIAGNOSTIC_TEST" not in diagnostic
+    assert "function Get-AIChatConnectorCanonicalStatePaths" in common
+    assert "function Get-AIChatPrivateDirectoryTreeCanonicalPaths" in common
+    connector_paths = common[
+        common.index("function Get-AIChatConnectorPaths") :
+    ]
+    assert "Get-AIChatConnectorCanonicalStatePaths" in connector_paths
+    private_tree = common[
+        common.index("function Assert-AIChatPrivateDirectoryTree") :
+        common.index("function Assert-AIChatConnectorDataTree")
+    ]
+    assert "Get-AIChatPrivateDirectoryTreeCanonicalPaths" in private_tree
     for reason in (
         "none",
         "resolution_failed",
@@ -867,9 +883,24 @@ def test_recovery_protected_path_diagnostic_is_read_only_and_redacted() -> None:
     assert 'if ([string]$Value.result -ceq "indeterminate")' in diagnostic
     assert "exit 1" in diagnostic
     assert "exit 0" in diagnostic
+    outer_catch = diagnostic[diagnostic.rindex("} catch {") :]
+    assert "[Console]::Out.WriteLine('{\"contract_version\":1" in outer_catch
+    assert "Complete-AIChatProtectedPathDiagnostic" not in outer_catch
+    assert "New-AIChatProtectedPath" not in outer_catch
+    assert "ConvertTo-" not in outer_catch
     assert "Get-DiagnosticFixtureSnapshot" in contract_test
     assert "$before -cne $after" in contract_test
     assert "sensitiveCanaries" in contract_test
+    assert "$stdout.EndsWith($nativeNewline)" in contract_test
+    assert "$stdout.Substring(" in contract_test
+    assert "TrimEnd" not in contract_test
+    assert "ExpectedLiteralFallback" in contract_test
+    assert 'Scenario "constructor_failure"' in contract_test
+    assert 'Scenario "serializer_failure"' in contract_test
+    assert 'Fixture "ancestor_reparse"' in contract_test
+    assert 'Fixture "state_reparse"' in contract_test
+    assert 'Scenario "owner_mismatch"' in contract_test
+    assert 'Scenario "acl_unreadable"' in contract_test
     assert 'ExpectedStatus "mismatch"' in contract_test
     assert 'ExpectedStatus "blocked"' in contract_test
     assert "test_recovery_protected_paths_diagnostics.ps1" in workflow

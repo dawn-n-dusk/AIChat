@@ -169,6 +169,23 @@ function New-AIChatProtectedPathBlocked {
         -Reason $Reason
 }
 
+function Get-AIChatProtectedPathDiagnosticItem {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    return Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+}
+
+function Get-AIChatProtectedPathDiagnosticAcl {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    return Get-Acl -LiteralPath $Path -ErrorAction Stop
+}
+
+function Get-AIChatProtectedPathDiagnosticOwnerSid {
+    param([Parameter(Mandatory = $true)]$Acl)
+    return $Acl.GetOwner(
+        [Security.Principal.SecurityIdentifier]
+    ).Value
+}
+
 function Test-AIChatProtectedPathLayer {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -185,7 +202,7 @@ function Test-AIChatProtectedPathLayer {
                 -Phase "directory_shape" -Level $Level -Layer $Layer `
                 -Reason "layer_missing"
         }
-        $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+        $item = Get-AIChatProtectedPathDiagnosticItem -Path $Path
     } catch {
         return New-AIChatProtectedPathBlocked `
             -Phase "acl" -Level $Level -Layer $Layer `
@@ -204,10 +221,8 @@ function Test-AIChatProtectedPathLayer {
     }
 
     try {
-        $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
-        $ownerSid = $acl.GetOwner(
-            [Security.Principal.SecurityIdentifier]
-        ).Value
+        $acl = Get-AIChatProtectedPathDiagnosticAcl -Path $Path
+        $ownerSid = Get-AIChatProtectedPathDiagnosticOwnerSid -Acl $acl
     } catch {
         return New-AIChatProtectedPathBlocked `
             -Phase "acl" -Level $Level -Layer $Layer `
@@ -275,10 +290,12 @@ try {
 
     try {
         $currentSid = Get-AIChatCurrentSid
-        $protectedRoot = [IO.Path]::GetFullPath((Get-AIChatProtectedRoot))
-        $stateRoot = [IO.Path]::GetFullPath(
-            (Join-Path $protectedRoot "codex-connector-task")
-        )
+        $connectorCanonical = Get-AIChatConnectorCanonicalStatePaths
+        $treeCanonical = Get-AIChatPrivateDirectoryTreeCanonicalPaths `
+            -Path ([string]$connectorCanonical.StateRoot) `
+            -ProtectedRoot ([string]$connectorCanonical.ProtectedRoot)
+        $protectedRoot = [string]$treeCanonical.ProtectedRoot
+        $stateRoot = [string]$treeCanonical.Target
         $volumeRoot = [IO.Path]::GetPathRoot($protectedRoot)
         if (-not $volumeRoot -or
             $protectedRoot.StartsWith("\\") -or
@@ -358,9 +375,6 @@ try {
             -Layer "state_root" -Reason "none"
     )
 } catch {
-    Complete-AIChatProtectedPathDiagnostic (
-        New-AIChatProtectedPathBlocked `
-            -Phase "internal" -Level -1 -Layer "ancestor_chain" `
-            -Reason "internal_error"
-    )
+    [Console]::Out.WriteLine('{"contract_version":1,"operation":"diagnose_protected_paths","mode":"read_only","success":false,"status":"blocked","result":"indeterminate","phase":"internal","level":-1,"layer":"ancestor_chain","reason":"internal_error","mutation_performed":false,"token_read":false,"journal_read":false,"connector_data_accessed":false,"task_scheduler_accessed":false,"connector_process_accessed":false}')
+    exit 1
 }
