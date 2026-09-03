@@ -737,6 +737,34 @@ For Codex, use only the hardened `connector-service/` flow above. The legacy
 configuration or starts Node, so it cannot bypass the task, sandbox, egress,
 and binary-pinning contract.
 
+## Read-only Codex MCP stdio diagnostic
+
+Use the diagnostic probe when the Codex plugin is enabled but a newly created
+task still cannot call `aichat_identity`:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass `
+  -File .\deploy\windows\diagnose-mcp-stdio.ps1
+```
+
+Before starting a package, the probe compares `codex mcp get aichat` with the
+repository plugin contract: enabled stdio transport, the exact `uvx` command
+and arguments, ordered environment-variable names, and 60/30 second startup
+and tool timeouts. A mismatch exits 2 without starting `uvx`. The probe then
+performs only `initialize`, `notifications/initialized`, `tools/list`, and at
+most one `tools/call` for `aichat_identity`. It does not print the identity
+response, send a Relay message, or write configuration or state.
+
+Stdout is exactly one compact ASCII JSON object. Exit 0 means
+`identity_verified`; exit 1 means a determinate MCP, package, protocol, or tool
+blocker; exit 2 means command attestation, cleanup, or internal state could not
+be proven. `environment_equivalence` remains
+`unproven_cross_process`: matching the launch contract does not prove that a
+separate PowerShell process received the same environment as the Codex App.
+Only fixed status/error enums, stage timings, boolean stderr observation, and
+cleanup state are reported. Child processes are terminated as one process tree
+on timeout or failure.
+
 ## Check, rollback, uninstall
 
 ```powershell

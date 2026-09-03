@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- Add a read-only Windows PowerShell 5.1 MCP stdio diagnostic that first
+  attests the enabled Codex `aichat` command against the repository plugin's
+  exact `uvx` arguments, environment-variable names, and timeouts, then runs
+  the standard MCP initialize/list flow and at most one `aichat_identity`
+  call. It emits one fixed, redacted ASCII JSON contract, never prints the
+  response body or identity fields, never sends Relay messages or writes
+  configuration, and reports cross-process environment equivalence as
+  unproven. Timeout and failure paths terminate the complete child process
+  tree. Windows fixtures cover identity success, timeout cleanup, invalid
+  framing, stderr canaries, command mismatch without package start, and output
+  non-disclosure.
+
 ### Fixed
 
 - Accept the recovery target's valid `verification_failed` plus
