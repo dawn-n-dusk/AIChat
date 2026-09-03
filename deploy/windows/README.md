@@ -750,10 +750,20 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
 Before starting a package, the probe compares `codex mcp get aichat` with the
 repository plugin contract: enabled stdio transport, the exact `uvx` command
 and arguments, ordered environment-variable names, and 60/30 second startup
-and tool timeouts. A mismatch exits 2 without starting `uvx`. The probe then
-performs only `initialize`, `notifications/initialized`, `tools/list`, and at
-most one `tools/call` for `aichat_identity`. It does not print the identity
-response, send a Relay message, or write configuration or state.
+and tool timeouts. A mismatch exits 2 without starting `uvx`. An `uvx`, Git,
+package resolution, import, or adapter-configuration exit before the first MCP
+response is reported as the fixed `package_bootstrap_failed` code, distinct
+from an `initialize` timeout. The probe then performs `initialize`,
+`notifications/initialized`, `tools/list`, an unknown-tool dispatch preflight
+that must return a standard error tool result, and at most one real
+`aichat_identity` call.
+
+The identity result must contain exactly one standard text content item. Its
+JSON is validated in memory for an `agent` object, a non-empty `relay` string,
+and `token_exposed=false`; output contains only the three corresponding boolean
+matches, never the values or response text. Stderr is reduced to the
+`stderr_observed` boolean and is not itself a failure because normal package
+startup may write diagnostics there.
 
 Stdout is exactly one compact ASCII JSON object. Exit 0 means
 `identity_verified`; exit 1 means a determinate MCP, package, protocol, or tool
@@ -762,8 +772,12 @@ be proven. `environment_equivalence` remains
 `unproven_cross_process`: matching the launch contract does not prove that a
 separate PowerShell process received the same environment as the Codex App.
 Only fixed status/error enums, stage timings, boolean stderr observation, and
-cleanup state are reported. Child processes are terminated as one process tree
-on timeout or failure.
+cleanup state are reported. The mutation scope is explicit: AIChat config and
+channels are not mutated and no Relay message is sent, while `uvx` may write
+its package cache during resolution. Child processes are terminated as one
+process tree on timeout or failure. The Windows integration test exercises the
+real `aichat_mcp` FastMCP server and HTTP client against a local fake Relay in
+addition to framing and failure fixtures.
 
 ## Check, rollback, uninstall
 

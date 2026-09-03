@@ -90,7 +90,7 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install Windows package test dependency
-        run: python -m pip install --upgrade pip pytest
+        run: python -m pip install --upgrade pip pytest && python -m pip install ./adapters/mcp
       - name: Run Windows package static tests
         run: python -m pytest deploy/windows/tests/test_windows_package.py -q
       - name: Run protected bootstrap import with Windows PowerShell 5.1

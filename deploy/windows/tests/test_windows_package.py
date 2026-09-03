@@ -245,6 +245,7 @@ def test_mcp_stdio_diagnostic_is_pinned_redacted_and_ci_wired() -> None:
         "notifications/initialized",
         "tools/list",
         "tools/call",
+        "tools/call",
     ]
     assert probe.count('$script:AIChatMcpProbeIdentityCallCount++') == 1
     assert 'name = "aichat_identity"' in probe
@@ -270,11 +271,14 @@ def test_mcp_stdio_diagnostic_is_pinned_redacted_and_ci_wired() -> None:
         "command_attestation_failed",
         "uvx_unavailable",
         "package_start_failed",
+        "package_bootstrap_failed",
         "timeout",
         "invalid_framing",
         "protocol_invalid",
         "identity_tool_missing",
+        "dispatch_preflight_failed",
         "identity_call_failed",
+        "identity_contract_invalid",
         "stderr_output",
         "shutdown_failed",
         "internal_error",
@@ -287,9 +291,18 @@ def test_mcp_stdio_diagnostic_is_pinned_redacted_and_ci_wired() -> None:
         "path_output",
         "token_output",
         "relay_message_sent",
-        "mutation_performed",
+        "aichat_config_mutation_performed",
+        "aichat_channel_mutation_performed",
     ):
         assert f"{field} = $false" in probe
+    assert 'mutation_scope = "aichat_config_and_channel"' in probe
+    assert "package_cache_writes_possible = $true" in probe
+    for field in (
+        "identity_agent_object",
+        "identity_relay_string",
+        "identity_token_not_exposed",
+    ):
+        assert field in probe
     assert "ConvertTo-AIChatAsciiJson" in probe
     assert "[Console]::Out.WriteLine('{\"contract_version\":1" in probe
     for writer in ("Set-Content", "Add-Content", "Out-File", "WriteAllText"):
@@ -301,8 +314,12 @@ def test_mcp_stdio_diagnostic_is_pinned_redacted_and_ci_wired() -> None:
         'Scenario "invalid_framing"',
         'Scenario "stderr"',
         'Scenario "attestation_mismatch"',
+        'Scenario "package_early_exit"',
+        'Scenario "real_fastmcp"',
     ):
         assert scenario in test
+    assert "python -m aichat_mcp.server" in test
+    assert 'self.path != "/v1/me"' in test
     assert "left a child process behind" in test
     assert "exposed a canary" in test
 

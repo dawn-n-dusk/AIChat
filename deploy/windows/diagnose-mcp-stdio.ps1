@@ -19,6 +19,9 @@ $script:AIChatMcpProbeIdentityCallCount = 0
 $script:AIChatMcpProbeForcedCleanup = $false
 $script:AIChatMcpProbeChildRemaining = $false
 $script:AIChatMcpProbeStderrObserved = $false
+$script:AIChatMcpProbeIdentityAgentObject = $false
+$script:AIChatMcpProbeIdentityRelayString = $false
+$script:AIChatMcpProbeIdentityTokenNotExposed = $false
 
 $script:AIChatMcpExpectedSource =
     "git+https://github.com/dawn-n-dusk/AIChat.git@main#subdirectory=adapters/mcp"
@@ -136,11 +139,14 @@ function Set-AIChatMcpProbeFailure {
             "command_attestation_failed",
             "uvx_unavailable",
             "package_start_failed",
+            "package_bootstrap_failed",
             "timeout",
             "invalid_framing",
             "protocol_invalid",
             "identity_tool_missing",
+            "dispatch_preflight_failed",
             "identity_call_failed",
+            "identity_contract_invalid",
             "stderr_output",
             "shutdown_failed",
             "internal_error"
@@ -341,7 +347,16 @@ function Read-AIChatMcpResponse {
             return [pscustomobject]@{ success = $false; code = "timeout"; value = $null }
         }
         $line = $readTask.Result
-        if ($null -eq $line -or $line.Length -eq 0 -or $line.Length -gt 1048576) {
+        if ($null -eq $line) {
+            $earlyExit = $false
+            try { $earlyExit = $Process.HasExited } catch { }
+            return [pscustomobject]@{
+                success = $false
+                code = $(if ($earlyExit) { "process_early_exit" } else { "invalid_framing" })
+                value = $null
+            }
+        }
+        if ($line.Length -eq 0 -or $line.Length -gt 1048576) {
             return [pscustomobject]@{ success = $false; code = "invalid_framing"; value = $null }
         }
         $frameCount++
@@ -360,9 +375,10 @@ function Read-AIChatMcpResponse {
         }
         if ($value.PSObject.Properties["id"]) {
             $idIsInteger = $value.id -is [int] -or $value.id -is [long]
+            $hasResult = $null -ne $value.PSObject.Properties["result"]
+            $hasError = $null -ne $value.PSObject.Properties["error"]
             if (-not $idIsInteger -or [long]$value.id -ne [long]$ExpectedId -or
-                $value.PSObject.Properties["error"] -or
-                -not $value.PSObject.Properties["result"]) {
+                $hasResult -eq $hasError) {
                 return [pscustomobject]@{ success = $false; code = "protocol_invalid"; value = $null }
             }
             return [pscustomobject]@{ success = $true; code = "none"; value = $value }
@@ -450,26 +466,48 @@ try {
     }
 
     $initializeTimer = [Diagnostics.Stopwatch]::StartNew()
-    Send-AIChatMcpMessage `
-        -Process $script:AIChatMcpProbeProcess `
-        -Value ([pscustomobject][ordered]@{
-            jsonrpc = "2.0"
-            id = 1
-            method = "initialize"
-            params = [pscustomobject][ordered]@{
-                protocolVersion = "2025-06-18"
-                capabilities = [pscustomobject]@{}
-                clientInfo = [pscustomobject][ordered]@{
-                    name = "aichat-windows-stdio-diagnostic"
-                    version = "1.0"
+    try {
+        Send-AIChatMcpMessage `
+            -Process $script:AIChatMcpProbeProcess `
+            -Value ([pscustomobject][ordered]@{
+                jsonrpc = "2.0"
+                id = 1
+                method = "initialize"
+                params = [pscustomobject][ordered]@{
+                    protocolVersion = "2025-06-18"
+                    capabilities = [pscustomobject]@{}
+                    clientInfo = [pscustomobject][ordered]@{
+                        name = "aichat-windows-stdio-diagnostic"
+                        version = "1.0"
+                    }
                 }
-            }
-        })
+            })
+    } catch {
+        $exitedBeforeInitialize = $false
+        try { $exitedBeforeInitialize = $script:AIChatMcpProbeProcess.HasExited } catch { }
+        if ($exitedBeforeInitialize) {
+            Set-AIChatMcpProbeStage `
+                -Name "package_start" -Status "failed" `
+                -ElapsedMilliseconds $launchTimer.ElapsedMilliseconds
+            Set-AIChatMcpProbeFailure `
+                -ErrorCode "package_bootstrap_failed" -Stage "package_start"
+            throw "MCP package exited before protocol startup"
+        }
+        throw
+    }
     $initializeResponse = Read-AIChatMcpResponse `
         -Process $script:AIChatMcpProbeProcess `
         -ExpectedId 1 `
         -TimeoutMilliseconds $StartupTimeoutMilliseconds
     if (-not $initializeResponse.success) {
+        if ([string]$initializeResponse.code -ceq "process_early_exit") {
+            Set-AIChatMcpProbeStage `
+                -Name "package_start" -Status "failed" `
+                -ElapsedMilliseconds $launchTimer.ElapsedMilliseconds
+            Set-AIChatMcpProbeFailure `
+                -ErrorCode "package_bootstrap_failed" -Stage "package_start"
+            throw "MCP package exited before protocol startup"
+        }
         Set-AIChatMcpProbeStage `
             -Name "initialize" -Status "failed" `
             -ElapsedMilliseconds $initializeTimer.ElapsedMilliseconds
@@ -477,7 +515,9 @@ try {
             -ErrorCode ([string]$initializeResponse.code) -Stage "initialize"
         throw "MCP initialize failed"
     }
-    $initializeResult = $initializeResponse.value.result
+    $initializeResult = if ($initializeResponse.value.PSObject.Properties["result"]) {
+        $initializeResponse.value.result
+    } else { $null }
     if ($null -eq $initializeResult -or
         -not $initializeResult.PSObject.Properties["protocolVersion"] -or
         -not [string]$initializeResult.protocolVersion -or
@@ -523,10 +563,18 @@ try {
             -Name "tools_list" -Status "failed" `
             -ElapsedMilliseconds $toolsTimer.ElapsedMilliseconds
         Set-AIChatMcpProbeFailure `
-            -ErrorCode ([string]$toolsResponse.code) -Stage "tools_list"
+            -ErrorCode $(if ($toolsResponse.code -ceq "timeout") {
+                "timeout"
+            } elseif ($toolsResponse.code -ceq "invalid_framing") {
+                "invalid_framing"
+            } else {
+                "protocol_invalid"
+            }) -Stage "tools_list"
         throw "MCP tools/list failed"
     }
-    $toolsResult = $toolsResponse.value.result
+    $toolsResult = if ($toolsResponse.value.PSObject.Properties["result"]) {
+        $toolsResponse.value.result
+    } else { $null }
     if ($null -eq $toolsResult -or
         -not $toolsResult.PSObject.Properties["tools"] -or
         $null -eq $toolsResult.tools) {
@@ -555,7 +603,6 @@ try {
         -ElapsedMilliseconds $toolsTimer.ElapsedMilliseconds
 
     $dispatchTimer = [Diagnostics.Stopwatch]::StartNew()
-    $script:AIChatMcpProbeIdentityCallCount++
     Send-AIChatMcpMessage `
         -Process $script:AIChatMcpProbeProcess `
         -Value ([pscustomobject][ordered]@{
@@ -563,20 +610,60 @@ try {
             id = 3
             method = "tools/call"
             params = [pscustomobject][ordered]@{
-                name = "aichat_identity"
+                name = "aichat_diagnostic_unknown_tool"
                 arguments = [pscustomobject]@{}
             }
         })
+    $dispatchResponse = Read-AIChatMcpResponse `
+        -Process $script:AIChatMcpProbeProcess `
+        -ExpectedId 3 `
+        -TimeoutMilliseconds $ToolTimeoutMilliseconds
+    $dispatchResult = if ($dispatchResponse.success -and
+        $dispatchResponse.value.PSObject.Properties["result"]) {
+        $dispatchResponse.value.result
+    } else { $null }
+    $dispatchContent = if ($null -ne $dispatchResult -and
+        $dispatchResult.PSObject.Properties["content"]) {
+        @($dispatchResult.content)
+    } else { @() }
+    if (-not $dispatchResponse.success -or $null -eq $dispatchResult -or
+        -not $dispatchResult.PSObject.Properties["isError"] -or
+        -not [bool]$dispatchResult.isError -or
+        $dispatchContent.Count -ne 1 -or
+        -not $dispatchContent[0].PSObject.Properties["type"] -or
+        [string]$dispatchContent[0].type -cne "text" -or
+        -not $dispatchContent[0].PSObject.Properties["text"] -or
+        -not ([string]$dispatchContent[0].text)) {
+        Set-AIChatMcpProbeStage `
+            -Name "dispatch" -Status "failed" `
+            -ElapsedMilliseconds $dispatchTimer.ElapsedMilliseconds
+        Set-AIChatMcpProbeFailure `
+            -ErrorCode "dispatch_preflight_failed" -Stage "dispatch"
+        throw "MCP unknown-tool dispatch preflight failed"
+    }
     Set-AIChatMcpProbeStage `
         -Name "dispatch" -Status "ok" `
         -ElapsedMilliseconds $dispatchTimer.ElapsedMilliseconds
 
     $identityTimer = [Diagnostics.Stopwatch]::StartNew()
+    $script:AIChatMcpProbeIdentityCallCount++
+    Send-AIChatMcpMessage `
+        -Process $script:AIChatMcpProbeProcess `
+        -Value ([pscustomobject][ordered]@{
+            jsonrpc = "2.0"
+            id = 4
+            method = "tools/call"
+            params = [pscustomobject][ordered]@{
+                name = "aichat_identity"
+                arguments = [pscustomobject]@{}
+            }
+        })
     $identityResponse = Read-AIChatMcpResponse `
         -Process $script:AIChatMcpProbeProcess `
-        -ExpectedId 3 `
+        -ExpectedId 4 `
         -TimeoutMilliseconds $ToolTimeoutMilliseconds
-    if (-not $identityResponse.success) {
+    if (-not $identityResponse.success -or
+        -not $identityResponse.value.PSObject.Properties["result"]) {
         Set-AIChatMcpProbeStage `
             -Name "identity" -Status "failed" `
             -ElapsedMilliseconds $identityTimer.ElapsedMilliseconds
@@ -607,14 +694,48 @@ try {
         -not $identityResult.PSObject.Properties["content"] -or
         ($identityResult.PSObject.Properties["isError"] -and
         [bool]$identityResult.isError) -or
-        $identityContent.Count -lt 1) {
+        $identityContent.Count -ne 1 -or
+        -not $identityContent[0].PSObject.Properties["type"] -or
+        [string]$identityContent[0].type -cne "text" -or
+        -not $identityContent[0].PSObject.Properties["text"] -or
+        -not ([string]$identityContent[0].text)) {
         Set-AIChatMcpProbeStage `
             -Name "result_frame" -Status "failed" `
             -ElapsedMilliseconds $resultTimer.ElapsedMilliseconds
         Set-AIChatMcpProbeFailure `
-            -ErrorCode "identity_call_failed" -Stage "result_frame"
+            -ErrorCode "identity_contract_invalid" -Stage "result_frame"
         throw "MCP identity result failed"
     }
+    try {
+        $identityPayload = ([string]$identityContent[0].text) |
+            ConvertFrom-Json -ErrorAction Stop
+    } catch {
+        $identityPayload = $null
+    }
+    $identityAgentObject = $null -ne $identityPayload -and
+        $identityPayload.PSObject.Properties["agent"] -and
+        $null -ne $identityPayload.agent -and
+        $identityPayload.agent -is [pscustomobject]
+    $identityRelayString = $null -ne $identityPayload -and
+        $identityPayload.PSObject.Properties["relay"] -and
+        $identityPayload.relay -is [string] -and
+        ([string]$identityPayload.relay).Length -gt 0
+    $identityTokenNotExposed = $null -ne $identityPayload -and
+        $identityPayload.PSObject.Properties["token_exposed"] -and
+        $identityPayload.token_exposed -is [bool] -and
+        -not [bool]$identityPayload.token_exposed
+    if (-not $identityAgentObject -or -not $identityRelayString -or
+        -not $identityTokenNotExposed) {
+        Set-AIChatMcpProbeStage `
+            -Name "result_frame" -Status "failed" `
+            -ElapsedMilliseconds $resultTimer.ElapsedMilliseconds
+        Set-AIChatMcpProbeFailure `
+            -ErrorCode "identity_contract_invalid" -Stage "result_frame"
+        throw "MCP identity payload contract failed"
+    }
+    $script:AIChatMcpProbeIdentityAgentObject = $true
+    $script:AIChatMcpProbeIdentityRelayString = $true
+    $script:AIChatMcpProbeIdentityTokenNotExposed = $true
     Set-AIChatMcpProbeStage `
         -Name "result_frame" -Status "ok" `
         -ElapsedMilliseconds $resultTimer.ElapsedMilliseconds
@@ -678,17 +799,6 @@ try {
             -Name "shutdown" -Status "ok" `
             -ElapsedMilliseconds $shutdownTimer.ElapsedMilliseconds
     }
-    if ($script:AIChatMcpProbeStderrObserved -and
-        $script:AIChatMcpProbeErrorCode -ceq "none") {
-        $resultFrameStage = @($script:AIChatMcpProbeStages | Where-Object {
-            [string]$_.name -ceq "result_frame"
-        })[0]
-        Set-AIChatMcpProbeStage `
-            -Name "result_frame" -Status "failed" `
-            -ElapsedMilliseconds ([long]$resultFrameStage.elapsed_ms)
-        Set-AIChatMcpProbeFailure `
-            -ErrorCode "stderr_output" -Stage "result_frame"
-    }
 }
 
 try {
@@ -715,6 +825,9 @@ try {
         environment_equivalence = "unproven_cross_process"
         stages = @($script:AIChatMcpProbeStages)
         identity_call_count = [int]$script:AIChatMcpProbeIdentityCallCount
+        identity_agent_object = [bool]$script:AIChatMcpProbeIdentityAgentObject
+        identity_relay_string = [bool]$script:AIChatMcpProbeIdentityRelayString
+        identity_token_not_exposed = [bool]$script:AIChatMcpProbeIdentityTokenNotExposed
         stderr_observed = [bool]$script:AIChatMcpProbeStderrObserved
         cleanup_forced = [bool]$script:AIChatMcpProbeForcedCleanup
         child_processes_remaining = [bool]$script:AIChatMcpProbeChildRemaining
@@ -724,7 +837,10 @@ try {
         path_output = $false
         token_output = $false
         relay_message_sent = $false
-        mutation_performed = $false
+        mutation_scope = "aichat_config_and_channel"
+        aichat_config_mutation_performed = $false
+        aichat_channel_mutation_performed = $false
+        package_cache_writes_possible = $true
     }
     [Console]::Out.WriteLine((ConvertTo-AIChatAsciiJson -Value $result))
     if ($success) { exit 0 }
@@ -739,6 +855,6 @@ try {
             # The literal fallback remains conservative about cleanup state.
         }
     }
-    [Console]::Out.WriteLine('{"contract_version":1,"operation":"diagnose_mcp_stdio","mode":"read_only","success":false,"status":"indeterminate","failed_stage":"internal","error_code":"internal_error","command_attested":false,"environment_equivalence":"unproven_cross_process","stages":[{"name":"command_attestation","status":"skipped","elapsed_ms":0},{"name":"package_start","status":"skipped","elapsed_ms":0},{"name":"initialize","status":"skipped","elapsed_ms":0},{"name":"initialized","status":"skipped","elapsed_ms":0},{"name":"tools_list","status":"skipped","elapsed_ms":0},{"name":"dispatch","status":"skipped","elapsed_ms":0},{"name":"identity","status":"skipped","elapsed_ms":0},{"name":"result_frame","status":"skipped","elapsed_ms":0},{"name":"shutdown","status":"failed","elapsed_ms":0}],"identity_call_count":0,"stderr_observed":false,"cleanup_forced":true,"child_processes_remaining":true,"response_body_output":false,"agent_id_output":false,"server_output":false,"path_output":false,"token_output":false,"relay_message_sent":false,"mutation_performed":false}')
+    [Console]::Out.WriteLine('{"contract_version":1,"operation":"diagnose_mcp_stdio","mode":"read_only","success":false,"status":"indeterminate","failed_stage":"internal","error_code":"internal_error","command_attested":false,"environment_equivalence":"unproven_cross_process","stages":[{"name":"command_attestation","status":"skipped","elapsed_ms":0},{"name":"package_start","status":"skipped","elapsed_ms":0},{"name":"initialize","status":"skipped","elapsed_ms":0},{"name":"initialized","status":"skipped","elapsed_ms":0},{"name":"tools_list","status":"skipped","elapsed_ms":0},{"name":"dispatch","status":"skipped","elapsed_ms":0},{"name":"identity","status":"skipped","elapsed_ms":0},{"name":"result_frame","status":"skipped","elapsed_ms":0},{"name":"shutdown","status":"failed","elapsed_ms":0}],"identity_call_count":0,"identity_agent_object":false,"identity_relay_string":false,"identity_token_not_exposed":false,"stderr_observed":false,"cleanup_forced":true,"child_processes_remaining":true,"response_body_output":false,"agent_id_output":false,"server_output":false,"path_output":false,"token_output":false,"relay_message_sent":false,"mutation_scope":"aichat_config_and_channel","aichat_config_mutation_performed":false,"aichat_channel_mutation_performed":false,"package_cache_writes_possible":true}')
     exit 2
 }
