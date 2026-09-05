@@ -54,6 +54,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Observe queued Codex connector recovery rejections after overlapping wakes,
+  reporting `AICHAT_CONNECTOR_QUEUED_RECOVERY_FAILED` with phase `queued-recovery`
+  instead of leaking raw exceptions through an unhandled rejection. Preserve
+  caller rejection, scheduling, deduplication, and durable state; add actual-CLI
+  and connector regressions without process-wide rejection handlers.
+
 - Accept the recovery target's valid `verification_failed` plus
   `protected_paths_invalid` result for verify, repair, and finalize instead of
   incorrectly replacing it with `target_contract_invalid`. Runner failure

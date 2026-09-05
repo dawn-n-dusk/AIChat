@@ -11,6 +11,7 @@ import sys
 import threading
 import time
 from urllib.parse import quote, quote_plus
+import xml.etree.ElementTree as element_tree
 
 import pytest
 
@@ -46,6 +47,7 @@ class Code(str, Enum):
     READ = "STDIO_READ_FAILED"
     TIMEOUT = "RESPONSE_TIMEOUT"
     EARLY_EXIT = "CHILD_EARLY_EXIT"
+    STDOUT_CLOSED_RUNNING = "STDOUT_CLOSED_PROCESS_RUNNING"
     STDOUT_LIMIT = "STDOUT_LIMIT_EXCEEDED"
     STDERR_LIMIT = "STDERR_LIMIT_EXCEEDED"
     FRAME = "STDOUT_INVALID_JSONL"
@@ -68,23 +70,53 @@ class Code(str, Enum):
     EXIT = "NATIVE_EXIT_NONZERO"
     TRAILING = "UNEXPECTED_STDOUT_AFTER_RESPONSES"
     UNREAPED = "CHILD_NOT_REAPED"
+    CLEANUP_TIMEOUT = "CLEANUP_EXIT_TIMEOUT"
+    FORCED_CLEANUP = "UNEXPECTED_FORCED_CLEANUP"
     THREAD = "IO_THREAD_NOT_JOINED"
     ISOLATION = "SANDBOX_ISOLATION_FAILED"
     EXPECTED_FAILURE = "HARNESS_EXPECTED_FAILURE_MISSING"
     WRONG_FAILURE = "HARNESS_FAILURE_CODE_MISMATCH"
+    DIAGNOSTIC = "DIAGNOSTIC_FIELDS_INVALID"
 
 
 class ProbeFailure(AssertionError):
-    def __init__(self, phase: Phase, code: Code) -> None:
+    def __init__(
+        self,
+        phase: Phase,
+        code: Code,
+        *,
+        expected_exit: int | None = None,
+        actual_exit: int | None = None,
+    ) -> None:
+        __tracebackhide__ = True
+        if type(phase) is not Phase or type(code) is not Code or any(
+            value is not None and (type(value) is not int or not -(2**31) <= value < 2**32)
+            for value in (expected_exit, actual_exit)
+        ):
+            raise ProbeFailure(Phase.HARNESS, Code.DIAGNOSTIC) from None
         self.phase = phase
         self.code = code
-        super().__init__(json.dumps({"phase": phase.value, "safeFailureCode": code.value}))
+        self.expected_exit = expected_exit
+        self.actual_exit = actual_exit
+        super().__init__(json.dumps({
+            "phase": phase.value,
+            "safeFailureCode": code.value,
+            "expectedExitCode": expected_exit,
+            "actualExitCode": actual_exit,
+        }))
 
 
-def require(condition: bool, phase: Phase, code: Code) -> None:
+def require(
+    condition: bool,
+    phase: Phase,
+    code: Code,
+    *,
+    expected_exit: int | None = None,
+    actual_exit: int | None = None,
+) -> None:
     __tracebackhide__ = True
     if not condition:
-        raise ProbeFailure(phase, code)
+        raise ProbeFailure(phase, code, expected_exit=expected_exit, actual_exit=actual_exit)
 
 
 @contextmanager
@@ -99,14 +131,21 @@ def safe_boundary(phase: Phase):
 
 
 @contextmanager
-def expect_failure(phase: Phase, code: Code):
+def expect_failure(phase: Phase, code: Code, *, expected_exit=None, actual_exit=None):
     __tracebackhide__ = True
+    caught = []
     try:
-        yield
+        yield caught
     except ProbeFailure as failure:
+        caught.append(failure)
         require(failure.phase is phase and failure.code is code, Phase.HARNESS, Code.WRONG_FAILURE)
         require(
-            json.loads(str(failure)) == {"phase": phase.value, "safeFailureCode": code.value},
+            json.loads(str(failure)) == {
+                "phase": phase.value,
+                "safeFailureCode": code.value,
+                "expectedExitCode": expected_exit,
+                "actualExitCode": actual_exit,
+            },
             Phase.HARNESS,
             Code.WRONG_FAILURE,
         )
@@ -229,6 +268,7 @@ class StdioChild:
         self.read_failed = False
         self.cursor = 0
         self.forced_cleanup = False
+        self.stdout_exit_waited = False
         self.workers: list[threading.Thread] = []
         self.arguments = [sys.executable, "-I", "-B", "-u"]
         if mode is None:
@@ -306,6 +346,7 @@ class StdioChild:
 
     def receive(self, phase: Phase, timeout: float = IO_TIMEOUT) -> dict:
         deadline = time.monotonic() + timeout
+        raw = None
         with self.condition:
             while True:
                 self._check_capture(phase)
@@ -314,10 +355,22 @@ class StdioChild:
                     raw = bytes(self.capture["stdout"][self.cursor:newline])
                     self.cursor = newline + 1
                     break
-                require("stdout" not in self.eof, phase, Code.EARLY_EXIT)
+                if "stdout" in self.eof:
+                    break
                 remaining = deadline - time.monotonic()
                 require(remaining > 0, phase, Code.TIMEOUT)
                 self.condition.wait(remaining)
+        if raw is None:
+            self.stdout_exit_waited = True
+            try:
+                return_code = self.process.wait(
+                    timeout=max(0, min(CLEANUP_TIMEOUT, deadline - time.monotonic()))
+                )
+            except subprocess.TimeoutExpired:
+                raise ProbeFailure(
+                    phase, Code.STDOUT_CLOSED_RUNNING, expected_exit=0, actual_exit=None
+                ) from None
+            raise ProbeFailure(phase, Code.EARLY_EXIT, expected_exit=0, actual_exit=return_code)
         try:
             frame = json.loads(raw.decode("utf-8"))
         except Exception:
@@ -338,8 +391,10 @@ class StdioChild:
             try:
                 return_code = self.process.wait(timeout=CLEANUP_TIMEOUT)
             except subprocess.TimeoutExpired:
-                raise ProbeFailure(Phase.SHUTDOWN, Code.EOF_TIMEOUT) from None
-            require(return_code == 0, Phase.SHUTDOWN, Code.EXIT)
+                raise ProbeFailure(
+                    Phase.SHUTDOWN, Code.EOF_TIMEOUT, expected_exit=0, actual_exit=None
+                ) from None
+            require(return_code == 0, Phase.SHUTDOWN, Code.EXIT, expected_exit=0, actual_exit=return_code)
             self._join_workers()
             with self.condition:
                 self._check_capture(Phase.SHUTDOWN)
@@ -375,6 +430,14 @@ class StdioChild:
 
     def close(self) -> None:
         with safe_boundary(Phase.CLEANUP):
+            with self.condition:
+                stdout_closed = "stdout" in self.eof
+            if stdout_closed and not self.stdout_exit_waited and self.process.poll() is None:
+                self.stdout_exit_waited = True
+                try:
+                    self.process.wait(timeout=CLEANUP_TIMEOUT)
+                except subprocess.TimeoutExpired:
+                    pass
             if self.process.poll() is None:
                 self.forced_cleanup = True
                 self.process.terminate()
@@ -385,7 +448,9 @@ class StdioChild:
                     try:
                         self.process.wait(timeout=CLEANUP_TIMEOUT)
                     except subprocess.TimeoutExpired:
-                        raise ProbeFailure(Phase.CLEANUP, Code.UNREAPED) from None
+                        raise ProbeFailure(
+                            Phase.CLEANUP, Code.CLEANUP_TIMEOUT, expected_exit=None, actual_exit=None
+                        ) from None
             self._join_workers()
             for name in ("stdin", "stdout", "stderr"):
                 getattr(self.process, name).close()
@@ -486,7 +551,7 @@ def test_production_stdio_initialize_tools_identity_and_native_exit(tmp_path, mo
                 "token_exposed": False,
             })
             child.finish()
-        require(not child.forced_cleanup, Phase.SHUTDOWN, Code.EXIT)
+        require(not child.forced_cleanup, Phase.SHUTDOWN, Code.FORCED_CLEANUP, expected_exit=0, actual_exit=child.process.returncode)
         relay.check(1)
 
 
@@ -515,13 +580,14 @@ def test_production_stdio_identity_errors_are_tool_errors_and_redacted(tmp_path,
             recovery = child.request("tools/list", "after-error", Phase.TOOLS, {})
             require(type(recovery.get("tools")) is list and len(recovery["tools"]) == 5, Phase.TOOLS, Code.TOOLS)
             child.finish()
-        require(not child.forced_cleanup, Phase.SHUTDOWN, Code.EXIT)
+        require(not child.forced_cleanup, Phase.SHUTDOWN, Code.FORCED_CLEANUP, expected_exit=0, actual_exit=child.process.returncode)
         relay.check(1)
 
 
 @pytest.mark.parametrize("mode,code", [
     ("silent", Code.TIMEOUT),
     ("early-exit", Code.EARLY_EXIT),
+    ("stdout-close-then-exit", Code.EARLY_EXIT),
     ("stdout-noise", Code.FRAME),
     ("stdout-flood", Code.STDOUT_LIMIT),
     ("stderr-flood", Code.STDERR_LIMIT),
@@ -534,13 +600,22 @@ def test_harness_bounds_fake_child_failure_and_reaps_pid(tmp_path, mode, code):
             ready = response_result(child.receive(Phase.SPAWN), 0, Phase.SPAWN)
             require(ready == {"ready": True}, Phase.SPAWN, Code.RESULT)
             child.send({"run": True}, Phase.HARNESS)
-            with expect_failure(Phase.HARNESS, code):
+            native_exit = mode in {"early-exit", "stdout-close-then-exit"}
+            with expect_failure(
+                Phase.HARNESS, code,
+                expected_exit=0 if native_exit else None,
+                actual_exit=17 if native_exit else None,
+            ):
                 child.receive(Phase.HARNESS, timeout=0.25 if mode == "silent" else IO_TIMEOUT)
         child.check_reaped()
         require(time.monotonic() - started < 2 * IO_TIMEOUT + 4 * CLEANUP_TIMEOUT, Phase.HARNESS, Code.TIMEOUT)
         require(all(len(value) <= CAPTURE_LIMIT for value in child.capture.values()), Phase.HARNESS, Code.STDOUT_LIMIT)
-        if mode == "early-exit":
-            require(child.process.returncode == 17 and not child.forced_cleanup, Phase.HARNESS, Code.EXIT)
+        if mode in {"early-exit", "stdout-close-then-exit"}:
+            require(
+                child.process.returncode == 17, Phase.HARNESS, Code.EXIT,
+                expected_exit=17, actual_exit=child.process.returncode,
+            )
+            require(not child.forced_cleanup, Phase.CLEANUP, Code.FORCED_CLEANUP, actual_exit=child.process.returncode)
         else:
             require(child.forced_cleanup, Phase.HARNESS, Code.UNREAPED)
 
@@ -555,13 +630,134 @@ def test_harness_native_exit_failure_is_distinct_and_cleanup_reaps_pid(tmp_path,
         started = time.monotonic()
         with StdioChild(tmp_path, environment, mode) as child:
             response_result(child.receive(Phase.SPAWN), 0, Phase.SPAWN)
-            with expect_failure(Phase.SHUTDOWN, code):
+            with expect_failure(
+                Phase.SHUTDOWN, code, expected_exit=0, actual_exit=None if forced else 19
+            ) as caught:
                 child.finish()
         child.check_reaped()
         require(child.forced_cleanup is forced, Phase.HARNESS, Code.UNREAPED)
         if not forced:
-            require(child.process.returncode == 19, Phase.HARNESS, Code.EXIT)
+            require(
+                child.process.returncode == 19, Phase.HARNESS, Code.EXIT,
+                expected_exit=19, actual_exit=child.process.returncode,
+            )
+        else:
+            require(caught[0].actual_exit is None, Phase.HARNESS, Code.DIAGNOSTIC)
         require(time.monotonic() - started < IO_TIMEOUT + 4 * CLEANUP_TIMEOUT, Phase.HARNESS, Code.TIMEOUT)
+
+
+def test_stdout_closed_but_alive_is_not_reported_as_native_exit(tmp_path):
+    with safe_boundary(Phase.HARNESS):
+        environment = sandbox_environment(tmp_path, "http://127.0.0.1:1", "file")
+        started = time.monotonic()
+        with StdioChild(tmp_path, environment, "stdout-closed-alive") as child:
+            response_result(child.receive(Phase.SPAWN), 0, Phase.SPAWN)
+            child.send({"run": True}, Phase.HARNESS)
+            with expect_failure(
+                Phase.HARNESS, Code.STDOUT_CLOSED_RUNNING, expected_exit=0, actual_exit=None
+            ) as caught:
+                child.receive(Phase.HARNESS)
+            require(child.process.poll() is None, Phase.HARNESS, Code.WRONG_FAILURE)
+        child.check_reaped()
+        require(child.forced_cleanup, Phase.CLEANUP, Code.UNREAPED)
+        require(caught[0].actual_exit is None, Phase.HARNESS, Code.DIAGNOSTIC)
+        require(time.monotonic() - started < IO_TIMEOUT + 4 * CLEANUP_TIMEOUT, Phase.HARNESS, Code.TIMEOUT)
+
+
+def test_cleanup_waits_for_observed_stdout_eof_before_terminating(tmp_path):
+    with safe_boundary(Phase.HARNESS):
+        environment = sandbox_environment(tmp_path, "http://127.0.0.1:1", "file")
+        started = time.monotonic()
+        with StdioChild(tmp_path, environment, "stdout-close-then-exit") as child:
+            response_result(child.receive(Phase.SPAWN), 0, Phase.SPAWN)
+            child.send({"run": True}, Phase.HARNESS)
+            with child.condition:
+                require(
+                    child.condition.wait_for(lambda: "stdout" in child.eof, IO_TIMEOUT),
+                    Phase.HARNESS, Code.TIMEOUT,
+                )
+        child.check_reaped()
+        require(not child.forced_cleanup, Phase.CLEANUP, Code.FORCED_CLEANUP, actual_exit=child.process.returncode)
+        require(child.process.returncode == 17, Phase.HARNESS, Code.EXIT, expected_exit=17, actual_exit=child.process.returncode)
+        require(time.monotonic() - started < IO_TIMEOUT + 4 * CLEANUP_TIMEOUT, Phase.HARNESS, Code.TIMEOUT)
+
+
+def test_fake_child_cleanup_wait_failure_has_its_own_unknown_exit_diagnostic(tmp_path, monkeypatch):
+    def unavailable_wait(*args, **kwargs):
+        raise subprocess.TimeoutExpired("synthetic-wait", CLEANUP_TIMEOUT)
+
+    with safe_boundary(Phase.HARNESS):
+        environment = sandbox_environment(tmp_path, "http://127.0.0.1:1", "file")
+        with StdioChild(tmp_path, environment, "silent") as child:
+            response_result(child.receive(Phase.SPAWN), 0, Phase.SPAWN)
+            with monkeypatch.context() as patch:
+                patch.setattr(child.process, "wait", unavailable_wait)
+                with expect_failure(Phase.CLEANUP, Code.CLEANUP_TIMEOUT) as caught:
+                    child.close()
+        child.check_reaped()
+        require(caught[0].actual_exit is None, Phase.HARNESS, Code.DIAGNOSTIC)
+
+
+@pytest.mark.parametrize("field", ["expected_exit", "actual_exit"])
+def test_exit_diagnostics_reject_non_native_integer_values(field):
+    class IntegerSubclass(int):
+        pass
+
+    for value in (True, False, 17.0, "19", {}, [], IntegerSubclass(17), 2**32, -(2**31) - 1):
+        with expect_failure(Phase.HARNESS, Code.DIAGNOSTIC):
+            ProbeFailure(Phase.SHUTDOWN, Code.EXIT, **{field: value})
+
+
+def test_exit_diagnostics_allow_only_four_typed_fields():
+    for actual in (None, -(2**31), -15, 0, 17, 19, 2**32 - 1):
+        diagnostic = json.loads(str(ProbeFailure(Phase.SHUTDOWN, Code.EXIT, expected_exit=0, actual_exit=actual)))
+        require(set(diagnostic) == {"phase", "safeFailureCode", "expectedExitCode", "actualExitCode"}, Phase.HARNESS, Code.DIAGNOSTIC)
+        require(type(diagnostic["expectedExitCode"]) is int and diagnostic["expectedExitCode"] == 0, Phase.HARNESS, Code.DIAGNOSTIC)
+        require(type(diagnostic["actualExitCode"]) is type(actual) and diagnostic["actualExitCode"] == actual, Phase.HARNESS, Code.DIAGNOSTIC)
+
+
+def test_exit_diagnostics_reject_arbitrary_metadata_and_untrusted_labels():
+    for phase, code in (("untrusted-phase", Code.EXIT), (Phase.SHUTDOWN, "AICHAT_UNTRUSTED")):
+        with expect_failure(Phase.HARNESS, Code.DIAGNOSTIC):
+            ProbeFailure(phase, code)
+    with expect_failure(Phase.HARNESS, Code.INTERNAL):
+        with safe_boundary(Phase.HARNESS):
+            ProbeFailure(Phase.SHUTDOWN, Code.EXIT, metadata={"private": "synthetic-metadata"})
+
+
+def test_real_pytest_junit_preserves_native_exit_17_and_19_as_safe_integers(tmp_path):
+    with safe_boundary(Phase.HARNESS):
+        environment = sandbox_environment(tmp_path, "http://127.0.0.1:1", "file")
+        with StdioChild(tmp_path, environment, "junit-native-exits") as child:
+            response_result(child.receive(Phase.SPAWN), 0, Phase.SPAWN)
+            child.send({"run": True}, Phase.HARNESS)
+            try:
+                return_code = child.process.wait(timeout=IO_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                raise ProbeFailure(Phase.HARNESS, Code.TIMEOUT, expected_exit=1, actual_exit=None) from None
+            require(return_code == 1, Phase.HARNESS, Code.EXIT, expected_exit=1, actual_exit=return_code)
+        child.check_redaction()
+        with child.condition:
+            child._check_capture(Phase.HARNESS)
+        report = (tmp_path / "native-exit-report.xml").read_text(encoding="utf-8")
+        for value in (TOKEN, quote(TOKEN, safe=""), quote_plus(TOKEN)):
+            require(value not in report, Phase.HARNESS, Code.REDACTION)
+        document = element_tree.fromstring(report)
+        failures = document.findall(".//failure")
+        require(len(document.findall(".//testcase")) == len(failures) == 2, Phase.HARNESS, Code.RESULT)
+        require(not any(document.findall(f".//{name}") for name in ("error", "skipped", "system-out", "system-err")), Phase.HARNESS, Code.RESULT)
+        diagnostics = {}
+        for failure in failures:
+            message = failure.get("message", "")
+            diagnostic = json.loads(message[message.index("{"):])
+            require(set(diagnostic) == {"phase", "safeFailureCode", "expectedExitCode", "actualExitCode"}, Phase.HARNESS, Code.DIAGNOSTIC)
+            require(type(diagnostic["expectedExitCode"]) is int and diagnostic["expectedExitCode"] == 0, Phase.HARNESS, Code.DIAGNOSTIC)
+            require(type(diagnostic["actualExitCode"]) is int, Phase.HARNESS, Code.DIAGNOSTIC)
+            diagnostics[diagnostic["safeFailureCode"]] = (diagnostic["phase"], diagnostic["actualExitCode"])
+        require(diagnostics == {
+            Code.EARLY_EXIT.value: (Phase.HARNESS.value, 17),
+            Code.EXIT.value: (Phase.SHUTDOWN.value, 19),
+        }, Phase.HARNESS, Code.DIAGNOSTIC)
 
 
 @pytest.mark.parametrize("frame,code", [

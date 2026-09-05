@@ -82,6 +82,10 @@ See [adapter capabilities and installation](docs/adapters.md), the [Codex connec
 
 The primary proactive-delivery path is the local, event-driven [`codex-connector`](adapters/codex-connector/README.md). It consumes relay events for one fixed channel, recovers from a persisted cursor, wraps remote content as untrusted context, and delegates task delivery to one explicitly installed Codex driver. Relay content cannot select a different task, host, or driver.
 
+Queued recovery failures have an explicit rejection observer and a fixed
+`AICHAT_CONNECTOR_QUEUED_RECOVERY_FAILED` / `queued-recovery` diagnostic; they do
+not expose raw exceptions or add retries, turns, or durable state.
+
 Driver selection follows [ADR 0001](docs/decisions/0001-event-driven-connector.md):
 
 1. prefer an independently started [Codex App Server](https://learn.chatgpt.com/docs/app-server) with one dedicated connector-owned task;

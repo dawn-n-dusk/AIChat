@@ -10,6 +10,7 @@ import { MappingInstanceLock } from "./instance-lock.js";
 const DIAGNOSTIC_CODES = new Set([
   "AICHAT_CONNECTOR_FAILED",
   "AICHAT_CONNECTOR_DIAGNOSTIC",
+  "AICHAT_CONNECTOR_QUEUED_RECOVERY_FAILED",
   "AICHAT_CONNECTOR_SHUTDOWN_FAILED",
   "AICHAT_CONNECTOR_LOCK_RELEASE_FAILED",
   "AICHAT_DRIVER_IMPORT_FAILED",
@@ -31,6 +32,7 @@ const DIAGNOSTIC_PHASES = new Set([
   "lock",
   "driver",
   "connector",
+  "queued-recovery",
 ]);
 
 async function main(argv) {
@@ -163,7 +165,13 @@ function diagnosticLogger(phase) {
     Object.fromEntries(
       ["error", "warn", "info", "log", "debug", "trace"].map((method) => [
         method,
-        () => writeDiagnostic("AICHAT_CONNECTOR_DIAGNOSTIC", phase),
+        (value) => {
+          if (phase === "connector" && value === "AICHAT_CONNECTOR_QUEUED_RECOVERY_FAILED") {
+            writeDiagnostic("AICHAT_CONNECTOR_QUEUED_RECOVERY_FAILED", "queued-recovery");
+            return;
+          }
+          writeDiagnostic("AICHAT_CONNECTOR_DIAGNOSTIC", phase);
+        },
       ]),
     ),
   );

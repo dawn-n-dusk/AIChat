@@ -135,22 +135,52 @@ ambient AIChat settings, credentials, Python overrides, and proxies are not
 inherited. No real relay, user config, field host, or message write is involved.
 Both output streams are drained concurrently with a 64 KiB capture cap each.
 Raw output remains in memory and is never printed or attached to CI artifacts.
-Requests have 15-second bounds; native EOF exit and cleanup stages use 3-second
-bounds. Cleanup waits for the child and joins I/O threads, with a POSIX check
-that its PID is no longer waitable. Successful real probes must exit zero on
-stdin EOF without forced termination.
+Requests have 15-second bounds. Stdout EOF is not evidence of native process
+exit: after EOF the reader releases its capture lock and waits for native exit
+for at most 3 seconds, bounded also by the remaining request deadline. Stderr
+continues draining during this wait. Only a completed native wait is reported
+as `CHILD_EARLY_EXIT`; expiry reports `STDOUT_CLOSED_PROCESS_RUNNING` with an
+unknown actual exit. Cleanup gives observed EOF the same grace if the reader
+has not already waited, rather than immediately terminating an exiting child.
+Stdin EOF exit, terminate/kill waits, and I/O-thread joins each have 3-second
+bounds. Cleanup reaps the child, with a POSIX check that its PID is no longer
+waitable. Successful real probes must exit zero on stdin EOF without forced
+termination.
 
 Fake children exercise only the harness boundary: response timeout, early exit,
-stdout noise, stdout/stderr floods, nonzero EOF exit, and refusal to exit on EOF
-(also ignoring SIGTERM on POSIX to exercise the kill fallback). Pure validator
+stdout noise, stdout/stderr floods, delayed native exit after stdout closes,
+stdout closed while still alive, nonzero EOF exit, and refusal to exit on EOF
+(also ignoring SIGTERM on POSIX to exercise the kill fallback). An injected
+wait failure on a fake child checks the cleanup-timeout diagnostic separately.
+Pure validator
 tests reject ID/type confusion, JSON-RPC error-as-success, invalid content, and
-structured-content mismatches. Failures contain only an allowlisted `phase` and
-`safeFailureCode`, such as `RESPONSE_TIMEOUT`, `CHILD_EARLY_EXIT`,
-`STDOUT_INVALID_JSONL`, `STDOUT_LIMIT_EXCEEDED`, `STDERR_LIMIT_EXCEEDED`,
-`JSONRPC_UNEXPECTED_ERROR`, or `NATIVE_EOF_EXIT_TIMEOUT`, rather than one generic
-exit mismatch or raw exception. CI saves these diagnostics in
-`stdio-conformance.xml` for each Linux/macOS/Windows matrix job. This is isolated
-transport conformance, not product integration or field acceptance.
+structured-content mismatches. Every `ProbeFailure` contains exactly four fields:
+
+| Field | Allowed values |
+| --- | --- |
+| `phase` | A member of the test's fixed `Phase` enum |
+| `safeFailureCode` | A member of the test's fixed `Code` enum |
+| `expectedExitCode` | A plain integer in the native signed/unsigned 32-bit range, or `null` when not applicable |
+| `actualExitCode` | A native exit integer in the same range, or `null` when no exit was observed |
+
+Booleans, floats, strings, integer subclasses, out-of-range integers, and
+arbitrary metadata dictionaries are not accepted. Timeout does not synthesize
+actual success `0`, and later forced cleanup does not replace the original
+unknown/native-exit snapshot. `NATIVE_EOF_EXIT_TIMEOUT` (shutdown),
+`STDOUT_CLOSED_PROCESS_RUNNING` (receive), and `CLEANUP_EXIT_TIMEOUT` (cleanup)
+remain distinct. For example, a native nonzero EOF exit preserves:
+
+```json
+{"phase":"process_shutdown","safeFailureCode":"NATIVE_EXIT_NONZERO","expectedExitCode":0,"actualExitCode":19}
+```
+
+A nested real pytest run intentionally exercises two failing fake-child cases
+(native exits 17 and 19) and verifies the actual JUnit failure messages retain
+these four fields and integer types without captured streams. These two inner
+failures are expected fixtures; the enclosing conformance test must pass.
+CI saves safe diagnostics in `stdio-conformance.xml` for each
+Linux/macOS/Windows matrix job. This is isolated transport conformance, not
+product integration or field acceptance.
 
 This package deliberately does not import `clients/python`; it implements only the small
 HTTP surface needed by the MCP tools so it can be installed independently.

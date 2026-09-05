@@ -106,6 +106,69 @@ function harness(items, options = {}) {
   return { connector, driver, relay, stateStore, sent, saves };
 }
 
+for (const originalFails of [false, true]) {
+  test(`queued recovery is observed without waiting on its ${originalFails ? "failed" : "successful"} predecessor`, { timeout: 3000 }, async () => {
+    const ctx = harness([]);
+    const logs = [];
+    const followupGate = deferred();
+    let reads = 0;
+    await ctx.connector.initialize();
+    ctx.connector.logger = { error(value) { logs.push(value); } };
+    ctx.relay.listMessages = async () => {
+      reads += 1;
+      if (reads === 1 && originalFails) throw new Error("original recovery rejected");
+      if (reads === 2) {
+        await followupGate.promise;
+        throw new Error("queued-recovery-private-canary");
+      }
+      return { items: [], next_after: null };
+    };
+    const original = ctx.connector.requestRecovery();
+    assert.equal(ctx.connector.requestRecovery(), original);
+    if (originalFails) await assert.rejects(original, /original recovery rejected/);
+    else assert.equal(await original, 0);
+    await waitFor(() => reads === 2);
+    const followup = ctx.connector.recoveryInFlight;
+    assert.notEqual(followup, original);
+    const rejected = assert.rejects(followup, /queued-recovery-private-canary/);
+    followupGate.resolve();
+    await rejected;
+    await waitFor(() => logs.length === 1);
+    assert.deepEqual(logs, ["AICHAT_CONNECTOR_QUEUED_RECOVERY_FAILED"]);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(reads, 2);
+    assert.equal(ctx.connector.recoveryInFlight, null);
+    assert.equal(ctx.connector.recoveryPending, false);
+    assert.equal(ctx.connector.status().cursor, null);
+    assert.deepEqual(ctx.saves, []);
+    assert.deepEqual(ctx.driver.deliveries, []);
+    assert.equal(await ctx.connector.requestRecovery(), 0);
+    assert.equal(reads, 3);
+    await ctx.connector.stop();
+  });
+}
+
+test("shutdown does not launch an already queued recovery", async () => {
+  const ctx = harness([]);
+  const gate = deferred();
+  let reads = 0;
+  await ctx.connector.initialize();
+  ctx.relay.listMessages = async () => {
+    reads += 1;
+    await gate.promise;
+    return { items: [], next_after: null };
+  };
+  const original = ctx.connector.requestRecovery();
+  assert.equal(ctx.connector.requestRecovery(), original);
+  await waitFor(() => reads === 1);
+  const stopping = ctx.connector.stop();
+  gate.resolve();
+  await stopping;
+  await original;
+  assert.equal(reads, 1);
+  assert.equal(ctx.driver.stopped, true);
+});
+
 test("allowed inbound delivery is fixed, untrusted, receipted, and durably checkpointed", async () => {
   const ctx = harness([relayMessage()]);
   await ctx.connector.initialize();

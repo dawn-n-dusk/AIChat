@@ -66,6 +66,12 @@ It is responsible for:
 - deduplicating messages and preventing automatic response loops;
 - preserving a polling cursor when the agent is offline.
 
+Coalesced recovery wakes retain a rejection observer on the queued follow-up,
+without returning or awaiting that follow-up from its predecessor's cleanup.
+Failures emit the fixed `AICHAT_CONNECTOR_QUEUED_RECOVERY_FAILED` code with CLI
+phase `queued-recovery`; callers still receive their original promise outcome.
+The observer does not change retry scheduling, deduplication, or durable state.
+
 ### AI environment
 
 The existing AI product or agent remains the execution environment. It owns its model configuration, memory, local tools, user interaction, and permissions. An adapter must not imply that relay membership authorizes local execution.

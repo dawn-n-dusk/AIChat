@@ -71,6 +71,72 @@ These are semantic layers, not a new serialized enum or schema migration.
 | Connector | durable checkpoint / driver acknowledgement | Persist validated responsibility for a receipt or event before acknowledging the driver. A checkpoint or acknowledgement is bookkeeping, not proof of a completed turn or a relay-stored reply. |
 | Egress | `pending`, `relay-stored`, `quarantined`, `resolved` | Persist output and its stable idempotency key before transmission. Relay storage needs a relay receipt or idempotent recovery. Quarantine is not publication; resolution can be a locally authorized retry or drop, not necessarily delivery. |
 
+### Driver-owned attempt state
+
+The diagrams describe different owners, not one linear global state machine.
+Only `ambiguous`, `accepted`, and `completed` below are existing driver disk
+phases; other nodes are semantic descriptions, not new serialized enums.
+
+```mermaid
+flowchart LR
+    subgraph Driver["Product driver owner (store v3)"]
+        NoAttempt["No retained attempt (semantic absence)"]
+        Ambiguous["ambiguous (durable before submit)"]
+        Accepted["accepted (correlated turn evidence)"]
+        Completed["completed (terminal evidence, including failure/interruption)"]
+        NoAttempt -->|"Persist before product submission"| Ambiguous
+        Ambiguous -->|"Correlated turn evidence"| Accepted
+        Accepted -->|"Terminal evidence"| Completed
+        Ambiguous -->|"Reconcile directly to terminal evidence"| Completed
+        Ambiguous -->|"Only proven pre-send failure or definitive non-acceptance"| NoAttempt
+        Ambiguous -->|"Timeout/disconnect: retain and reconcile, never clear/resubmit"| Ambiguous
+    end
+```
+
+Terminal evidence can precede connector checkpoint or driver acknowledgement.
+Phase `completed` is not success; local success requires `completionStatus=completed`.
+
+### Connector responsibility and outbox
+
+Early completion remains retained/replayable until the connector atomically
+checkpoints responsibility; a lost acknowledgement can cause safe replay, not a
+new model submission. Driver acknowledgement and outbox progress are separate.
+
+```mermaid
+flowchart LR
+    Receipt["Driver owner: delivery receipt"]
+    Early["Driver owner: early completion (retain/replay)"]
+    subgraph Connector["Connector owner (schema v5)"]
+        Validate["Validate receipt/evidence and exact delivery/thread/host"]
+        Checkpoint["Atomic cursor + receipt responsibility checkpoint"]
+        Ack["Driver acknowledgement (after checkpoint)"]
+        Invalid["Invalid evidence: no delivery checkpoint or ack"]
+        Validate -->|"Valid evidence; retain early-completion responsibility"| Checkpoint
+        Validate -->|"Reject invalid evidence"| Invalid
+        Checkpoint --> Ack
+    end
+    subgraph Outbox["Connector-owned outbox (semantic states)"]
+        Pending["pending (persisted payload + fixed idempotency key)"]
+        Stored["relay-stored (storage proven, not recipient consumption)"]
+        Quarantined["quarantined (not published)"]
+        Dropped["resolved (explicit drop, not delivery)"]
+        Pending -->|"Timeout/no storage proof: retain same payload/key"| Pending
+        Pending -->|"Deterministic policy rejection"| Quarantined
+        Quarantined -->|"Explicit operator retry: same payload/key; recheck policy"| Pending
+        Quarantined -->|"Explicit operator drop"| Dropped
+    end
+    Relay["Relay owner: message storage"]
+    Receipt -->|"Offer or replay acceptance evidence"| Validate
+    Ack -.->|"Checkpoint acknowledged; retain result until egress resolution"| Early
+    Early -.->|"Accept result into outbox only with a durable correlating checkpoint"| Pending
+    Checkpoint -.->|"Eligible output responsibility; independent of driver ack"| Pending
+    Pending -->|"Allowed send/replay: same payload/key"| Relay
+    Relay -->|"Ack or same-key recovery proves storage"| Stored
+```
+
+Neither diagram promises exactly-once local tool side effects or changes the
+existing source, authorization, schema, or store boundaries.
+
 Required invariants:
 
 - Never turn an ambiguous product submission into an automatic second model
@@ -96,8 +162,8 @@ Required invariants:
 
 ## Compatibility and frozen field boundary
 
-Retain the existing connector state schema **version 5** and the existing driver
-store. This work does not migrate, reset, repair, or relocate either store. The
+Retain the existing connector state schema **version 5** and driver store
+**version 3**. This work does not migrate, reset, repair, or relocate either store. The
 frozen field installation's old **v2** is a deployment namespace, not a claim that
 this repository uses state schema version 2. Do not touch that installation,
 services, credentials, or state, and do not issue field requests.

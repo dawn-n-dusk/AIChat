@@ -36,8 +36,10 @@ below do not certify this PR's new results.
    checkpoint/ack. Legacy receipts without `turnId` remain accepted-only. Add
    fixed CLI/loader phase/code diagnostics, including argument parsing, logger
    projection, and an explicit `safeFailureCode` enum rather than arbitrary
-   `AICHAT_*` passthrough. Separately test the actual production MCP subprocess
-   with loopback HTTP, locked dependencies on Linux/macOS/Windows, and a
+   `AICHAT_*` passthrough. Cover overlapping periodic wakes through the actual
+   CLI: queued recovery rejection must produce a fixed diagnostic without a
+   recursive wait, extra turn, or state reset. Separately test the actual
+   production MCP subprocess with loopback HTTP, locked dependencies on Linux/macOS/Windows, and a
    PowerShell 5.1 conformance run. This is not a field probe. Inclusion in scope
    does not establish passing tests or completed CI review.
 3. **Freshly authorized single two-host suite — not authorized or run:** only

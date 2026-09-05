@@ -115,7 +115,9 @@ export class AIChatCodexConnector {
       this.recoveryInFlight = null;
       if (this.recoveryPending && !this.stopped) {
         this.recoveryPending = false;
-        void this.requestRecovery();
+        void this.requestRecovery().catch(() => {
+          this.logger.error("AICHAT_CONNECTOR_QUEUED_RECOVERY_FAILED");
+        });
       }
     });
     this.recoveryInFlight = task;
