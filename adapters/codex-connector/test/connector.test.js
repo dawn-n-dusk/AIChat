@@ -741,7 +741,7 @@ test("dropping one of 1000 visible quarantines releases driver capacity for mess
 });
 
 test("lifecycle statuses are structured, correlated, and never delivered as a new default turn", async () => {
-  const ctx = harness([relayMessage()], { lifecycleStatusEnabled: true });
+  const ctx = harness([relayMessage()], { driver: runningDriver(), lifecycleStatusEnabled: true });
   await ctx.connector.initialize();
   await ctx.connector.recoverPage();
   assert.deepEqual(ctx.sent.map((item) => item.messageType), ["status", "status"]);
@@ -884,6 +884,7 @@ test("persisted per-sender hourly budget blocks the next turn after restart", as
 
 test("lifecycle status retries the same relay idempotency key after checkpoint failure", async () => {
   const ctx = harness([relayMessage()], {
+    driver: runningDriver(),
     lifecycleStatusEnabled: true,
     failSaveCalls: [4],
   });
@@ -897,7 +898,7 @@ test("lifecycle status retries the same relay idempotency key after checkpoint f
 });
 
 test("fast completion cannot overtake durable accepted and running lifecycle events", async () => {
-  const driver = new MockCodexDriver();
+  const driver = runningDriver();
   driver.acknowledgeDelivery = async (deliveryId) =>
     driver.emitOutboundReply({
       modelDeclared: true,
@@ -925,6 +926,13 @@ test("fast completion cannot overtake durable accepted and running lifecycle eve
   assert.equal(ctx.connector.status().pendingStatusCount, 0);
   assert.equal(ctx.connector.getDeliveryReceipt("message-1").replied, true);
 });
+
+function runningDriver() {
+  const driver = new MockCodexDriver();
+  const deliver = driver.deliver.bind(driver);
+  driver.deliver = async (request) => ({ ...(await deliver(request)), turnId: "turn-1" });
+  return driver;
+}
 
 function outboundEvent(receipt, overrides = {}) {
   return {

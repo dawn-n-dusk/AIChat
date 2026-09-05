@@ -99,5 +99,58 @@ uv run --locked --extra test python -m pytest
 uv build
 ```
 
+### Hermetic stdio conformance
+
+Install the locked dependencies first with `uv sync --locked --extra test`. The
+probe launches the installed interpreter (`sys.executable -I -B -u -m
+aichat_mcp.server`), not `uvx`, an SDK client, or a mocked FastMCP server. Missing
+MCP dependencies fail the run; tests do not skip them.
+
+On Linux/macOS, from `adapters/mcp`:
+
+```bash
+.venv/bin/python -I -B -m pytest tests/test_stdio_conformance.py --tb=short --show-capture=no -o junit_logging=no --junitxml=stdio-conformance.xml
+```
+
+On Windows, from `adapters/mcp`, explicitly invoke Windows PowerShell 5.1 (not
+PowerShell 7). Both the fixture and its caller propagate the native pytest exit:
+
+```powershell
+& powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tests/stdio_fixtures/invoke_stdio_conformance_ps51.ps1
+exit $LASTEXITCODE
+```
+
+The real subprocess tests use raw UTF-8 JSONL for initialize/initialized, tool
+discovery, unknown tools/methods, and identity. They require matching typed request
+IDs, distinguish JSON-RPC errors from tool errors, compare the entire identity
+text JSON and any `structuredContent`, and count exactly one authenticated
+`GET /v1/me` against a `ThreadingHTTPServer` on an ephemeral loopback port. They
+also check HTTP 401 token redaction, invalid JSON, and non-object JSON, which the
+production client rejects. They do not invent identity-field validation that
+production does not implement.
+
+Each child has a temporary working directory, synthetic configuration/token,
+isolated HOME and platform config directories, and an allowlisted environment;
+ambient AIChat settings, credentials, Python overrides, and proxies are not
+inherited. No real relay, user config, field host, or message write is involved.
+Both output streams are drained concurrently with a 64 KiB capture cap each.
+Raw output remains in memory and is never printed or attached to CI artifacts.
+Requests have 15-second bounds; native EOF exit and cleanup stages use 3-second
+bounds. Cleanup waits for the child and joins I/O threads, with a POSIX check
+that its PID is no longer waitable. Successful real probes must exit zero on
+stdin EOF without forced termination.
+
+Fake children exercise only the harness boundary: response timeout, early exit,
+stdout noise, stdout/stderr floods, nonzero EOF exit, and refusal to exit on EOF
+(also ignoring SIGTERM on POSIX to exercise the kill fallback). Pure validator
+tests reject ID/type confusion, JSON-RPC error-as-success, invalid content, and
+structured-content mismatches. Failures contain only an allowlisted `phase` and
+`safeFailureCode`, such as `RESPONSE_TIMEOUT`, `CHILD_EARLY_EXIT`,
+`STDOUT_INVALID_JSONL`, `STDOUT_LIMIT_EXCEEDED`, `STDERR_LIMIT_EXCEEDED`,
+`JSONRPC_UNEXPECTED_ERROR`, or `NATIVE_EOF_EXIT_TIMEOUT`, rather than one generic
+exit mismatch or raw exception. CI saves these diagnostics in
+`stdio-conformance.xml` for each Linux/macOS/Windows matrix job. This is isolated
+transport conformance, not product integration or field acceptance.
+
 This package deliberately does not import `clients/python`; it implements only the small
 HTTP surface needed by the MCP tools so it can be installed independently.

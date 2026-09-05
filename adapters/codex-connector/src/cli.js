@@ -2,25 +2,51 @@
 
 import { AIChatCodexConnector } from "./connector.js";
 import { loadConfig } from "./config.js";
-import { loadCodexDriver } from "./driver.js";
+import { driverFailureDiagnostic, loadCodexDriver } from "./driver.js";
 import { RelayClient } from "./relay-client.js";
-import { ConnectorRuntime } from "./runtime.js";
 import { StateStore } from "./state-store.js";
 import { MappingInstanceLock } from "./instance-lock.js";
 
-async function main(argv) {
-  const options = parseArguments(argv);
-  if (options.help) {
-    process.stdout.write(usage());
-    return;
-  }
+const DIAGNOSTIC_CODES = new Set([
+  "AICHAT_CONNECTOR_FAILED",
+  "AICHAT_CONNECTOR_DIAGNOSTIC",
+  "AICHAT_CONNECTOR_SHUTDOWN_FAILED",
+  "AICHAT_CONNECTOR_LOCK_RELEASE_FAILED",
+  "AICHAT_DRIVER_IMPORT_FAILED",
+  "AICHAT_DRIVER_CREATE_FAILED",
+  "AICHAT_DRIVER_CONTRACT_INVALID",
+]);
+const DIAGNOSTIC_PHASES = new Set([
+  "arguments",
+  "configuration",
+  "lock-acquire",
+  "driver-load",
+  "driver-import",
+  "driver-create",
+  "driver-contract",
+  "runtime-start",
+  "runtime",
+  "shutdown",
+  "lock-release",
+  "lock",
+  "driver",
+  "connector",
+]);
 
-  let config;
+async function main(argv) {
+  let phase = "arguments";
   let runtime;
   let instanceLock;
   let drainOnStop = false;
   try {
-    config = loadConfig();
+    const options = parseArguments(argv);
+    if (options.help) {
+      process.stdout.write(usage());
+      return;
+    }
+    phase = "configuration";
+    const config = loadConfig();
+    phase = "lock-acquire";
     const lockLost = deferred();
     instanceLock = new MappingInstanceLock({
       port: config.instanceLockPort,
@@ -28,7 +54,7 @@ async function main(argv) {
       metadataPath: config.instanceLockMetadataPath,
       bindingId: config.instanceLockIdentity,
       statePath: config.stateFile,
-      logger: console,
+      logger: diagnosticLogger("lock"),
       onLost: () => lockLost.resolve(),
     });
     await instanceLock.acquire();
@@ -37,7 +63,13 @@ async function main(argv) {
       threadId: config.targetThreadId,
       hostId: config.targetHostId,
     });
-    const driver = await loadCodexDriver(config.driverModule, { binding, logger: console });
+    phase = "driver-load";
+    const driver = await loadCodexDriver(config.driverModule, {
+      binding,
+      logger: diagnosticLogger("driver"),
+    });
+    phase = "runtime-start";
+    const { ConnectorRuntime } = await import("./runtime.js");
     const relay = new RelayClient(config);
     const stateStore = new StateStore(config.stateFile);
     const connector = new AIChatCodexConnector({
@@ -46,9 +78,14 @@ async function main(argv) {
       stateStore,
       driver,
       instanceLock,
-      logger: console,
+      logger: diagnosticLogger("connector"),
     });
-    runtime = new ConnectorRuntime({ config, relay, connector, logger: console });
+    runtime = new ConnectorRuntime({
+      config,
+      relay,
+      connector,
+      logger: diagnosticLogger("runtime"),
+    });
 
     if (options.once) {
       drainOnStop = true;
@@ -58,21 +95,22 @@ async function main(argv) {
 
     const stopSignal = waitForStopSignal();
     await runtime.start();
+    phase = "runtime";
     const stopReason = await Promise.race([
       stopSignal.then(() => "signal"),
       lockLost.promise.then(() => "lock-lost"),
     ]);
     drainOnStop = stopReason === "signal";
   } catch (error) {
-    const detail = redact(errorMessage(error), config?.token);
-    process.stderr.write(`[aichat-codex-connector] fatal: ${detail}\n`);
+    const diagnostic = driverFailureDiagnostic(error);
+    writeDiagnostic(diagnostic?.code ?? "AICHAT_CONNECTOR_FAILED", diagnostic?.phase ?? phase);
     process.exitCode = 1;
   } finally {
     if (runtime) {
       try {
         await runtime.stop({ drain: drainOnStop });
       } catch {
-        process.stderr.write("[aichat-codex-connector] shutdown failed\n");
+        writeDiagnostic("AICHAT_CONNECTOR_SHUTDOWN_FAILED", "shutdown");
         process.exitCode = 1;
       }
     }
@@ -80,7 +118,7 @@ async function main(argv) {
       try {
         await instanceLock.release();
       } catch {
-        process.stderr.write("[aichat-codex-connector] mapping lock release failed\n");
+        writeDiagnostic("AICHAT_CONNECTOR_LOCK_RELEASE_FAILED", "lock-release");
         process.exitCode = 1;
       }
     }
@@ -92,7 +130,7 @@ function parseArguments(argv) {
   for (const argument of argv) {
     if (argument === "--once") options.once = true;
     else if (argument === "--help" || argument === "-h") options.help = true;
-    else throw new Error(`Unknown argument: ${argument}`);
+    else throw new Error("AICHAT_CONNECTOR_ARGUMENT_INVALID");
   }
   return options;
 }
@@ -114,12 +152,21 @@ function waitForStopSignal() {
   });
 }
 
-function errorMessage(error) {
-  return error instanceof Error ? error.message : String(error);
+function writeDiagnostic(code, phase) {
+  const safeCode = DIAGNOSTIC_CODES.has(code) ? code : "AICHAT_CONNECTOR_FAILED";
+  const safePhase = DIAGNOSTIC_PHASES.has(phase) ? phase : "runtime";
+  process.stderr.write(`[aichat-codex-connector] code=${safeCode} phase=${safePhase}\n`);
 }
 
-function redact(value, secret) {
-  return secret ? value.split(secret).join("[REDACTED]") : value;
+function diagnosticLogger(phase) {
+  return Object.freeze(
+    Object.fromEntries(
+      ["error", "warn", "info", "log", "debug", "trace"].map((method) => [
+        method,
+        () => writeDiagnostic("AICHAT_CONNECTOR_DIAGNOSTIC", phase),
+      ]),
+    ),
+  );
 }
 
 function deferred() {

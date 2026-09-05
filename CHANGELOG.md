@@ -6,6 +6,52 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Documentation — 2026-09-05 connector foundation
+
+- Record design issue #44 in [ADR 0001](docs/decisions/0001-event-driven-connector.md)
+  before implementation: stable sidecar contract plus product-specific drivers,
+  independent App Server dedicated task first, explicit interactive MCP,
+  candidate Claude native delivery, opt-in managed Grok, non-default/non-stable
+  private IPC, and legacy heartbeat.
+- Correct the README's former owner-IPC-first ordering. Preserve the official
+  stdio/Unix control-socket documentation together with the app-server command /
+  WebSocket experimental and production-risk warning; AIChat stdio remains
+  pinned/pre-release, not arbitrary Desktop task control.
+- Separate intake, persisted driver phases (`ambiguous`, `accepted`, `completed`),
+  connector checkpoint/ack, and pending/stored/quarantined/resolved egress. The
+  first-PR scope includes strict receipt binding and safe diagnostics without a
+  new engine, state schema change, or driver-store migration. CI results and
+  field acceptance are tracked separately, not certified by this contract.
+- Add the [two-host acceptance gate](docs/validation/connector-two-host-acceptance.md):
+  ADR first, then minimal refactor and production MCP subprocess/loopback HTTP
+  conformance with locked cross-platform dependencies and PowerShell 5.1 review,
+  then a newly authorized single field E2E. No new tests, CI review, or field run
+  are certified by this documentation change.
+- Require a complete, explicitly approved two-host test manifest: one correlated
+  request/turn/result, planned restart/offline/reconnect/duplicate wakes with zero
+  extra turns/results, reconciled connector/driver/relay IDs, zero orphan children
+  after drain/exit, and no shared canaries. Happy-path-only evidence is PARTIAL;
+  unauthorized required subcases remain NOT RUN, not implicitly executable.
+- Clarify that driver phase `completed` includes failed/interrupted outcomes;
+  successful execution needs `completionStatus=completed`. Order roadmap work
+  as P0 current contract/conformance, P1 gated two-host suite, and P2 SDK/Claude/
+  Grok ACP acceptance.
+- Preserve the official SDK as a future managed-work driver candidate with less
+  hand-maintained protocol integration; retain the current driver in this PR and
+  require SDK turn/reconciliation/approval/sandbox/receipt evidence before replacement.
+- Record the 2026-09-05 official Claude Channels/reference and Grok headless/ACP
+  Markdown verification. Distinguish verified interface facts from unverified
+  account eligibility and new field acceptance. Claude permission relay remains
+  deliberately unused; Grok ACP is a future structured-event driver candidate,
+  not an implemented or authenticated-tested route. Example timeout/cleanup is
+  not durable recovery, and raw stderr/`--always-approve` are not integration policy.
+- Freeze GitHub-verified evidence at 2026-09-05: `main` `9e36813`;
+  PR #42 `f337327` remains Draft with two PowerShell 5.1 failures; #38/#39 remain
+  passing historical CI with Windows field claims **last supplied accepted facts,
+  not live revalidated**. Their saved handoff narrative was cross-checked against
+  GitHub, not raw field logs or independent receipts. Connector schema is version
+  5; the frozen field installation's old v2 is a deployment namespace.
+
 ### Fixed
 
 - Accept the recovery target's valid `verification_failed` plus
