@@ -6,9 +6,10 @@ not proof that the cross-host loop is complete.
 
 ## Executive status
 
-- Source of truth: `origin/main` at
+- The implementation baseline immediately before this docs-only handoff was
   `913483425f70f6c000aa4aa04fb4c16577bed4d4` (PR
-  [#39](https://github.com/dawn-n-dusk/AIChat/pull/39)).
+  [#39](https://github.com/dawn-n-dusk/AIChat/pull/39)). Query live
+  `origin/main` before starting new work.
 - The Relay, protocol, SDK/CLI, MCP adapter, Codex connector core, product
   adapters, and deployment packages exist and have substantial automated
   coverage.
@@ -86,7 +87,7 @@ the field host.
 | [#36](https://github.com/dawn-n-dusk/AIChat/pull/36) | `8effbf8edf66d35b21d29cb8fca33543810a6d24` | Added fixed, redacted, actionable recovery diagnostic codes. |
 | [#37](https://github.com/dawn-n-dusk/AIChat/pull/37) | `b86c6ff7e5f3fd8090c4b85522d6aa4c7ce994d5` | Exercised the real recovery state chain through blocker, repair-ready, rollback-exact, finalize, and cleared gate. |
 | [#38](https://github.com/dawn-n-dusk/AIChat/pull/38) | `aed3109105882706c25c2bf8b3b7d3d56653ba26` | Preserved valid `verification_failed` plus `protected_paths_invalid` target results instead of rewriting them as `target_contract_invalid`; added redacted runner rejection classes. |
-| [#39](https://github.com/dawn-n-dusk/AIChat/pull/39) | `913483425f70f6c000aa4aa04fb4c16577bed4d4` | Added a read-only protected-path diagnostic with a fixed, non-sensitive contract. This is the current `main`. |
+| [#39](https://github.com/dawn-n-dusk/AIChat/pull/39) | `913483425f70f6c000aa4aa04fb4c16577bed4d4` | Added a read-only protected-path diagnostic with a fixed, non-sensitive contract. This is the last product-code baseline before the docs-only handoff. |
 
 PR #38 closed an inner/outer contract gap: the recovery target could legally
 return exit 1 during verification, while the old outer runner accepted that
