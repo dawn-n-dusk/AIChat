@@ -11,6 +11,21 @@ const VALID_TYPES = new Set(["text", "request", "result", "status"]);
 const OUTBOUND_REPLY_TYPES = new Set(["result", "status"]);
 const MAX_TRACKED_IDS = 1_000;
 const MAX_RECOVERY_PAGES = 100;
+const SAFE_FAILURE_CODES = new Set([
+  "AICHAT_DELIVERY_RECEIPT_INVALID",
+  "AICHAT_RECEIPT_CAPACITY",
+  "AICHAT_CONNECTOR_LOCKED",
+  "AICHAT_CONNECTOR_LOCK_FAILED",
+  "AICHAT_CONNECTOR_LOCK_LOST",
+  "AICHAT_REPLY_INELIGIBLE",
+  "AICHAT_OUTBOUND_DLP",
+  "AICHAT_EGRESS_DISABLED",
+  "AICHAT_EGRESS_AUDIENCE",
+  "AICHAT_EGRESS_TYPE",
+  "AICHAT_EGRESS_SIZE",
+  "AICHAT_EGRESS_REFERENCE",
+  "AICHAT_EGRESS_POLICY",
+]);
 const TERMINAL_BLOCKED_TEXT = JSON.stringify({
   status: "blocked",
   terminal: true,
@@ -100,7 +115,9 @@ export class AIChatCodexConnector {
       this.recoveryInFlight = null;
       if (this.recoveryPending && !this.stopped) {
         this.recoveryPending = false;
-        void this.requestRecovery();
+        void this.requestRecovery().catch(() => {
+          this.logger.error("AICHAT_CONNECTOR_QUEUED_RECOVERY_FAILED");
+        });
       }
     });
     this.recoveryInFlight = task;
@@ -318,7 +335,7 @@ export class AIChatCodexConnector {
         await this.#queueLifecycleStatuses(
           message,
           null,
-          [{ status: "blocked", reason: error.code ?? "capacity" }],
+          [{ status: "blocked", reason: safeFailureCode(error) }],
           { flush: true },
         );
         throw error;
@@ -354,6 +371,7 @@ export class AIChatCodexConnector {
             }),
           }),
           deliveryId,
+          { threadId: this.config.targetThreadId, hostId: this.config.targetHostId },
         );
       } catch (error) {
         await this.#queueLifecycleStatuses(
@@ -364,13 +382,6 @@ export class AIChatCodexConnector {
         );
         throw error;
       }
-      if (driverReceipt.threadId && driverReceipt.threadId !== this.config.targetThreadId) {
-        throw new Error("Codex driver delivered to an unexpected thread");
-      }
-      if ((driverReceipt.hostId ?? null) !== this.config.targetHostId) {
-        throw new Error("Codex driver delivered to an unexpected host");
-      }
-
       await this.#commit((current) => ({
         ...current,
         cursor: message.id,
@@ -395,7 +406,9 @@ export class AIChatCodexConnector {
       await this.#queueLifecycleStatuses(
         message,
         deliveryId,
-        [{ status: "accepted" }, { status: "running" }],
+        driverReceipt.turnId != null
+          ? [{ status: "accepted" }, { status: "running" }]
+          : [{ status: "accepted" }],
         { flush: true },
       );
       if (typeof this.driver.acknowledgeDelivery === "function") {
@@ -1064,11 +1077,15 @@ function lifecycleEventId(sourceMessageId, deliveryId, status, reason) {
 }
 
 function safeFailureCode(error) {
-  if (typeof error?.code === "string" && /^AICHAT_[A-Z0-9_]+$/.test(error.code)) {
-    return error.code.toLowerCase();
+  try {
+    const code = error?.code;
+    if (SAFE_FAILURE_CODES.has(code)) return code.toLowerCase();
+    const outcome = error?.outcome;
+    if (outcome === "ambiguous") return "delivery_ambiguous";
+    if (outcome === "rejected") return "delivery_rejected";
+  } catch {
+    return "delivery_failed";
   }
-  if (error?.outcome === "ambiguous") return "delivery_ambiguous";
-  if (error?.outcome === "rejected") return "delivery_rejected";
   return "delivery_failed";
 }
 

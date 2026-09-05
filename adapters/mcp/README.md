@@ -99,5 +99,100 @@ uv run --locked --extra test python -m pytest
 uv build
 ```
 
+### Hermetic stdio conformance
+
+Install the locked dependencies first with `uv sync --locked --extra test`. The
+probe launches the installed interpreter (`sys.executable -I -B -u -m
+aichat_mcp.server`), not `uvx`, an SDK client, or a mocked FastMCP server. Missing
+MCP dependencies fail the run; tests do not skip them.
+
+Only the stdlib-only `stdout-close-then-exit` and `stdout-closed-alive` synthetic
+fixtures use `sys._base_executable`. CPython's Windows venv redirector duplicates
+the standard handles and retains them while waiting for its child, so closing
+the child's stdout alone cannot expose EOF through that wrapper. These two
+fixtures therefore start the native base interpreter directly. Production,
+JUnit, and every other fixture still use `sys.executable` and the locked venv
+dependencies. The base interpreter must be an absolute, existing executable
+file; unavailable or invalid metadata fails with
+`NATIVE_FIXTURE_EXECUTABLE_UNAVAILABLE` and null exit fields, never its path.
+No private launcher environment override, timeout substitution, or skip is used.
+Deterministic Windows-wrapper argument tests check this exact selection boundary.
+
+On Linux/macOS, from `adapters/mcp`:
+
+```bash
+.venv/bin/python -I -B -m pytest tests/test_stdio_conformance.py --tb=short --show-capture=no -o junit_logging=no --junitxml=stdio-conformance.xml
+```
+
+On Windows, from `adapters/mcp`, explicitly invoke Windows PowerShell 5.1 (not
+PowerShell 7). Both the fixture and its caller propagate the native pytest exit:
+
+```powershell
+& powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tests/stdio_fixtures/invoke_stdio_conformance_ps51.ps1
+exit $LASTEXITCODE
+```
+
+The real subprocess tests use raw UTF-8 JSONL for initialize/initialized, tool
+discovery, unknown tools/methods, and identity. They require matching typed request
+IDs, distinguish JSON-RPC errors from tool errors, compare the entire identity
+text JSON and any `structuredContent`, and count exactly one authenticated
+`GET /v1/me` against a `ThreadingHTTPServer` on an ephemeral loopback port. They
+also check HTTP 401 token redaction, invalid JSON, and non-object JSON, which the
+production client rejects. They do not invent identity-field validation that
+production does not implement.
+
+Each child has a temporary working directory, synthetic configuration/token,
+isolated HOME and platform config directories, and an allowlisted environment;
+ambient AIChat settings, credentials, Python overrides, and proxies are not
+inherited. No real relay, user config, field host, or message write is involved.
+Both output streams are drained concurrently with a 64 KiB capture cap each.
+Raw output remains in memory and is never printed or attached to CI artifacts.
+Requests have 15-second bounds. Stdout EOF is not evidence of native process
+exit: after EOF the reader releases its capture lock and waits for native exit
+for at most 3 seconds, bounded also by the remaining request deadline. Stderr
+continues draining during this wait. Only a completed native wait is reported
+as `CHILD_EARLY_EXIT`; expiry reports `STDOUT_CLOSED_PROCESS_RUNNING` with an
+unknown actual exit. Cleanup gives observed EOF the same grace if the reader
+has not already waited, rather than immediately terminating an exiting child.
+Stdin EOF exit, terminate/kill waits, and I/O-thread joins each have 3-second
+bounds. Cleanup reaps the child, with a POSIX check that its PID is no longer
+waitable. Successful real probes must exit zero on stdin EOF without forced
+termination.
+
+Fake children exercise only the harness boundary: response timeout, early exit,
+stdout noise, stdout/stderr floods, delayed native exit after stdout closes,
+stdout closed while still alive, nonzero EOF exit, and refusal to exit on EOF
+(also ignoring SIGTERM on POSIX to exercise the kill fallback). An injected
+wait failure on a fake child checks the cleanup-timeout diagnostic separately.
+Pure validator
+tests reject ID/type confusion, JSON-RPC error-as-success, invalid content, and
+structured-content mismatches. Every `ProbeFailure` contains exactly four fields:
+
+| Field | Allowed values |
+| --- | --- |
+| `phase` | A member of the test's fixed `Phase` enum |
+| `safeFailureCode` | A member of the test's fixed `Code` enum |
+| `expectedExitCode` | A plain integer in the native signed/unsigned 32-bit range, or `null` when not applicable |
+| `actualExitCode` | A native exit integer in the same range, or `null` when no exit was observed |
+
+Booleans, floats, strings, integer subclasses, out-of-range integers, and
+arbitrary metadata dictionaries are not accepted. Timeout does not synthesize
+actual success `0`, and later forced cleanup does not replace the original
+unknown/native-exit snapshot. `NATIVE_EOF_EXIT_TIMEOUT` (shutdown),
+`STDOUT_CLOSED_PROCESS_RUNNING` (receive), and `CLEANUP_EXIT_TIMEOUT` (cleanup)
+remain distinct. For example, a native nonzero EOF exit preserves:
+
+```json
+{"phase":"process_shutdown","safeFailureCode":"NATIVE_EXIT_NONZERO","expectedExitCode":0,"actualExitCode":19}
+```
+
+A nested real pytest run intentionally exercises two failing fake-child cases
+(native exits 17 and 19) and verifies the actual JUnit failure messages retain
+these four fields and integer types without captured streams. These two inner
+failures are expected fixtures; the enclosing conformance test must pass.
+CI saves safe diagnostics in `stdio-conformance.xml` for each
+Linux/macOS/Windows matrix job. This is isolated transport conformance, not
+product integration or field acceptance.
+
 This package deliberately does not import `clients/python`; it implements only the small
 HTTP surface needed by the MCP tools so it can be installed independently.

@@ -1,16 +1,38 @@
+import { validateDeliveryReceipt } from "./delivery-contract.js";
+
+const DRIVER_FAILURES = new WeakMap();
+const DRIVER_FAILURE_CODES = {
+  "driver-import": "AICHAT_DRIVER_IMPORT_FAILED",
+  "driver-create": "AICHAT_DRIVER_CREATE_FAILED",
+  "driver-contract": "AICHAT_DRIVER_CONTRACT_INVALID",
+};
+
 export async function loadCodexDriver(moduleSpecifier, options) {
   let loaded;
   try {
     loaded = await import(moduleSpecifier);
-  } catch (error) {
-    throw new Error(`Cannot load Codex driver module: ${errorMessage(error)}`);
+  } catch {
+    throw driverFailure("driver-import");
   }
   if (typeof loaded.createCodexDriver !== "function") {
-    throw new Error("Codex driver module must export createCodexDriver(options)");
+    throw driverFailure("driver-contract");
   }
-  const driver = await loaded.createCodexDriver(options);
-  assertCodexDriver(driver);
+  let driver;
+  try {
+    driver = await loaded.createCodexDriver(options);
+  } catch {
+    throw driverFailure("driver-create");
+  }
+  try {
+    assertCodexDriver(driver);
+  } catch {
+    throw driverFailure("driver-contract");
+  }
   return driver;
+}
+
+export function driverFailureDiagnostic(error) {
+  return DRIVER_FAILURES.get(error) ?? null;
 }
 
 export function assertCodexDriver(driver) {
@@ -28,23 +50,15 @@ export function assertCodexDriver(driver) {
   return driver;
 }
 
-export function validateDriverReceipt(value, expectedDeliveryId) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("Codex driver returned an invalid delivery receipt");
-  }
-  if (value.accepted !== true) throw new Error("Codex driver did not accept the delivery");
-  if (value.deliveryId !== expectedDeliveryId) {
-    throw new Error("Codex driver receipt deliveryId does not match the requested delivery");
-  }
-  if (value.threadId != null && typeof value.threadId !== "string") {
-    throw new Error("Codex driver receipt threadId must be a string when present");
-  }
-  if (value.hostId != null && typeof value.hostId !== "string") {
-    throw new Error("Codex driver receipt hostId must be a string when present");
-  }
-  return value;
+export function validateDriverReceipt(value, expectedDeliveryId, expectedBinding) {
+  return validateDeliveryReceipt(value, expectedDeliveryId, expectedBinding);
 }
 
-function errorMessage(error) {
-  return error instanceof Error ? error.message : String(error);
+function driverFailure(phase) {
+  const code = DRIVER_FAILURE_CODES[phase];
+  const error = new Error(code);
+  error.code = code;
+  error.phase = phase;
+  DRIVER_FAILURES.set(error, Object.freeze({ code, phase }));
+  return error;
 }

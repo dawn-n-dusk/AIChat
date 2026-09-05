@@ -14,6 +14,20 @@ AIChat is an early protocol-first prototype. The current goal is a small, inspec
 
 Do not treat the prototype as a hardened control plane for production or safety-critical systems.
 
+The 2026-09-05 direction is recorded in [ADR 0001](docs/decisions/0001-event-driven-connector.md)
+(design issue #44): a stable AIChat sidecar contract with product-specific
+drivers, not a replacement for existing AI workflows. The baseline is `main`
+`9e36813`. Receipt-contract hardening and production MCP subprocess conformance
+are included in this PR; CI results and field acceptance are tracked separately. The
+[two-host acceptance gate](docs/validation/connector-two-host-acceptance.md)
+requires fresh authorization after code and CI review; no field operation or
+state/service migration is authorized by these documents.
+
+Full two-host acceptance requires an explicitly approved manifest containing
+restart/offline/reconnect/duplicate-wake drills, ID reconciliation, zero orphan
+children after drain/exit, and canary checks without extra model turns/results.
+A happy-path-only sample is PARTIAL; unapproved required drills remain NOT RUN.
+
 ## Why
 
 People already work with different AI products and local agents. Those agents often have complementary context and access:
@@ -57,9 +71,9 @@ AIChat uses a product adapter instead of pretending every AI product exposes the
 
 | Product surface | AIChat entry point | Delivery into an existing conversation |
 | --- | --- | --- |
-| Codex | Local event-driven `codex-connector`, plus MCP tools and the repository plugin | The connector binds one locally configured channel to one task. A verified Desktop owner IPC driver is preferred; an independently started Codex App Server is the fallback. Neither path is described as a stable, cross-version write API for an arbitrary active Desktop task. |
-| Claude Code | MCP tools or the Claude Channel adapter | A Channel can push into the running Claude Code session; custom Channels are currently a research preview. Live inbound display was verified, while a model-generated reply remains unverified because the subsequent Claude model API call returned `ECONNREFUSED`. |
-| Grok Build | MCP tools plus the headless session bridge | The implemented bridge resumes one AIChat-managed Grok session; it is not server push into an arbitrary active conversation. Its mocked-runner tests pass, but no real Grok end-to-end run was performed on this Mac. |
+| Codex | Local event-driven sidecar plus product driver; interactive MCP/plugin for explicit reads and writes | Prefer an independent App Server with a dedicated connector-owned task. AIChat's stdio integration remains pinned/pre-release. Private Desktop owner IPC is non-default and non-stable; neither path promises arbitrary active Desktop task control across versions. |
+| Claude Code | MCP tools or the Claude Channel adapter | The officially documented research preview delivers while the receiving session is open and the Channel enabled. Saved inbound UI evidence exists, but model-generated reply remains unaccepted after `ECONNREFUSED`; account eligibility and organization settings are not verified by that record. |
+| Grok Build | MCP tools plus the headless session bridge; future ACP driver candidate | The bridge resumes one AIChat-managed session, not an arbitrary active conversation. Saved tests use a mock runner, not authenticated E2E. Official `grok agent` ACP offers structured events but has no implemented or authenticated-tested AIChat driver. |
 | Web chat products | Product-specific future adapter | No promise of writing into an existing private web conversation without an official interface. |
 
 See [adapter capabilities and installation](docs/adapters.md), the [Codex connector](adapters/codex-connector/README.md), the [Claude Channel adapter](adapters/claude-channel/README.md), and the [Grok bridge](adapters/grok-bridge/README.md) for exact boundaries and setup.
@@ -68,13 +82,42 @@ See [adapter capabilities and installation](docs/adapters.md), the [Codex connec
 
 The primary proactive-delivery path is the local, event-driven [`codex-connector`](adapters/codex-connector/README.md). It consumes relay events for one fixed channel, recovers from a persisted cursor, wraps remote content as untrusted context, and delegates task delivery to one explicitly installed Codex driver. Relay content cannot select a different task, host, or driver.
 
-Driver selection follows this boundary:
+Queued recovery failures have an explicit rejection observer and a fixed
+`AICHAT_CONNECTOR_QUEUED_RECOVERY_FAILED` / `queued-recovery` diagnostic; they do
+not expose raw exceptions or add retries, turns, or durable state.
 
-1. prefer the version-gated Codex Desktop owner IPC integration when the exact App build and current-user `0600` socket compatibility checks pass;
-2. otherwise use an independently started [Codex App Server](https://developers.openai.com/codex/app-server) integration for a connector-managed thread;
-3. retain the heartbeat-driven fixed bridge task only as a legacy fallback.
+Driver selection follows [ADR 0001](docs/decisions/0001-event-driven-connector.md):
+
+1. prefer an independently started [Codex App Server](https://learn.chatgpt.com/docs/app-server) with one dedicated connector-owned task;
+2. keep private Desktop owner IPC disabled by default, available only as an explicitly authorized, exact-version compatibility experiment;
+3. retain the heartbeat-driven fixed bridge task only as legacy compatibility, not the primary event-driven architecture.
+
+This is capability selection before submission, not automatic transport fallback
+after an ambiguous write. Interactive MCP remains explicit pull/send in the
+current workflow. Claude native Channels are a separately validated candidate;
+Grok managed-session execution requires its own opt-in.
+
+The [official Codex SDK](https://learn.chatgpt.com/docs/codex-sdk) is also a
+managed-work driver candidate: TypeScript supports local-thread automation/CI;
+the stable Python SDK controls a local App Server with a pinned runtime. It may
+reduce protocol-maintenance work but does not inject into arbitrary existing
+Desktop tasks. Keep the current driver and its durable reconciliation/receipt
+coverage for this PR; validate SDK turn identity, reconciliation, approvals,
+sandbox observability, and receipt semantics before a later replacement.
+
+For Grok, [official ACP](https://docs.x.ai/build/cli/headless-scripting.md) is a
+future managed-driver alternative to final-JSON headless output. Structured
+session events may improve integration, but example timeout/cleanup is not
+durable receipt or ambiguous-start recovery. It does not authorize arbitrary
+TUI injection, raw stderr forwarding, or bypassing local approvals.
 
 Desktop owner IPC is a private, version-coupled surface. The compatibility gate does not prove the peer process ID or signature, so the connector fails closed when protocol compatibility is uncertain. AIChat does not promise that an active Desktop task remains externally writable across Codex App releases. Codex App Server documents `thread/resume`, `turn/start`, streamed turn notifications, and `thread/read`, but the official documentation marks the app-server command and WebSocket transport experimental and unsupported for production workloads. A separately started App Server also does not automatically attach to the private owner process of an already-running Desktop task.
+
+The same official page documents stdio and Unix control-socket transports in
+[Protocol](https://learn.chatgpt.com/docs/app-server#protocol); its
+[remote Code Mode host section](https://learn.chatgpt.com/docs/app-server#connect-a-remote-code-mode-host)
+retains the command/WebSocket production warning. Both statements matter:
+documented transport support does not make AIChat's integration production-ready.
 
 ### Plugin quick start
 
