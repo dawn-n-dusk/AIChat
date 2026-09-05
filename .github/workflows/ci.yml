@@ -90,7 +90,7 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install Windows package test dependency
-        run: python -m pip install --upgrade pip pytest
+        run: python -m pip install --upgrade pip pytest && python -m pip install ./adapters/mcp
       - name: Run Windows package static tests
         run: python -m pytest deploy/windows/tests/test_windows_package.py -q
       - name: Run protected bootstrap import with Windows PowerShell 5.1
@@ -99,6 +99,9 @@ jobs:
       - name: Run Codex plugin MCP refresh regression with Windows PowerShell 5.1
         shell: pwsh
         run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File deploy/windows/tests/test_plugin_mcp_autoload.ps1
+      - name: Run MCP stdio diagnostic contract with Windows PowerShell 5.1
+        shell: pwsh
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File deploy/windows/tests/test_mcp_stdio_diagnostic.ps1
       - name: Run real-state recovery chain with Windows PowerShell 5.1
         shell: pwsh
         run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File deploy/windows/tests/test_recovery_real_state_e2e.ps1

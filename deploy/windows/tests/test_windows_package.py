@@ -19,6 +19,7 @@ def test_required_windows_package_files_exist() -> None:
         "uninstall.ps1",
         "rollback.ps1",
         "run-adapter.ps1",
+        "diagnose-mcp-stdio.ps1",
         "config.example.json",
         "adapter-settings.example.json",
     }
@@ -184,6 +185,143 @@ def test_codex_plugin_mcp_is_explicitly_enabled_and_slow_start_safe() -> None:
     assert entry["command"] == "uvx"
     assert entry["startup_timeout_sec"] >= 60
     assert entry["tool_timeout_sec"] == 30
+
+
+def test_mcp_stdio_diagnostic_is_pinned_redacted_and_ci_wired() -> None:
+    probe_path = ROOT / "diagnose-mcp-stdio.ps1"
+    functional = ROOT / "tests" / "test_mcp_stdio_diagnostic.ps1"
+    workflow = (REPOSITORY_ROOT / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    )
+    probe = probe_path.read_text(encoding="utf-8")
+    test = functional.read_text(encoding="utf-8")
+    plugin = json.loads(
+        (REPOSITORY_ROOT / "plugins" / "aichat" / ".mcp.json").read_text(
+            encoding="utf-8"
+        )
+    )["mcpServers"]["aichat"]
+
+    assert functional.is_file()
+    assert "test_mcp_stdio_diagnostic.ps1" in workflow
+    assert "powershell.exe -NoProfile -ExecutionPolicy Bypass" in workflow
+    assert '$PSVersionTable.PSVersion.Major -ne 5' in test
+
+    assert plugin["command"] == "uvx"
+    assert plugin["args"] == [
+        "--from",
+        "git+https://github.com/dawn-n-dusk/AIChat.git@main#subdirectory=adapters/mcp",
+        "aichat-mcp",
+    ]
+    assert f'"{plugin["args"][1]}"' in probe
+    assert '@("--from", $script:AIChatMcpExpectedSource, "aichat-mcp")' in probe
+    env_block = re.search(
+        r"\$script:AIChatMcpExpectedEnvironmentNames\s*=\s*@\((.*?)\n\)",
+        probe,
+        re.DOTALL,
+    )
+    assert env_block is not None
+    assert re.findall(r'"([A-Z0-9_]+)"', env_block.group(1)) == plugin["env_vars"]
+    startup_default = re.search(
+        r"\[int\]\$StartupTimeoutMilliseconds\s*=\s*(\d+)", probe
+    )
+    tool_default = re.search(
+        r"\[int\]\$ToolTimeoutMilliseconds\s*=\s*(\d+)", probe
+    )
+    assert startup_default is not None
+    assert tool_default is not None
+    assert int(startup_default.group(1)) == plugin["startup_timeout_sec"] * 1000
+    assert int(tool_default.group(1)) == plugin["tool_timeout_sec"] * 1000
+    assert '$fields.ContainsKey($name)' in probe
+    assert '$fields.Count -ne 8' in probe
+    assert '[string]$fields["startup_timeout_sec"] -ceq "60"' in probe
+    assert '[string]$fields["tool_timeout_sec"] -ceq "30"' in probe
+    assert 'environment_equivalence = "unproven_cross_process"' in probe
+    assert 'if (-not $attested)' in probe
+    assert 'Get-AIChatCommandApplication -Name "uvx"' in probe
+
+    methods = re.findall(r'method\s*=\s*"([^"]+)"', probe)
+    assert methods == [
+        "initialize",
+        "notifications/initialized",
+        "tools/list",
+        "tools/call",
+        "tools/call",
+    ]
+    assert probe.count('$script:AIChatMcpProbeIdentityCallCount++') == 1
+    assert 'name = "aichat_identity"' in probe
+    assert "aichat_send_message" not in probe
+    assert "aichat_reply" not in probe
+
+    expected_stages = [
+        "command_attestation",
+        "package_start",
+        "initialize",
+        "initialized",
+        "tools_list",
+        "dispatch",
+        "identity",
+        "result_frame",
+        "shutdown",
+    ]
+    declared_stages = re.findall(
+        r'\[pscustomobject\]\[ordered\]@\{ name = "([^"]+)";', probe
+    )
+    assert declared_stages[: len(expected_stages)] == expected_stages
+    for error_code in (
+        "command_attestation_failed",
+        "uvx_unavailable",
+        "package_start_failed",
+        "package_bootstrap_failed",
+        "timeout",
+        "invalid_framing",
+        "protocol_invalid",
+        "identity_tool_missing",
+        "dispatch_preflight_failed",
+        "identity_call_failed",
+        "identity_contract_invalid",
+        "stderr_output",
+        "shutdown_failed",
+        "internal_error",
+    ):
+        assert f'"{error_code}"' in probe
+    for field in (
+        "response_body_output",
+        "agent_id_output",
+        "server_output",
+        "path_output",
+        "token_output",
+        "relay_message_sent",
+        "aichat_config_mutation_performed",
+        "aichat_channel_mutation_performed",
+    ):
+        assert f"{field} = $false" in probe
+    assert 'mutation_scope = "aichat_config_and_channel"' in probe
+    assert "package_cache_writes_possible = $true" in probe
+    for field in (
+        "identity_agent_object",
+        "identity_relay_string",
+        "identity_token_not_exposed",
+    ):
+        assert field in probe
+    assert "ConvertTo-AIChatAsciiJson" in probe
+    assert "[Console]::Out.WriteLine('{\"contract_version\":1" in probe
+    for writer in ("Set-Content", "Add-Content", "Out-File", "WriteAllText"):
+        assert writer not in probe
+
+    for scenario in (
+        'Scenario "identity_success"',
+        'Scenario "timeout"',
+        'Scenario "invalid_framing"',
+        'Scenario "stderr"',
+        'Scenario "attestation_mismatch"',
+        'Scenario "package_early_exit"',
+        'Scenario "real_fastmcp"',
+    ):
+        assert scenario in test
+    assert "python -m aichat_mcp.server" in test
+    assert 'self.path != "/v1/me"' in test
+    assert "left a child process behind" in test
+    assert "exposed a canary" in test
 
 
 def test_installer_refreshes_only_installer_owned_codex_plugin_state() -> None:
