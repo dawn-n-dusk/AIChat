@@ -106,6 +106,18 @@ probe launches the installed interpreter (`sys.executable -I -B -u -m
 aichat_mcp.server`), not `uvx`, an SDK client, or a mocked FastMCP server. Missing
 MCP dependencies fail the run; tests do not skip them.
 
+Only the stdlib-only `stdout-close-then-exit` and `stdout-closed-alive` synthetic
+fixtures use `sys._base_executable`. CPython's Windows venv redirector duplicates
+the standard handles and retains them while waiting for its child, so closing
+the child's stdout alone cannot expose EOF through that wrapper. These two
+fixtures therefore start the native base interpreter directly. Production,
+JUnit, and every other fixture still use `sys.executable` and the locked venv
+dependencies. The base interpreter must be an absolute, existing executable
+file; unavailable or invalid metadata fails with
+`NATIVE_FIXTURE_EXECUTABLE_UNAVAILABLE` and null exit fields, never its path.
+No private launcher environment override, timeout substitution, or skip is used.
+Deterministic Windows-wrapper argument tests check this exact selection boundary.
+
 On Linux/macOS, from `adapters/mcp`:
 
 ```bash

@@ -42,6 +42,7 @@ class Phase(str, Enum):
 class Code(str, Enum):
     INTERNAL = "HARNESS_INTERNAL"
     SPAWN = "CHILD_SPAWN_FAILED"
+    NATIVE_EXECUTABLE = "NATIVE_FIXTURE_EXECUTABLE_UNAVAILABLE"
     WRITE = "STDIN_WRITE_FAILED"
     WRITE_TIMEOUT = "STDIN_WRITE_TIMEOUT"
     READ = "STDIO_READ_FAILED"
@@ -259,6 +260,27 @@ class LoopbackIdentity:
             require(not stopper.is_alive() and not self.thread.is_alive(), Phase.CLEANUP, Code.HTTP_SERVER)
 
 
+def child_arguments(mode: str | None) -> list[str]:
+    executable = sys.executable
+    if mode in {"stdout-close-then-exit", "stdout-closed-alive"}:
+        executable = getattr(sys, "_base_executable", None)
+        try:
+            valid = (
+                type(executable) is str
+                and bool(executable)
+                and Path(executable).is_absolute()
+                and Path(executable).is_file()
+                and os.access(executable, os.X_OK)
+            )
+        except (OSError, ValueError):
+            valid = False
+        require(valid, Phase.SPAWN, Code.NATIVE_EXECUTABLE)
+    arguments = [executable, "-I", "-B", "-u"]
+    if mode is None:
+        return arguments + ["-m", "aichat_mcp.server"]
+    return arguments + [str(FIXTURES / "stdio_conformance_boundary_child.py"), mode]
+
+
 class StdioChild:
     def __init__(self, root: Path, environment: dict[str, str], mode: str | None = None) -> None:
         self.condition = threading.Condition()
@@ -270,11 +292,7 @@ class StdioChild:
         self.forced_cleanup = False
         self.stdout_exit_waited = False
         self.workers: list[threading.Thread] = []
-        self.arguments = [sys.executable, "-I", "-B", "-u"]
-        if mode is None:
-            self.arguments += ["-m", "aichat_mcp.server"]
-        else:
-            self.arguments += [str(FIXTURES / "stdio_conformance_boundary_child.py"), mode]
+        self.arguments = child_arguments(mode)
         try:
             self.process = subprocess.Popen(
                 self.arguments,
@@ -582,6 +600,43 @@ def test_production_stdio_identity_errors_are_tool_errors_and_redacted(tmp_path,
             child.finish()
         require(not child.forced_cleanup, Phase.SHUTDOWN, Code.FORCED_CLEANUP, expected_exit=0, actual_exit=child.process.returncode)
         relay.check(1)
+
+
+def test_windows_venv_wrapper_is_bypassed_only_for_native_stdout_fixtures(monkeypatch):
+    base_executable = getattr(sys, "_base_executable", None)
+    launcher = r"C:\synthetic-venv\Scripts\python.exe"
+    monkeypatch.setattr(sys, "executable", launcher)
+    for mode in (
+        None, "junit-native-exits", "early-exit", "exit-on-eof", "ignore-eof",
+        "silent", "stdout-noise", "stdout-flood", "stderr-flood",
+        "stdout-close-then-exit", "stdout-closed-alive",
+    ):
+        expected = base_executable if mode in {"stdout-close-then-exit", "stdout-closed-alive"} else launcher
+        arguments = child_arguments(mode)
+        require(arguments[:4] == [expected, "-I", "-B", "-u"], Phase.HARNESS, Code.ISOLATION)
+        tail = ["-m", "aichat_mcp.server"] if mode is None else [str(FIXTURES / "stdio_conformance_boundary_child.py"), mode]
+        require(arguments[4:] == tail, Phase.HARNESS, Code.ISOLATION)
+
+
+def test_missing_base_interpreter_fails_native_fixtures_without_changing_venv_modes(monkeypatch):
+    monkeypatch.delattr(sys, "_base_executable", raising=False)
+    for mode in ("stdout-close-then-exit", "stdout-closed-alive"):
+        with expect_failure(Phase.SPAWN, Code.NATIVE_EXECUTABLE):
+            child_arguments(mode)
+    for mode in (None, "junit-native-exits", "early-exit", "exit-on-eof", "ignore-eof", "silent", "stdout-noise", "stdout-flood", "stderr-flood"):
+        require(child_arguments(mode)[0] == sys.executable, Phase.HARNESS, Code.ISOLATION)
+
+
+def test_invalid_native_interpreter_is_a_fixed_path_free_failure(tmp_path, monkeypatch):
+    for executable in (None, False, "", "relative-python", str(tmp_path), str(tmp_path / "missing-python")):
+        monkeypatch.setattr(sys, "_base_executable", executable)
+        for mode in ("stdout-close-then-exit", "stdout-closed-alive"):
+            with expect_failure(Phase.SPAWN, Code.NATIVE_EXECUTABLE):
+                child_arguments(mode)
+    monkeypatch.setattr(sys, "_base_executable", sys.executable)
+    monkeypatch.setattr(os, "access", lambda *args: False)
+    with expect_failure(Phase.SPAWN, Code.NATIVE_EXECUTABLE):
+        child_arguments("stdout-closed-alive")
 
 
 @pytest.mark.parametrize("mode,code", [
