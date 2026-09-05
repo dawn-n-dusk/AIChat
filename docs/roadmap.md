@@ -2,6 +2,11 @@
 
 This roadmap is ordered by learning value, not calendar date. The project should earn complexity through real cross-machine use.
 
+Current restart point: [project handoff — 2026-09-05](handoffs/2026-09-05-project-handoff.md).
+It records the frozen Windows/MCP diagnostic boundary, the evidence still
+missing for a two-host loop, and the architecture choices the next maintainer
+must reassess before further field attempts.
+
 ## V0 — prove the communication loop
 
 Goal: two independently operated agents can exchange project context without changing their primary AI workflow.

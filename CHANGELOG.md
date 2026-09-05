@@ -115,6 +115,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Add the 2026-09-05 project handoff with the accepted repository and Windows
+  field evidence, PR #42 freeze and CI failure, non-mergeable boundaries,
+  candidate connector architectures, security constraints, and exact two-host
+  acceptance still required before claiming autonomous Mac/Windows operation.
 - Add a standalone Windows PowerShell 5.1 read-only diagnostic for recovery
   `protected_paths_invalid` results. Its fixed version-1 ASCII JSON contract
   identifies only the allowlisted phase, ancestor/protected-root/state-root
