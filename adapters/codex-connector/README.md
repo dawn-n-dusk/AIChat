@@ -10,6 +10,21 @@ It can resume the configured session and start a turn, but it does not prove
 attachment to an already-open Codex Desktop UI owner. Use a dedicated
 connector-owned session and do not edit that session concurrently in Desktop.
 
+[ADR 0001](../../docs/decisions/0001-event-driven-connector.md) is the
+architecture decision for design issue #44 (2026-09-05). It selects a
+stable AIChat sidecar/product-driver contract, not a new engine. The independent
+stdio integration remains pinned/pre-release; private owner IPC is
+non-default/non-stable, interactive MCP is explicit read/write, and heartbeat is
+legacy. The [two-host acceptance plan](../../docs/validation/connector-two-host-acceptance.md)
+does not authorize a field request or any state/service migration.
+
+The [official SDK](https://learn.chatgpt.com/docs/codex-sdk) is a later
+managed-work driver candidate, not arbitrary existing Desktop-task injection.
+Retain the current driver's durable reconciliation/receipt coverage in this PR.
+Before replacement, verify SDK turn identity, reconciliation, approvals/sandbox
+observability, and durable evidence; do not equate a stable vendor SDK with an
+accepted AIChat adapter.
+
 ## Default safety posture
 
 - The connector is disabled until `AICHAT_CODEX_CONNECTOR_ENABLED=true`.
@@ -51,15 +66,59 @@ The connector persists:
   proof migrate as reply-ineligible;
 - sender turn-budget entries;
 - at most one pending model reply, queued lifecycle statuses, and bounded
-  policy-blocked outbound quarantine records;
-- App Server ambiguous/accepted/completed turn records.
+  policy-blocked outbound quarantine records.
+
+The App Server driver separately persists turn records with the existing phase
+literals `ambiguous`, `accepted`, and `completed`. Logical pre-send/attempting,
+unknown outcome, and terminal are explanatory labels, not replacement disk
+values. Driver persistence is not the connector cursor or the relay's outbound
+storage acknowledgement.
+
+Phase `completed` includes failed/interrupted outcomes. Local success requires
+`completionStatus=completed`; phase alone must not become a successful-work claim.
+Neither terminal fact establishes relay storage or Mac receipt.
 
 Before a built-in driver writes `turn/start`, it persists an ambiguous-attempt
 record. A post-write timeout or disconnect never falls through to a second
 transport. Recovery uses stable delivery markers and `thread/read` to reconcile
 the original turn. Stable event and Relay idempotency keys make resend after a
-network or checkpoint failure safe, although AIChat cannot promise exactly-once
-local tool side effects inside a model turn.
+network or checkpoint failure safe for the same persisted outbound payload only;
+they do not authorize resubmitting an ambiguous model turn. AIChat cannot promise
+exactly-once local tool side effects inside a model turn.
+
+### Receipt hardening contract — included in this PR
+
+Within the existing `src`, extract product-neutral receipt-evidence validation:
+construct a fresh allowlisted receipt, enforce strict fields and exact
+delivery/thread/host binding, and reject invalid evidence before a delivery
+checkpoint or driver acknowledgement. `accepted` alone cannot claim `running`;
+legacy receipts without `turnId` establish acceptance only. A turn ID is necessary
+to associate running evidence, not sufficient proof of current execution.
+
+Keep intake `fetched`/`filtered` separate from driver evidence, connector
+checkpoint/ack, and egress `pending`/`relay-stored`/`quarantined`/`resolved`.
+Safely filtered intake does not need a product acceptance receipt. Outbound
+recovery replays the same persisted payload and idempotency key, never a newly
+generated answer; quarantined or dropped output is not published output.
+
+The first PR does not change connector disk schema **version 5** or the existing
+driver store. The old frozen field **v2** is a deployment namespace, not this
+repository's state schema. Existing migration descriptions elsewhere are not
+instructions to run a migration as part of this work.
+
+CLI/loader failures, including argument parsing, must expose fixed phase/code
+diagnostics and safe logger projections. `safeFailureCode` uses an explicit enum,
+not arbitrary `AICHAT_*` passthrough or raw exception text. CI results and field
+acceptance are tracked separately; this scope description certifies neither.
+
+Full two-host acceptance requires the approved manifest's planned
+restart/offline/reconnect/duplicate-wake subcases with zero extra turns/results,
+connector/driver/relay identity reconciliation, drained queues, zero orphan
+Node/Codex/PowerShell children, and absent shared canaries. A happy path alone
+is PARTIAL. Required but unapproved drills are NOT RUN and leave acceptance
+incomplete; they never authorize a blind retry or an operation on frozen state.
+
+### Existing locking and egress recovery
 
 One OS-level loopback lock protects the fixed channel/session mapping and a
 second independently derived loopback lock protects the canonical state-file
@@ -101,9 +160,14 @@ that the task has no visible in-progress turn. Marker extraction accepts the
 legacy `userMessage.text` form and current `userMessage.content` text forms;
 the exact line must occur within one recognized text segment and is never
 assembled across content blocks. Unknown, mixed, non-text, or conflicting
-representations fail closed. App Server
-is still experimental and runs independently of Codex Desktop. Do not describe
-this path as a stable API for arbitrary existing UI conversations.
+representations fail closed. App Server runs independently of Codex Desktop;
+AIChat's integration is pinned/pre-release. The official
+[Protocol](https://learn.chatgpt.com/docs/app-server#protocol) documents stdio and
+Unix control sockets, while
+[Connect a remote Code Mode host](https://learn.chatgpt.com/docs/app-server#connect-a-remote-code-mode-host)
+warns that the app-server command and WebSocket transport are experimental and
+unsupported for production workloads. Preserve both facts. Do not describe this
+path as a stable API for arbitrary existing UI conversations.
 
 ### Desktop owner IPC — explicit experiment
 

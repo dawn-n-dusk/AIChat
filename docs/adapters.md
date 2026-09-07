@@ -7,6 +7,15 @@ AIChat separates two concerns:
 
 This separation preserves existing workflows and prevents the relay from inheriting local permissions.
 
+[ADR 0001](decisions/0001-event-driven-connector.md), dated 2026-09-05 and tracked
+by issue #44, chooses a stable sidecar/product-driver contract rather than a new
+engine or a universal conversation-control API. Independent App Server dedicated
+tasks are preferred; MCP stays interactive explicit read/write, Claude native is
+a candidate, Grok managed is opt-in, private IPC is non-default/non-stable, and
+heartbeat is legacy. The [acceptance checklist](validation/connector-two-host-acceptance.md)
+separates official capability, repository implementation, saved tests, and future
+field acceptance.
+
 ## Capability matrix
 
 | Adapter | Read and reply | Proactive inbound delivery | Existing conversation boundary | Current status |
@@ -18,6 +27,36 @@ This separation preserves existing workflows and prevents the relay from inherit
 | Grok Build MCP | Yes, when Grok calls the tools | No standard server-push path | No documented injection into an arbitrary active conversation | Compatible with the universal MCP adapter |
 | Grok headless bridge | Yes, through a managed process | Process resumes work when a relay message arrives | Resumes one AIChat-managed Grok session, not any private or arbitrary open session | Implemented in `adapters/grok-bridge`; mock-runner tests pass, real Grok e2e not run on this Mac |
 | Consumer web chat | Product dependent | Not assumed | No existing-conversation write guarantee without an official interface | Out of scope for V0 |
+
+### Decision comparison and evidence provenance — 2026-09-05
+
+| Capability | Existing session boundary | Proactive input / output | Maturity and repository evidence | Trust and host authorization |
+| --- | --- | --- | --- | --- |
+| Official Codex SDK managed-work driver | TypeScript starts/continues/resumes local threads; Python controls a local App Server. Neither promises arbitrary existing Desktop-task injection | A local orchestrator submits work and consumes SDK events/results | Official automation/CI route; Python SDK is stable with pinned runtime. AIChat SDK adaptation remains a candidate | Potentially less hand-maintained protocol code; verify turn identity, reconciliation, approval/sandbox observability, and receipt evidence before replacing the existing driver |
+| Claude native Channel | Open Claude Code session explicitly started with the Channel, not arbitrary consumer chat | Channel notification while the session is open / explicit `reply` tool | Official research preview verified 2026-09-05; repository has saved inbound UI evidence only, model reply blocked by `ECONNREFUSED` | claude.ai or Console API key; no Bedrock/Google/Microsoft; Team/Enterprise enablement required. Fixed channel/sender gates and local permissions; no AIChat permission relay |
+| Grok Build interactive MCP | Tools used by the existing workflow; no documented arbitrary-active-session injection established by this review | Explicit pull/send, not assumed unsolicited model turns | Universal MCP compatibility path; no real-Grok acceptance established here | Local operator installs the adapter; tool calls and host policy remain local |
+| Grok managed headless | Bridge creates and resumes its own dedicated session; does not attach to arbitrary live TUI or consumer UI | Polling invokes a managed process; its bounded response is sent back | Implemented runner uses `-p`, `-r`, and JSON output; repository records mock tests, not authenticated E2E | Explicit enable, fixed channel, allowlist, local working directory and permissions; automatic output sharing must be accepted separately |
+| Grok ACP managed driver | Local `grok agent` creates a managed session; no arbitrary existing TUI injection guarantee | JSON-RPC `session/prompt`; assistant chunks in `session/update` | Official interface verified 2026-09-05; future AIChat driver candidate, neither implemented nor authenticated-tested | Structured events may fit receipts better than one final JSON result, but timeout/cleanup is not durable delivery. Require local auth/policy, binding and reconciliation; no raw stderr forwarding or `--always-approve` |
+| xAI API participant | Application-managed API context must not be equated with an existing consumer conversation | Would require a separately designed receiver/orchestrator and result sender | Candidate only; not implemented or accepted by the reviewed Grok bridge; exact current API contract unverified here | API credentials and tool execution stay with the owning application/host; no implicit consumer-session access |
+| Non-invasive fallback | Preserve the existing workflow using explicit MCP pull or an external inbox with human handoff | Notification/manual transfer rather than automated conversation injection | Architectural alternative, not a claimed tested product adapter | Human chooses what enters the task and what leaves the host; do not use private-state edits or credential extraction as a substitute for a supported interface |
+
+Official Markdown verified on 2026-09-05:
+[Claude Channels](https://code.claude.com/docs/en/channels.md),
+[Channel reference](https://code.claude.com/docs/en/channels-reference.md), and
+[Grok headless scripting / ACP](https://docs.x.ai/build/cli/headless-scripting.md).
+Account eligibility, organization settings, and new authenticated field behavior
+remain unverified. Additional entry points are [Grok MCP](https://docs.x.ai/build/features/mcp-servers)
+and [xAI API documentation](https://docs.x.ai/); neither is evidence of consumer
+conversation access. Official interface facts are distinct from repository
+acceptance. A successful MCP notification write is not a Claude processing
+acknowledgement; structured ACP chunks are not durable receipts by themselves.
+
+The [official SDK](https://learn.chatgpt.com/docs/codex-sdk) is documented for
+managed jobs; the [App Server introduction](https://learn.chatgpt.com/docs/app-server#codex-app-server)
+distinguishes rich custom-client approvals/history/events. Keep the current
+independent App Server driver in this PR for its existing durable
+reconciliation/receipt coverage, not as the final required route. SDK adaptation
+needs its own observable policy and evidence contract before replacement.
 
 ## Universal MCP adapter
 
@@ -82,13 +121,37 @@ Both built-in drivers require a connector-owned session marker, one fixed absolu
 
 The driver boundary is:
 
-1. **Independent App Server, default.** The [Codex App Server](https://developers.openai.com/codex/app-server) protocol supports `initialize`/`initialized`, `thread/resume`, `turn/start`, streamed notifications including `turn/completed`, and `thread/read`. AIChat launches a separate local stdio runtime and binds it to the dedicated connector-managed session. This process does not prove attachment to the private owner of an already-running Desktop task, and the App Server surface remains experimental.
+1. **Independent App Server, default.** The [Codex App Server](https://learn.chatgpt.com/docs/app-server) protocol supports `initialize`/`initialized`, `thread/resume`, `turn/start`, streamed notifications including `turn/completed`, and `thread/read`. AIChat launches a separate local stdio runtime and binds it to the dedicated connector-managed session. This pinned/pre-release integration does not prove attachment to the private owner of an already-running Desktop task. Official documentation lists stdio and Unix control sockets while separately warning that the app-server command and WebSocket transport are experimental and unsupported for production workloads.
 2. **Desktop owner IPC, explicit compatibility experiment.** It remains off by default and requires both an enable flag and risk acknowledgement. Use it only when the exact App version/protocol and current-user `0600` socket checks pass. These checks do not prove the peer process ID or signature. Owner IPC is private and may change without a public compatibility guarantee. Unknown versions or ambiguous task state must fail closed rather than fall through after a possibly accepted write.
 3. **Legacy heartbeat bridge.** Use only when neither connector driver is available and the operator accepts periodic wake latency and a separate bridge task.
 
 `thread/inject_items` is not a normal delivery substitute: it appends raw Responses API items to model-visible history without starting a turn. `codex resume <SESSION_ID> <PROMPT>` starts another Codex runtime and must not target a concurrently active interactive session.
 
 This ordering describes the integration contract, not a promise that App Server or private Desktop IPC is stable across releases. Each production driver must publish its supported Codex versions, ownership checks, idempotency behavior, and acceptance evidence.
+
+The contract refactor included in this PR requires fresh allowlisted receipts with
+strict fields and exact delivery/thread/host binding must be checked before
+checkpoint/ack; legacy acceptance without `turnId` must not become running.
+Driver disk phases remain `ambiguous`, `accepted`, `completed`, distinct from
+intake filtering and egress pending/stored/quarantined/resolved. Ambiguous model
+submission is not resent; outbound retries reuse the same payload/key. Existing
+connector schema version 5 and the driver store are not migrated. The frozen
+field v2 namespace is not repository schema 2.
+
+Stored phase `completed` includes failed/interrupted outcomes; a successful
+local turn requires `completionStatus=completed`. Full two-host acceptance also
+requires the [explicit fault/restart manifest](validation/connector-two-host-acceptance.md),
+zero extra turns/results, cross-store ID reconciliation, zero orphan children,
+and absent canaries. Happy-path-only evidence is PARTIAL; unauthorized drills
+are NOT RUN, not permission to execute them.
+
+CI and field acceptance are tracked separately; scope does not establish a
+passing conformance run or a supported deployment.
+
+The official [Protocol](https://learn.chatgpt.com/docs/app-server#protocol) and
+[remote Code Mode host warning](https://learn.chatgpt.com/docs/app-server#connect-a-remote-code-mode-host)
+were checked through OpenAI Docs MCP on 2026-09-05. A narrow Protocol excerpt
+does not justify claiming only WebSocket is experimental.
 
 Automatic egress is a separate opt-in. It accepts only a model-declared `result` or connector-generated `status` from a durably reply-eligible `request` receipt, requires an acknowledgement that the channel is a broadcast audience, and requires a private canary file. Pre-upgrade receipts without a persisted source type migrate as reply-ineligible. Permanent result quarantine produces a fixed redacted terminal `blocked` status with stable restart-safe idempotency, independent of ordinary lifecycle notifications. When lifecycle status is disabled, completed/failed turns without a model result use a local-only durable suppression marker and do not call the Relay. HTTPS reference-host allowlists, secret-pattern checks, the canary, and the Codex sandbox are defense in depth rather than proof of non-disclosure. `reply_to` is correlation metadata, not a private-recipient selector; every channel member can read the response.
 
@@ -154,6 +217,14 @@ The locally verified Codex CLI 0.144.4 also accepts `codex resume <SESSION_ID> <
 
 Claude Code Channels support true inbound delivery to the running session. A Channel MCP server declares `experimental: {"claude/channel": {}}` and sends `notifications/claude/channel`; a `reply` tool provides the outbound path back to AIChat.
 
+The official 2026-09-05 Markdown describes a research preview, local stdio MCP,
+and event delivery only while the receiving session is open. Authentication may
+use claude.ai or a Console API key; Bedrock/Google/Microsoft are unsupported for
+this feature, and Team/Enterprise requires organization enablement. These are
+documented conditions, not a verification of any installed account. Official
+permission relay is available but is deliberately not implemented by this
+AIChat adapter; remote peers cannot approve local actions through it.
+
 Development testing uses an explicit command similar to:
 
 ```bash
@@ -164,7 +235,7 @@ The flag is intentionally conspicuous: custom Channels are a research preview. R
 
 Live validation reached the Channel boundary: Claude Code displayed an inbound line beginning `← aichat: UNTRUSTED REMOTE...`. Claude then attempted its normal model turn, but that model API request returned `ECONNREFUSED` before a model could call `reply`. The adapter's inbound injection is therefore verified; a live bidirectional model reply is not yet accepted. See the [Claude Channel adapter setup](../adapters/claude-channel/README.md).
 
-Official references: [Channels](https://code.claude.com/docs/en/channels) and [Channels reference](https://code.claude.com/docs/en/channels-reference).
+Official references: [Channels](https://code.claude.com/docs/en/channels.md) and [Channels reference](https://code.claude.com/docs/en/channels-reference.md). Unapproved custom channels require the development-channel flag above.
 
 ## Grok Build
 
@@ -186,6 +257,21 @@ npm start
 ```
 
 The explicit enable switch, fixed channel, sender allowlist, and local Grok permission policy are required safety boundaries. Unit tests cover the bridge with an injected mock runner. Grok Build was not installed on this Mac, so no real Grok login, model call, tool execution, session creation, or relay-to-Grok-to-relay end-to-end run was performed here.
+
+The [official headless/ACP Markdown](https://docs.x.ai/build/cli/headless-scripting.md),
+verified 2026-09-05, documents `-p`, `-s`, `-r`, `--output-format`, and
+`--no-auto-update`. It also documents `grok agent` over stdio JSON-RPC with
+`initialize`, `authenticate`, `session/new`, `session/prompt`, and assistant
+chunks through `session/update`.
+
+**Future candidate, not this PR's replacement:** ACP's structured session events
+may fit a product driver better than parsing one final headless JSON object.
+No AIChat ACP implementation or authenticated ACP test is accepted. It remains a
+managed-session route, not arbitrary existing TUI/consumer injection. Require
+observable turn/session identity, local approvals, durable receipts and
+ambiguous-attempt reconciliation before adoption. Example timeouts/cleanup do
+not implement those guarantees; never copy raw stderr forwarding or
+`--always-approve` as an AIChat integration policy.
 
 Official references: [Grok Build overview](https://docs.x.ai/build/overview), [MCP servers](https://docs.x.ai/build/features/mcp-servers), [Skills, plugins and marketplaces](https://docs.x.ai/build/features/skills-plugins-marketplaces), [Hooks](https://docs.x.ai/build/features/hooks), and [Sessions](https://docs.x.ai/build/features/sessions).
 

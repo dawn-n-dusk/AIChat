@@ -143,9 +143,13 @@ jobs:
         run: python -m unittest discover -s deploy/macos/tests -v
 
   mcp-adapter:
-    name: MCP adapter (Linux, Python 3.11)
-    runs-on: ubuntu-latest
+    name: MCP adapter (${{ matrix.os }}, Python 3.11)
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
     defaults:
       run:
         working-directory: adapters/mcp
@@ -161,8 +165,23 @@ jobs:
           cache-dependency-glob: adapters/mcp/uv.lock
       - name: Install locked test dependencies
         run: uv sync --locked --extra test
-      - name: Run MCP adapter tests
-        run: uv run --locked --extra test python -m pytest
+      - name: Run production MCP subprocess conformance
+        if: runner.os != 'Windows'
+        run: .venv/bin/python -I -B -m pytest tests/test_stdio_conformance.py --tb=short --show-capture=no -o junit_logging=no --junitxml=stdio-conformance.xml
+      - name: Run production MCP subprocess conformance with Windows PowerShell 5.1
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tests/stdio_fixtures/invoke_stdio_conformance_ps51.ps1
+          exit $LASTEXITCODE
+      - name: Save conformance results and safe failure codes
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: mcp-stdio-conformance-${{ matrix.os }}
+          path: adapters/mcp/stdio-conformance.xml
+      - name: Run MCP adapter unit tests
+        run: uv run --locked --no-sync python -m pytest --ignore=tests/test_stdio_conformance.py
       - name: Build MCP adapter distributions
         run: uv build
 
@@ -190,6 +209,29 @@ jobs:
       - name: Run adapter tests
         run: npm test
         working-directory: adapters/${{ matrix.adapter }}
+
+  codex-contract-boundaries:
+    name: Codex receipt and CLI boundaries (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    defaults:
+      run:
+        working-directory: adapters/codex-connector
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: adapters/codex-connector/package-lock.json
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Run portable receipt, driver, and CLI boundary tests
+        run: node --test test/delivery-contract.test.js test/driver-boundary.test.js test/cli.test.js
 
   e2e:
     name: Real relay E2E (Linux)
