@@ -7,6 +7,11 @@ if ($PSVersionTable.PSEdition -ne 'Desktop' -or $PSVersionTable.PSVersion.Major 
 
 try {
     Set-Location -LiteralPath (Join-Path $PSScriptRoot '../..')
+    $shellVersion = $PSVersionTable.PSVersion
+    $runtimeEvidence = '{{"phase":"test-runtime","shell":"WindowsPowerShell","version":[{0},{1},{2},{3}]}}' -f (
+        [int]$shellVersion.Major, [int]$shellVersion.Minor, [int]$shellVersion.Build, [int]$shellVersion.Revision
+    )
+    Write-Output $runtimeEvidence
     & '.venv\Scripts\python.exe' -I -B -m pytest tests/test_stdio_conformance.py --tb=short --show-capture=no -o junit_logging=no --junitxml=stdio-conformance.xml
     $testExitCode = $LASTEXITCODE
     if ($null -eq $testExitCode) {

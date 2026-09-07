@@ -6,6 +6,48 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Documentation — 2026-09-07 evidence and manifest preparation
+
+- Correct the follow-up review's P2: historical production identity calls and
+  tool discovery did not prove message read/write execution. Keep `1fa9aad`
+  message read/write coverage NOT RUN and add representative real-subprocess
+  read/write/read-back conformance with separately reviewed revision/CI counts.
+  Do not infer channel create/join execution or field acceptance from it.
+- Add a [dated foundation ledger](docs/validation/connector-foundation-2026-09-07.md)
+  with exact baseline/implementation revisions, historical CI job/run links and
+  counts, retained `51be4bb`/`61e1638` failures, and a 2026-09-07 metadata snapshot:
+  PR #45 open/non-Draft, 36/36 checks successful, no formal GitHub approval or
+  merge at that observation. Later exact-SHA documentation review/CI and merge
+  evidence are appended to PR #45 rather than pre-filled here.
+- Record the bounded 2026-09-07 independent implementation review with no
+  reproducible P0/P1/P2 in its reviewed diff, plus local Node `v25.9.0` boundary
+  125/125 and synthetic driver recovery 9/9 passes, zero failures/skips. This is
+  not GitHub approval or documentation-delta review. MCP/CI inspection in that
+  review was static and is distinct from the separate test-agent verification.
+- Record the test agent's 2026-09-07 historical-run/JUnit recount and local
+  reruns: Node `20.20.2` portable 86/86 across 3 files; Python `3.11.15`, pytest
+  `8.4.2`, MCP `1.29.0` conformance 41 including production 5, plus unit 38.
+  Preserve the distinction from the reviewer's broader 125+9 scope and from
+  the older CI runs. CI Python/Node versions are recorded in the ledger;
+  PowerShell Desktop 5.1's gate passed, but its full patch/build remains unknown.
+  Documentation review and new-revision CI are not pre-filled as passed.
+- Include a version-only PowerShell 5.1 test-wrapper banner alongside the
+  documentation/evidence changes. New exact shell-version evidence belongs in
+  PR #45 only after the new revision's CI succeeds; it does not fill the older
+  `1fa9aad` patch/build gap. The ledger records historical runner/image versions
+  without inferring shell builds. Product source, workflow definitions,
+  protocol, schemas, and deployment behavior are unchanged by this follow-up.
+- Bind supported stage-1/2 checklist items to historical `1fa9aad` evidence,
+  without checking unverified runtime details or any field authorization/result.
+  Preserve the 2026-09-05 handoff and evidence cutoff.
+- Add a non-executable [operator manifest template](docs/validation/connector-two-host-manifest-template.md),
+  `DRAFT_NOT_AUTHORIZED`, for one request across H0 + R1–R6: separately planned
+  connector/runtime restarts, connector-only offline/reconnect, exactly two
+  extra wake hints, one turn/result, passive or explicit Mac receipt observation,
+  bounded cleanup, and canary checks. Private bindings stay private; missing
+  observable boundaries are BLOCKED, not repaired by approval. All field cases
+  remain NOT RUN. No product runtime, protocol, schema, or deployment behavior changes.
+
 ### Documentation — 2026-09-05 connector foundation
 
 - Record design issue #44 in [ADR 0001](docs/decisions/0001-event-driven-connector.md)

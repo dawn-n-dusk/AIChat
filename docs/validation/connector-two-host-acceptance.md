@@ -8,6 +8,28 @@ review checklist, not an executable probe or permission to operate an existing
 installation. Documentation, implementation, isolated tests, CI review, and
 field acceptance must be reported separately.
 
+**2026-09-07 documentation update:** see the [foundation evidence ledger](connector-foundation-2026-09-07.md)
+for exact revisions, run/job links, historical counts, and refreshed metadata.
+The 2026-09-05 cutoff above is retained for the historical baseline below.
+Checked stage-1/2 items apply only to the recorded 2026-09-05 implementation at
+`1fa9aad304c64943b2fcb6593071656222a2ef9c`, not arbitrary future HEADs, this
+documentation/version-banner delta, formal GitHub approval, or field acceptance. The dated
+refresh snapshot records PR #45 open/non-Draft and unmerged with 36/36 successful
+checks and empty GitHub reviews. The ledger separately records the completed
+2026-09-07 bounded implementation review and separate test-agent local reruns
+and historical hosted/artifact recount. Exact shell/interpreter gaps and
+documentation/banner-delta review remain open in that record. Reopen affected items
+if new evidence contradicts the record. Append subsequent exact-SHA
+documentation review/CI and merge evidence to PR #45, not a self-referential
+document commit; no unknown SHA or new CI outcome is pre-filled here.
+
+The [operator manifest template](connector-two-host-manifest-template.md) is
+`DRAFT_NOT_AUTHORIZED`. All stage-3 authorization and field results remain
+unfilled/NOT RUN; preparing a template or offering to relay a Windows message
+does not approve it. This round adds documentation/evidence and a version-only
+PowerShell test-wrapper banner, not product runtime, protocol, schema, or
+deployment behavior changes.
+
 ## Frozen baseline and provenance
 
 | Item | Recorded evidence | What it does not prove |
@@ -43,8 +65,15 @@ inspection, or requests against that installation.
 ## Stage 1 — ADR and contract
 
 - [x] ADR recorded before implementation.
-- [ ] Record the exact first-PR revision and reviewed scope when supplied.
-- [ ] Review the synchronized architecture, capability, and acceptance documents.
+- [x] Record the exact first-PR revision and historically reviewed scope in the
+  dated foundation ledger: `1fa9aad304c64943b2fcb6593071656222a2ef9c`.
+- [x] Record the 2026-09-05 independent review of synchronized architecture,
+  capability, and acceptance documents within the foundation PR scope.
+- [ ] Complete the current independent review of the documentation/banner delta and
+  record its actual revision and CI; prior review is not current approval.
+- [ ] Record maintainer merge disposition and exact revision evidence in PR #45;
+  record any formal GitHub approval separately from independent agent review.
+  The unmerged/empty-review metadata is a dated snapshot, not a permanent status.
 
 The contract is sidecar plus product drivers, with an independent App Server
 dedicated task preferred. AIChat stdio remains pinned/pre-release despite
@@ -71,44 +100,68 @@ session; AIChat does not adopt the officially available permission-relay path.
 ## Stage 2 — minimal refactor, hermetic conformance, CI review
 
 The following requirements define this PR's scope. Checkboxes record reviewed
-evidence, not merely code presence. CI and field acceptance are tracked separately.
+historical evidence at the exact implementation revision named above, not merely
+code presence. The ledger distinguishes that evidence from current pending
+rechecks. CI and field acceptance are tracked separately.
 
 ### Receipt and diagnostic contract
 
-- [ ] Extract product-neutral receipt validation inside existing `src`; no new
+- [x] Extract product-neutral receipt validation inside existing `src`; no new
   engine, disk schema change, or driver-store migration.
-- [ ] Construct fresh allowlisted receipts; enforce strict fields and exact
+- [x] Construct fresh allowlisted receipts; enforce strict fields and exact
   delivery/thread/host binding before delivery checkpoint or driver ack.
-- [ ] Reject malformed or mismatched required evidence before checkpoint/ack;
+- [x] Reject malformed or mismatched required evidence before checkpoint/ack;
   never preserve unknown fields in the fresh allowlisted receipt or diagnostics.
-- [ ] Preserve legacy acceptance without `turnId` as accepted-only; never infer
+- [x] Preserve legacy acceptance without `turnId` as accepted-only; never infer
   running from `accepted` alone. Associate running evidence with a concrete turn.
-- [ ] Exercise ambiguous submission/reconciliation without a second model start;
+- [x] Exercise ambiguous submission/reconciliation without a second model start;
   replay outbound work only with the same persisted payload/idempotency key.
   Driver phase `completed` includes failed/interrupted outcomes; successful
   completion requires `completionStatus=completed`, not the phase alone.
-- [ ] Verify CLI and loader failures, including argument parsing, expose fixed
+- [x] Verify CLI and loader failures, including argument parsing, expose fixed
   phase/code values, safe logger projections, and an explicit `safeFailureCode`
   enum rather than arbitrary `AICHAT_*` strings or raw exceptions.
-- [ ] Check diagnostic redaction with synthetic hostile inputs; do not introduce
+- [x] Check diagnostic redaction with synthetic hostile inputs; do not introduce
   real credentials, private paths, or field logs into fixtures or test output.
+- [x] Observe queued recovery rejection with a fixed safe diagnostic while
+  preserving the original rejection and avoiding duplicate model starts;
+  historical P1/P2 corrections and final fixture review are retained in the ledger.
 
 ### Actual production MCP subprocess, isolated transport
 
-- [ ] Launch the actual production MCP subprocess against an isolated loopback
+- [x] Launch the actual production MCP subprocess against an isolated loopback
   HTTP fixture; do not substitute an in-memory tool call or label the unexecuted
   PR #42 FastMCP fixture as this test.
-- [ ] Cover protocol initialization, tool discovery, representative explicit
-  reads/writes, framing, error handling, and subprocess lifecycle using synthetic
-  fixture identities/messages, with no live relay, model, or field product.
-- [ ] Keep home/config/state temporary and isolated; do not discover or reuse
+- [x] Cover protocol initialization, tool discovery, actual identity calls,
+  framing, identity error handling, and subprocess lifecycle using synthetic
+  fixtures. At `1fa9aad`, listing send/read/create/join tools did not execute them.
+- [ ] Verify representative message read/write/read-back calls through the actual
+  production subprocess and loopback HTTP fixture at a newly reviewed revision.
+  Historical `1fa9aad` message read/write coverage is NOT RUN; new evidence must
+  be bound to the follow-up SHA and CI, not added to the historical 41/5 counts.
+- [x] Keep home/config/state temporary and isolated; do not discover or reuse
   host credentials, existing sessions, or frozen deployment namespaces.
-- [ ] Use locked dependencies on Linux, macOS, and Windows and run the conformance
-  command under Windows PowerShell 5.1. Record exact runner/shell/runtime versions.
-- [ ] Capture expected and actual exit codes and safe structured diagnostics so
+- [x] Record the historical locked Linux/macOS/Windows conformance jobs and
+  Windows PowerShell 5.1 wrapper execution at the implementation revision.
+- [ ] Independently reconcile exact runner/image, shell build, Python, and Node
+  runtime versions from job evidence; platform labels are insufficient. The
+  ledger now records exact CI Python/Node versions and a passing Desktop 5.1
+  gate, but full PowerShell patch/build and other listed gaps remain unverified.
+  Runner/image versions are recorded, not used to guess shell versions. Keep
+  this item unchecked until exact new evidence is recorded in
+  [PR #45](https://github.com/dawn-n-dusk/AIChat/pull/45) after the version-only
+  banner's new CI run. Do not backfill old unknown versions from that run.
+- [x] Capture expected and actual exit codes and safe structured diagnostics so
   a first failing fixture cannot erase the evidence needed for diagnosis.
-- [ ] Review actual CI results and the exact tested revision. A planned matrix,
-  submitted job, passing unrelated unit test, or draft PR is not green review.
+- [x] Record the historically reviewed CI results and exact tested implementation
+  revision, with refreshed 36/36 check metadata and run/job references.
+- [x] Record the 2026-09-07 test agent's independent historical job/six-artifact
+  recount and local portable/MCP results in their distinct scopes. These do not
+  certify the documentation delta's CI or the still-missing exact versions.
+
+A planned matrix, submitted job, unrelated passing unit test, or Draft PR is not
+green review. Historical independent agent review is not formal GitHub approval;
+current documentation changes need their own revision, review, and CI evidence.
 
 This is hermetic subprocess conformance, **not a field probe**. Any missing
 platform result remains pending. Save redacted outcome summaries with revision,
@@ -125,6 +178,15 @@ test manifest MUST explicitly enumerate the initiating request, planned restart
 points, offline/reconnect interval, duplicate-wake count, process cleanup,
 canary checks, and evidence requirements below. A manifest is not executable
 authorization until those exact actions are approved.
+
+Use the non-executable template linked above to prepare, not run, this stage.
+Prove that the chosen restart/offline/wake boundaries can be observed and the
+actions performed through reviewed supported mechanisms before the request is
+sent. The checklist does not assert pause or injection hooks in the current
+driver. Missing capability or an unobservable boundary is **BLOCKED**, even if
+an operator is willing to authorize it; address implementation gaps separately
+through code, tests, CI, and review. Fill exact timing windows, deadlines, and
+bounded cleanup limits before seeking approval.
 
 - [ ] Record the fresh authorization and exact reviewed revision before work.
 - [ ] Use independently owned, non-sensitive dedicated tasks with locally chosen
@@ -154,7 +216,7 @@ services. Schedule fault boundaries in advance; do not improvise a failure retry
 | --- | --- | --- |
 | H0: correlated useful result | One Mac request reaches Windows and returns to Mac | Initiating request IDs = 1; Windows source envelopes = 1; confirmed turn IDs = 1; successful terminal outcome has `completionStatus=completed`; relay-stored result messages = 1; `reply_to` matches the request; Mac logical result receipts = 1 and durable cursor includes that result |
 | R1: planned restart | Enumerate one connector restart and one owned driver/runtime restart at declared durable boundaries; record exact ordering | Same delivery/thread/host and original request remain bound; total turn IDs stay 1 and total result messages stay 1; no blind model resubmission |
-| R2: offline/reconnect | Enumerate one offline interval and one reconnect with the same approved participants | Cursor recovery consumes the original identities; additional model turns = 0 and additional result messages = 0 |
+| R2: offline/reconnect | Enumerate one offline interval and one reconnect within the test-owned connector transport, with the same approved participants; no system-wide network interruption or extra restart | Cursor recovery consumes the original identities; additional model turns = 0 and additional result messages = 0 |
 | R3: duplicate wake | Deliver exactly two additional wake hints for the same request, without reposting the request | Wake duplicates may trigger reads, but additional model turns = 0, additional results = 0, and additional logical Mac receipts = 0 |
 | R4: identity reconciliation | Reconcile connector delivery/event records, driver thread/host/turn records, and relay request/result IDs after each subcase and at exit | One consistent source-to-turn-to-result chain; unmatched/orphaned identities = 0; unresolved model attempts = 0; pending or unresolved quarantined output = 0 for successful acceptance. Retained matched records need not be deleted |
 | R5: drain and clean exit | Drain work and exit all manifest-owned Node, Codex, PowerShell, and fixture child processes on both hosts | Queued unsent work = 0; orphan child processes = 0 after a bounded, recorded cleanup wait. Do not terminate unrelated processes to satisfy the count |

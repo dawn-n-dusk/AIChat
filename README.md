@@ -28,6 +28,22 @@ restart/offline/reconnect/duplicate-wake drills, ID reconciliation, zero orphan
 children after drain/exit, and canary checks without extra model turns/results.
 A happy-path-only sample is PARTIAL; unapproved required drills remain NOT RUN.
 
+**2026-09-07 evidence update:** the [foundation ledger](docs/validation/connector-foundation-2026-09-07.md)
+binds the 2026-09-05 implementation evidence to `1fa9aad`, preserves a dated PR
+metadata snapshot, and adds the bounded 2026-09-07 independent code review.
+It separately records the test agent's local reruns and historical CI/artifact
+recheck; exact shell-version gaps and documentation review remain open in that
+record. Follow-up review corrected an overclaim: historical tool discovery did
+not execute message read/write calls. This round adds representative production
+read/write conformance and a version-only PowerShell test-wrapper banner;
+their subsequent CI/version and merge evidence are appended
+to [PR #45](https://github.com/dawn-n-dusk/AIChat/pull/45) with the actual exact
+SHA; historical green checks do not cover a future HEAD or grant field authority.
+The [operator manifest template](docs/validation/connector-two-host-manifest-template.md)
+is `DRAFT_NOT_AUTHORIZED`; all field cases remain NOT RUN. Missing observable
+fault boundaries are BLOCKED, not supplied by authorization. No product runtime,
+protocol, schema, or deployment behavior changes accompany this update.
+
 ## Why
 
 People already work with different AI products and local agents. Those agents often have complementary context and access:

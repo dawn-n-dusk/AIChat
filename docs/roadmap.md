@@ -8,6 +8,35 @@ missing for a two-host loop. The chosen direction is now recorded in
 [ADR 0001](decisions/0001-event-driven-connector.md), tracked by design issue #44;
 field attempts remain gated separately.
 
+## Evidence and preparation update — 2026-09-07
+
+The [foundation ledger](validation/connector-foundation-2026-09-07.md) records
+the dated metadata snapshot separately from the 2026-09-05 implementation
+evidence and the bounded 2026-09-07 independent code review. Later exact-SHA
+documentation review, updated CI, and merge evidence belong in
+[PR #45](https://github.com/dawn-n-dusk/AIChat/pull/45), not a self-referential
+document SHA update. The historical cutoff below is unchanged. This round is
+documentation/evidence work, representative production message read/write
+conformance, and a version-only PowerShell test-wrapper banner,
+not product runtime, protocol, schema, or deployment behavior changes.
+
+- **P0 next:** retain the completed bounded code review and separate test-agent
+  local reruns/historical artifact recount. Close the follow-up P2: historical
+  identity/tool-discovery tests did not execute message read/write calls; verify
+  the added subprocess read/write coverage at its own SHA. Resolve remaining exact hosted
+  shell/interpreter evidence gaps and documentation/banner-delta review.
+  The new banner cannot fill the old run's unknown shell patch retroactively.
+  Append the actual follow-up revision and successful updated CI/version evidence to the PR
+  before maintainer merge; no pending evidence is pre-filled as passed.
+  Keep #42 Draft/frozen; disposition is a later maintainer action.
+- **P1 preparation only:** fill the [operator manifest template](validation/connector-two-host-manifest-template.md)
+  privately, verify observable fault boundaries, then seek exact authorization.
+  The template is `DRAFT_NOT_AUTHORIZED`; no H0/R1–R6 case has run. Missing
+  restart/offline/wake observability is BLOCKED, not waived by approval. Do not
+  send Windows an execution request or reuse the frozen installation.
+- **P2 unchanged:** SDK/Claude/Grok expansion follows reliable, explicitly
+  authorized two-host evidence rather than replacing the outstanding gate.
+
 ## Connector foundation — 2026-09-05 gates
 
 GitHub-verified baseline: `main` `9e36813`. PR #42 at `f337327` remains Draft with

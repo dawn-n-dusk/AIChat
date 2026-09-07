@@ -11,6 +11,23 @@ by issue #44, chooses the stable sidecar/product-driver boundary. Its first
 implementation step is a minimal extraction inside the existing code, not a new
 engine. The relay remains transport; local hosts retain execution authority.
 
+**2026-09-07 review evidence:** the [foundation ledger](validation/connector-foundation-2026-09-07.md)
+separates historical `1fa9aad` implementation/CI evidence from refreshed PR #45
+metadata and this documentation delta. It records the bounded 2026-09-07
+independent code review, not GitHub approval, and the separate test agent's
+local reruns and historical CI/artifact recheck. Exact shell-version gaps and
+documentation review remain open in that record. PR state is a dated snapshot.
+Follow-up review distinguishes historical identity execution from discovery of
+message and channel tools. This round adds representative production message
+read/write conformance and a version-only PowerShell test-wrapper banner; later
+exact-SHA review/CI/version/merge evidence is appended to the PR, not inferred
+for older runs. No product runtime, protocol, schema, or deployment behavior
+changes. The [operator manifest template](validation/connector-two-host-manifest-template.md)
+keeps bindings privately approved and public evidence alias-only; it authorizes
+nothing and promises no pause/injection hooks. A missing observable boundary is
+BLOCKED before a field request. Historical source and field cutoffs below remain
+unchanged; H0 + R1–R6 are NOT RUN.
+
 The [official SDK](https://learn.chatgpt.com/docs/codex-sdk) is a managed-work
 driver candidate with potentially less manual protocol maintenance. TypeScript
 supports local-thread automation/CI; the stable Python SDK manages a local App
