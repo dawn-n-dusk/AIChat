@@ -176,7 +176,7 @@ jobs:
           exit $LASTEXITCODE
       - name: Save conformance results and safe failure codes
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: mcp-stdio-conformance-${{ matrix.os }}
           path: adapters/mcp/stdio-conformance.xml
