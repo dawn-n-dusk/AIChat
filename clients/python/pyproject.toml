@@ -25,10 +25,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-websocket = ["websockets>=14,<17"]
+websocket = ["websockets>=14,<18"]
 test = [
   "pytest>=8,<9",
-  "websockets>=14,<17",
+  "websockets>=14,<18",
 ]
 
 [project.scripts]
